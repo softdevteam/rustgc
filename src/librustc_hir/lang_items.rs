@@ -217,6 +217,9 @@ language_item_table! {
     PartialOrdTraitLangItem,     "partial_ord",        partial_ord_trait,       Target::Trait;
 
     ManageableContentsTraitLangItem, "manageable_contents", manageable_contents_trait, Target::Trait;
+    VecWithCapacityGCFnLangItem,    "vec_with_capacity_gc",       vec_with_capacity_fn,            Target::Fn;
+    VecPushGc,                 "vec_push_gc",    vec_push_gc_fn,       Target::Fn;
+
     // A number of panic-related lang items. The `panic` item corresponds to
     // divide-by-zero and various panic cases with `match`. The
     // `panic_bounds_check` item is for indexing arrays.
