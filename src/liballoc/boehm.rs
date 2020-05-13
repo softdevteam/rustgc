@@ -8,9 +8,25 @@ use core::alloc::*;
 
 #[derive(Debug)]
 pub struct BoehmAllocator;
+pub(crate) struct BoehmGcAllocator;
 
 #[unstable(feature = "allocator_api", issue = "32838")]
-unsafe impl AllocRef for BoehmAllocator {
+unsafe impl GlobalAlloc for BoehmAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        GC_malloc_uncollectable(layout.size()) as *mut u8
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
+        GC_free(ptr as *mut c_void);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, _: Layout, new_size: usize) -> *mut u8 {
+        GC_realloc(ptr as *mut c_void, new_size) as *mut u8
+    }
+}
+
+#[unstable(feature = "allocator_api", issue = "32838")]
+unsafe impl AllocRef for BoehmGcAllocator {
     fn alloc(&mut self, layout: Layout, _init: AllocInit) -> Result<MemoryBlock, AllocErr> {
         let ptr = unsafe { GC_malloc(layout.size()) } as *mut u8;
         assert!(!ptr.is_null());

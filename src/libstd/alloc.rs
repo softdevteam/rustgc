@@ -234,6 +234,9 @@ unsafe impl AllocRef for System {
 }
 static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
+#[stable(feature = "alloc_system_type", since = "1.28.0")]
+pub use alloc_crate::boehm::BoehmAllocator as Boehm;
+
 /// Registers a custom allocation error hook, replacing any that was previously registered.
 ///
 /// The allocation error hook is invoked when an infallible memory allocation fails, before

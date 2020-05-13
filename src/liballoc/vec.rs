@@ -76,6 +76,7 @@ use crate::borrow::{Cow, ToOwned};
 use crate::boxed::Box;
 use crate::collections::TryReserveError;
 use crate::raw_vec::RawVec;
+use crate::boehm::BoehmGcAllocator;
 
 /// A contiguous growable array type, written `Vec<T>` but pronounced 'vector'.
 ///
