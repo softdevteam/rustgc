@@ -72,6 +72,7 @@ use core::ops::{self, Index, IndexMut, RangeBounds};
 use core::ptr::{self, NonNull};
 use core::slice::{self, SliceIndex};
 
+use crate::boehm::BoehmGcAllocator;
 use crate::borrow::{Cow, ToOwned};
 use crate::boxed::Box;
 use crate::collections::TryReserveError;
@@ -305,6 +306,39 @@ pub struct Vec<T> {
 ////////////////////////////////////////////////////////////////////////////////
 // Inherent methods
 ////////////////////////////////////////////////////////////////////////////////
+
+#[cfg_attr(not(bootstrap), lang = "vec_with_capacity_gc")]
+#[stable(feature = "rust1", since = "1.0.0")]
+#[allow(missing_docs)]
+#[allow(unused_variables)]
+pub fn vec_with_capacity_gc<T>(capacity: usize) -> Vec<T> {
+    let temp_buf = RawVec::with_capacity_in(capacity, BoehmGcAllocator);
+    unsafe { Vec { buf: RawVec::from_raw_parts(temp_buf.ptr(), temp_buf.capacity()), len: 0 } }
+}
+
+#[cfg_attr(not(bootstrap), lang = "vec_push_gc")]
+#[stable(feature = "rust1", since = "1.0.0")]
+#[allow(missing_docs)]
+#[allow(unused_variables)]
+pub fn push<T>(vec: &mut Vec<T>, value: T) {
+    // This will panic or abort if we would allocate > isize::MAX bytes
+    // or if the length increment would overflow for zero-sized types.
+    if vec.len == vec.buf.capacity() {
+        let mut tmp_buf = unsafe {
+            RawVec::from_raw_parts_in(vec.buf.ptr(), vec.buf.capacity(), BoehmGcAllocator)
+        };
+        tmp_buf.reserve(vec.len(), 1);
+
+        // we must now reconstruct the original buffer with the new capacity
+        // as it will be unaware of the allocation.
+        vec.buf = unsafe { RawVec::from_raw_parts(tmp_buf.ptr(), tmp_buf.capacity()) };
+    }
+    unsafe {
+        let end = vec.as_mut_ptr().add(vec.len);
+        ptr::write(end, value);
+        vec.len += 1;
+    }
+}
 
 impl<T> Vec<T> {
     /// Constructs a new, empty `Vec<T>`.
