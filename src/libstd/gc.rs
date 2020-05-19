@@ -1,12 +1,12 @@
-#![stable(feature = "rust1", since = "1.0.0")]
+#![unstable(feature = "gc", issue = "none")]
 #![allow(missing_docs)]
 
-#[stable(feature = "rust1", since = "1.0.0")]
+#[unstable(feature = "gc", issue = "none")]
 use crate::alloc_crate::boehm::GC_gcollect;
-#[stable(feature = "rust1", since = "1.0.0")]
+#[unstable(feature = "gc", issue = "none")]
 pub use core::gc::*;
 
-#[stable(feature = "rust1", since = "1.0.0")]
+#[unstable(feature = "gc", reason = "gc", issue="none")]
 pub fn force_collect() {
     unsafe { GC_gcollect() };
 }
