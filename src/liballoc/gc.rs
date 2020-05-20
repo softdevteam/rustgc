@@ -3,6 +3,7 @@ use core::alloc::Layout;
 use core::any::Any;
 use core::ffi::c_void;
 use core::fmt;
+use core::gc::ManageableContents;
 use core::marker::PhantomData;
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
@@ -10,6 +11,7 @@ use core::ptr::{self, NonNull};
 
 use crate::alloc::{AllocInit, AllocRef};
 use crate::boehm::{self, BoehmGcAllocator};
+use crate::vec::Vec;
 
 /// A garbage collected pointer.
 ///
@@ -132,8 +134,18 @@ impl<T> GcBox<T> {
             NonNull::new_unchecked((base_ptr.add(1)) as *mut GcBox<MaybeUninit<T>>)
         }
     }
+}
 
-    fn register_finalizer(&mut self) {
+trait GcBoxExt {
+    fn register_finalizer(&mut self);
+}
+
+impl<T: ManageableContents> GcBoxExt for GcBox<Vec<T>> {
+    fn register_finalizer(&mut self) {}
+}
+
+impl<T> GcBoxExt for GcBox<T> {
+    default fn register_finalizer(&mut self) {
         unsafe extern "C" fn fshim<T>(obj: *mut c_void, _meta: *mut c_void) {
             ManuallyDrop::drop(&mut *(obj as *mut ManuallyDrop<T>));
         }

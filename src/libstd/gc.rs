@@ -9,7 +9,7 @@ pub use core::gc::*;
 #[unstable(feature = "gc", issue = "none")]
 pub use alloc_crate::gc::*;
 
-#[unstable(feature = "gc", reason = "gc", issue="none")]
+#[unstable(feature = "gc", reason = "gc", issue = "none")]
 pub fn force_collect() {
     unsafe { GC_gcollect() };
 }
