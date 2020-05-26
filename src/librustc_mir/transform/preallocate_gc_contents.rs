@@ -46,11 +46,7 @@ impl GcPatcher<'tcx> {
                     let name = self.tcx.def_path_str(callee_def_id);
                     let new_term = match name.as_str() {
                         VEC_WITH_CAPACITY => {
-                            if !ty_impls_manageable_contents(
-                                substs.type_at(0),
-                                self.tcx,
-                                self.param_env,
-                            ) {
+                            if elem_ty_must_drop(substs.type_at(0), self.tcx, self.param_env) {
                                 continue;
                             }
                             let new_callee = self.tcx.lang_items().vec_with_capacity_fn().unwrap();
@@ -65,11 +61,7 @@ impl GcPatcher<'tcx> {
                             }
                         }
                         VEC_PUSH => {
-                            if !ty_impls_manageable_contents(
-                                substs.type_at(0),
-                                self.tcx,
-                                self.param_env,
-                            ) {
+                            if elem_ty_must_drop(substs.type_at(0), self.tcx, self.param_env) {
                                 continue;
                             }
                             let new_callee = self.tcx.lang_items().vec_push_gc_fn().unwrap();
@@ -93,20 +85,20 @@ impl GcPatcher<'tcx> {
     }
 }
 
-fn ty_impls_manageable_contents<'tcx>(
-    ty: Ty<'tcx>,
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-) -> bool {
-    let prealloc_trait_id = tcx.lang_items().manageable_contents_trait().unwrap();
-    let obligation = predicate_for_trait_def(
-        tcx,
-        param_env,
-        traits::ObligationCause::dummy(),
-        prealloc_trait_id,
-        0,
-        ty,
-        &[],
-    );
-    tcx.infer_ctxt().enter(|infcx| infcx.predicate_must_hold_modulo_regions(&obligation))
+fn elem_ty_must_drop<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+    if !ty.needs_drop(tcx, param_env) {
+        return false;
+    } else {
+        let prealloc_trait_id = tcx.lang_items().manageable_contents_trait().unwrap();
+        let obligation = predicate_for_trait_def(
+            tcx,
+            param_env,
+            traits::ObligationCause::dummy(),
+            prealloc_trait_id,
+            0,
+            ty,
+            &[],
+        );
+        tcx.infer_ctxt().enter(|infcx| infcx.predicate_must_hold_modulo_regions(&obligation))
+    }
 }
