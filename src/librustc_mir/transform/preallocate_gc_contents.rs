@@ -17,8 +17,11 @@ pub struct GcPreallocator;
 
 impl<'tcx> MirPass<'tcx> for GcPreallocator {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, source: MirSource<'tcx>, body: &mut BodyAndCache<'tcx>) {
-        let param_env = tcx.param_env(source.def_id()).with_reveal_all();
+        if !tcx.sess.opts.debugging_opts.gc_destination_propagation {
+            return;
+        }
 
+        let param_env = tcx.param_env(source.def_id()).with_reveal_all();
         GcPatcher { tcx, source, param_env }.run_pass(body);
     }
 }
