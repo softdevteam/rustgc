@@ -973,4 +973,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "link native libraries in the linker invocation (default: yes)"),
     src_hash_algorithm: Option<SourceFileHashAlgorithm> = (None, parse_src_file_hash, [TRACKED],
         "hash algorithm of source files in debug info (`md5`, or `sha1`)"),
+    gc_destination_propagation: bool = (false, parse_bool, [TRACKED],
+        "only enable this if Boehm is the global allocator"),
 }

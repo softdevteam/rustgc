@@ -119,7 +119,9 @@ impl<T> GcBox<T> {
 
         unsafe {
             ptr.copy_from_nonoverlapping(&gcbox, 1);
-            GcBox::register_finalizer(&mut *ptr);
+            if !Self::is_manageable_contents() && Self::needs_drop() {
+                GcBox::register_finalizer(&mut *ptr);
+            }
         }
 
         mem::forget(gcbox);
@@ -134,18 +136,8 @@ impl<T> GcBox<T> {
             NonNull::new_unchecked((base_ptr.add(1)) as *mut GcBox<MaybeUninit<T>>)
         }
     }
-}
 
-trait GcBoxExt {
-    fn register_finalizer(&mut self);
-}
-
-impl<T: ManageableContents> GcBoxExt for GcBox<Vec<T>> {
-    fn register_finalizer(&mut self) {}
-}
-
-impl<T> GcBoxExt for GcBox<T> {
-    default fn register_finalizer(&mut self) {
+    fn register_finalizer(&mut self) {
         unsafe extern "C" fn fshim<T>(obj: *mut c_void, _meta: *mut c_void) {
             ManuallyDrop::drop(&mut *(obj as *mut ManuallyDrop<T>));
         }
@@ -159,6 +151,38 @@ impl<T> GcBoxExt for GcBox<T> {
                 ptr::null_mut(),
             );
         }
+    }
+}
+
+trait IsManageableContents {
+    fn is_manageable_contents() -> bool;
+}
+
+impl<T> IsManageableContents for GcBox<T> {
+    default fn is_manageable_contents() -> bool {
+        false
+    }
+}
+
+impl<T: ManageableContents> IsManageableContents for GcBox<Vec<T>> {
+    fn is_manageable_contents() -> bool {
+        true
+    }
+}
+
+trait NeedsDrop {
+    fn needs_drop() -> bool;
+}
+
+impl<T> NeedsDrop for GcBox<T> {
+    default fn needs_drop() -> bool {
+        mem::needs_drop::<T>()
+    }
+}
+
+impl<T> NeedsDrop for GcBox<Vec<T>> {
+    fn needs_drop() -> bool {
+        mem::needs_drop::<T>()
     }
 }
 
