@@ -331,4 +331,8 @@ language_item_table! {
     Range,                   sym::Range,               range_struct,               Target::Struct;
     RangeToInclusive,        sym::RangeToInclusive,    range_to_inclusive_struct,  Target::Struct;
     RangeTo,                 sym::RangeTo,             range_to_struct,            Target::Struct;
+
+    ManageableContents,      sym::manageable_contents, manageable_contents_trait,  Target::Trait;
+    VecWithCapacityGCFnLangItem,      sym::vec_with_capacity_gc, vec_with_capacity_fn,  Target::Fn;
+    VecPushGc,               sym::vec_push_gc,         vec_push_gc_fn,             Target::Fn;
 }
