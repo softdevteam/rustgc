@@ -16,7 +16,6 @@
 //! never get replaced.
 
 use std::env;
-use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -76,6 +75,10 @@ fn main() {
         cmd.env("RUST_BACKTRACE", "1");
     }
 
+    if let Ok(lint_flags) = env::var("RUSTC_LINT_FLAGS") {
+        cmd.args(lint_flags.split_whitespace());
+    }
+
     if target.is_some() {
         // The stage0 compiler has a special sysroot distinct from what we
         // actually downloaded, so we just always pass the `--sysroot` option,
@@ -100,30 +103,6 @@ fn main() {
             || crate_name == Some("compiler_builtins") && stage != "0"
         {
             cmd.arg("-C").arg("panic=abort");
-        }
-
-        // Set various options from config.toml to configure how we're building
-        // code.
-        let debug_assertions = match env::var("RUSTC_DEBUG_ASSERTIONS") {
-            Ok(s) => {
-                if s == "true" {
-                    "y"
-                } else {
-                    "n"
-                }
-            }
-            Err(..) => "n",
-        };
-
-        // The compiler builtins are pretty sensitive to symbols referenced in
-        // libcore and such, so we never compile them with debug assertions.
-        //
-        // FIXME(rust-lang/cargo#7253) we should be doing this in `builder.rs`
-        // with env vars instead of doing it here in this script.
-        if crate_name == Some("compiler_builtins") {
-            cmd.arg("-C").arg("debug-assertions=no");
-        } else {
-            cmd.arg("-C").arg(format!("debug-assertions={}", debug_assertions));
         }
     } else {
         // FIXME(rust-lang/cargo#5754) we shouldn't be using special env vars
@@ -167,22 +146,15 @@ fn main() {
         eprintln!("libdir: {:?}", libdir);
     }
 
-    if let Some(mut on_fail) = on_fail {
-        let e = match cmd.status() {
-            Ok(s) if s.success() => std::process::exit(0),
-            e => e,
-        };
-        println!("\nDid not run successfully: {:?}\n{:?}\n-------------", e, cmd);
-        exec_cmd(&mut on_fail).expect("could not run the backup command");
-        std::process::exit(1);
-    }
+    let start = Instant::now();
+    let status = {
+        let errmsg = format!("\nFailed to run:\n{:?}\n-------------", cmd);
+        cmd.status().expect(&errmsg)
+    };
 
     if env::var_os("RUSTC_PRINT_STEP_TIMINGS").is_some() {
         if let Some(crate_name) = crate_name {
-            let start = Instant::now();
-            let status = cmd.status().unwrap_or_else(|_| panic!("\n\n failed to run {:?}", cmd));
             let dur = start.elapsed();
-
             let is_test = args.iter().any(|a| a == "--test");
             eprintln!(
                 "[RUSTC-TIMING] {} test:{} {}.{:03}",
@@ -191,28 +163,29 @@ fn main() {
                 dur.as_secs(),
                 dur.subsec_millis()
             );
-
-            match status.code() {
-                Some(i) => std::process::exit(i),
-                None => {
-                    eprintln!("rustc exited with {}", status);
-                    std::process::exit(0xfe);
-                }
-            }
         }
     }
 
-    let code = exec_cmd(&mut cmd).unwrap_or_else(|_| panic!("\n\n failed to run {:?}", cmd));
-    std::process::exit(code);
-}
+    if status.success() {
+        std::process::exit(0);
+        // note: everything below here is unreachable. do not put code that
+        // should run on success, after this block.
+    }
+    if verbose > 0 {
+        println!("\nDid not run successfully: {}\n{:?}\n-------------", status, cmd);
+    }
 
-#[cfg(unix)]
-fn exec_cmd(cmd: &mut Command) -> io::Result<i32> {
-    use std::os::unix::process::CommandExt;
-    Err(cmd.exec())
-}
+    if let Some(mut on_fail) = on_fail {
+        on_fail.status().expect("Could not run the on_fail command");
+    }
 
-#[cfg(not(unix))]
-fn exec_cmd(cmd: &mut Command) -> io::Result<i32> {
-    cmd.status().map(|status| status.code().unwrap())
+    // Preserve the exit code. In case of signal, exit with 0xfe since it's
+    // awkward to preserve this status in a cross-platform way.
+    match status.code() {
+        Some(i) => std::process::exit(i),
+        None => {
+            eprintln!("rustc exited with {}", status);
+            std::process::exit(0xfe);
+        }
+    }
 }

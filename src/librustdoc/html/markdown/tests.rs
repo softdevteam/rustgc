@@ -29,8 +29,8 @@ fn test_unique_id() {
         "examples-2",
         "method.into_iter-1",
         "foo-1",
-        "main",
-        "search",
+        "main-1",
+        "search-1",
         "methods",
         "examples-3",
         "method.into_iter-2",
@@ -64,7 +64,7 @@ fn test_lang_string_parse() {
         edition: Option<Edition>,
     ) {
         assert_eq!(
-            LangString::parse(s, ErrorCodes::Yes, true),
+            LangString::parse(s, ErrorCodes::Yes, true, None),
             LangString {
                 should_panic,
                 no_run,
@@ -134,31 +134,32 @@ fn test_header() {
     fn t(input: &str, expect: &str) {
         let mut map = IdMap::new();
         let output =
-            Markdown(input, &[], &mut map, ErrorCodes::Yes, DEFAULT_EDITION, &None).to_string();
+            Markdown(input, &[], &mut map, ErrorCodes::Yes, DEFAULT_EDITION, &None).into_string();
         assert_eq!(output, expect, "original: {}", input);
     }
 
     t(
         "# Foo bar",
-        "<h1 id=\"foo-bar\" class=\"section-header\">\
-      <a href=\"#foo-bar\">Foo bar</a></h1>",
+        "<h1 id=\"foo-bar\" class=\"section-header\"><a href=\"#foo-bar\">Foo bar</a></h1>",
     );
     t(
         "## Foo-bar_baz qux",
-        "<h2 id=\"foo-bar_baz-qux\" class=\"section-\
-      header\"><a href=\"#foo-bar_baz-qux\">Foo-bar_baz qux</a></h2>",
+        "<h2 id=\"foo-bar_baz-qux\" class=\"section-header\">\
+         <a href=\"#foo-bar_baz-qux\">Foo-bar_baz qux</a></h2>",
     );
     t(
         "### **Foo** *bar* baz!?!& -_qux_-%",
         "<h3 id=\"foo-bar-baz--qux-\" class=\"section-header\">\
-      <a href=\"#foo-bar-baz--qux-\"><strong>Foo</strong> \
-      <em>bar</em> baz!?!&amp; -<em>qux</em>-%</a></h3>",
+            <a href=\"#foo-bar-baz--qux-\"><strong>Foo</strong> \
+            <em>bar</em> baz!?!&amp; -<em>qux</em>-%</a>\
+         </h3>",
     );
     t(
         "#### **Foo?** & \\*bar?!*  _`baz`_ ❤ #qux",
         "<h4 id=\"foo--bar--baz--qux\" class=\"section-header\">\
-      <a href=\"#foo--bar--baz--qux\"><strong>Foo?</strong> &amp; *bar?!*  \
-      <em><code>baz</code></em> ❤ #qux</a></h4>",
+             <a href=\"#foo--bar--baz--qux\"><strong>Foo?</strong> &amp; *bar?!*  \
+             <em><code>baz</code></em> ❤ #qux</a>\
+         </h4>",
     );
 }
 
@@ -166,45 +167,40 @@ fn test_header() {
 fn test_header_ids_multiple_blocks() {
     let mut map = IdMap::new();
     fn t(map: &mut IdMap, input: &str, expect: &str) {
-        let output = Markdown(input, &[], map, ErrorCodes::Yes, DEFAULT_EDITION, &None).to_string();
+        let output =
+            Markdown(input, &[], map, ErrorCodes::Yes, DEFAULT_EDITION, &None).into_string();
         assert_eq!(output, expect, "original: {}", input);
     }
 
     t(
         &mut map,
         "# Example",
-        "<h1 id=\"example\" class=\"section-header\">\
-        <a href=\"#example\">Example</a></h1>",
+        "<h1 id=\"example\" class=\"section-header\"><a href=\"#example\">Example</a></h1>",
     );
     t(
         &mut map,
         "# Panics",
-        "<h1 id=\"panics\" class=\"section-header\">\
-        <a href=\"#panics\">Panics</a></h1>",
+        "<h1 id=\"panics\" class=\"section-header\"><a href=\"#panics\">Panics</a></h1>",
     );
     t(
         &mut map,
         "# Example",
-        "<h1 id=\"example-1\" class=\"section-header\">\
-        <a href=\"#example-1\">Example</a></h1>",
+        "<h1 id=\"example-1\" class=\"section-header\"><a href=\"#example-1\">Example</a></h1>",
     );
     t(
         &mut map,
         "# Main",
-        "<h1 id=\"main\" class=\"section-header\">\
-        <a href=\"#main\">Main</a></h1>",
+        "<h1 id=\"main-1\" class=\"section-header\"><a href=\"#main-1\">Main</a></h1>",
     );
     t(
         &mut map,
         "# Example",
-        "<h1 id=\"example-2\" class=\"section-header\">\
-        <a href=\"#example-2\">Example</a></h1>",
+        "<h1 id=\"example-2\" class=\"section-header\"><a href=\"#example-2\">Example</a></h1>",
     );
     t(
         &mut map,
         "# Panics",
-        "<h1 id=\"panics-1\" class=\"section-header\">\
-        <a href=\"#panics-1\">Panics</a></h1>",
+        "<h1 id=\"panics-1\" class=\"section-header\"><a href=\"#panics-1\">Panics</a></h1>",
     );
 }
 
@@ -228,7 +224,7 @@ fn test_markdown_html_escape() {
     fn t(input: &str, expect: &str) {
         let mut idmap = IdMap::new();
         let output =
-            MarkdownHtml(input, &mut idmap, ErrorCodes::Yes, DEFAULT_EDITION, &None).to_string();
+            MarkdownHtml(input, &mut idmap, ErrorCodes::Yes, DEFAULT_EDITION, &None).into_string();
         assert_eq!(output, expect, "original: {}", input);
     }
 

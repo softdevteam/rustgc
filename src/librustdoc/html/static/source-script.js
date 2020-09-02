@@ -1,5 +1,5 @@
 // From rust:
-/* global sourcesIndex */
+/* global search, sourcesIndex */
 
 // Local js definitions:
 /* global addClass, getCurrentValue, hasClass, removeClass, updateLocalStorage */
@@ -140,4 +140,9 @@ function createSourceSidebar() {
     });
 
     main.insertBefore(sidebar, main.firstChild);
+    // Focus on the current file in the source files sidebar.
+    var selected_elem = sidebar.getElementsByClassName("selected")[0];
+    if (typeof selected_elem !== "undefined") {
+        selected_elem.focus();
+    }
 }

@@ -12,8 +12,8 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::string::ToString;
+use std::sync::mpsc::Sender;
 
 macro_rules! try_err {
     ($e:expr, $file:expr) => {
@@ -25,48 +25,27 @@ macro_rules! try_err {
 }
 
 pub trait PathError {
-    fn new<P: AsRef<Path>>(e: io::Error, path: P) -> Self;
-}
-
-pub struct ErrorStorage {
-    sender: Option<Sender<Option<String>>>,
-    receiver: Receiver<Option<String>>,
-}
-
-impl ErrorStorage {
-    pub fn new() -> ErrorStorage {
-        let (sender, receiver) = channel();
-        ErrorStorage { sender: Some(sender), receiver }
-    }
-
-    /// Prints all stored errors. Returns the number of printed errors.
-    pub fn write_errors(&mut self, diag: &rustc_errors::Handler) -> usize {
-        let mut printed = 0;
-        // In order to drop the sender part of the channel.
-        self.sender = None;
-
-        for msg in self.receiver.iter() {
-            if let Some(ref error) = msg {
-                diag.struct_err(&error).emit();
-                printed += 1;
-            }
-        }
-        printed
-    }
+    fn new<S, P: AsRef<Path>>(e: S, path: P) -> Self
+    where
+        S: ToString + Sized;
 }
 
 pub struct DocFS {
     sync_only: bool,
-    errors: Arc<ErrorStorage>,
+    errors: Option<Sender<String>>,
 }
 
 impl DocFS {
-    pub fn new(errors: &Arc<ErrorStorage>) -> DocFS {
-        DocFS { sync_only: false, errors: Arc::clone(errors) }
+    pub fn new(errors: Sender<String>) -> DocFS {
+        DocFS { sync_only: false, errors: Some(errors) }
     }
 
     pub fn set_sync_only(&mut self, sync_only: bool) {
         self.sync_only = sync_only;
+    }
+
+    pub fn close(&mut self) {
+        self.errors = None;
     }
 
     pub fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
@@ -85,24 +64,19 @@ impl DocFS {
         if !self.sync_only && cfg!(windows) {
             // A possible future enhancement after more detailed profiling would
             // be to create the file sync so errors are reported eagerly.
-            let contents = contents.as_ref().to_vec();
             let path = path.as_ref().to_path_buf();
-            let sender = self.errors.sender.clone().unwrap();
-            rayon::spawn(move || match fs::write(&path, &contents) {
-                Ok(_) => {
-                    sender.send(None).unwrap_or_else(|_| {
+            let contents = contents.as_ref().to_vec();
+            let sender = self.errors.clone().expect("can't write after closing");
+            rayon::spawn(move || {
+                fs::write(&path, contents).unwrap_or_else(|e| {
+                    sender.send(format!("\"{}\": {}", path.display(), e)).unwrap_or_else(|_| {
                         panic!("failed to send error on \"{}\"", path.display())
-                    });
-                }
-                Err(e) => {
-                    sender.send(Some(format!("\"{}\": {}", path.display(), e))).unwrap_or_else(
-                        |_| panic!("failed to send non-error on \"{}\"", path.display()),
-                    );
-                }
+                    })
+                });
             });
-            Ok(())
         } else {
-            Ok(try_err!(fs::write(&path, contents), path))
+            try_err!(fs::write(&path, contents), path);
         }
+        Ok(())
     }
 }

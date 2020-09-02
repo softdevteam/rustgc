@@ -1,4 +1,4 @@
-#![deny(intra_doc_link_resolution_failure)]
+#![deny(broken_intra_doc_links)]
 
 // A few tests on anchors.
 
@@ -23,23 +23,23 @@ pub enum Enum {
 /// Like [Foo#hola].
 ///
 /// Or maybe [Foo::f#hola].
-//~^ ERROR `[Foo::f#hola]` has an issue with the link anchor.
+//~^ ERROR `Foo::f#hola` contains an anchor
 pub fn foo() {}
 
 /// Empty.
 ///
 /// Another anchor error: [hello#people#!].
-//~^ ERROR `[hello#people#!]` has an issue with the link anchor.
+//~^ ERROR `hello#people#!` contains multiple anchors
 pub fn bar() {}
 
 /// Empty?
 ///
 /// Damn enum's variants: [Enum::A#whatever].
-//~^ ERROR `[Enum::A#whatever]` has an issue with the link anchor.
+//~^ ERROR `Enum::A#whatever` contains an anchor
 pub fn enum_link() {}
 
 /// Primitives?
 ///
 /// [u32#hello]
-//~^ ERROR `[u32#hello]` has an issue with the link anchor.
+//~^ ERROR `u32#hello` contains an anchor
 pub fn x() {}

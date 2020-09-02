@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::externalfiles::ExternalHtml;
 use crate::html::escape::Escape;
 use crate::html::format::{Buffer, Print};
-use crate::html::render::ensure_trailing_slash;
+use crate::html::render::{ensure_trailing_slash, StylePath};
 
 #[derive(Clone)]
 pub struct Layout {
@@ -36,7 +36,7 @@ pub fn render<T: Print, S: Print>(
     page: &Page<'_>,
     sidebar: S,
     t: T,
-    themes: &[PathBuf],
+    style_files: &[StylePath],
 ) -> String {
     let static_root_path = page.static_root_path.unwrap_or(page.root_path);
     format!(
@@ -52,10 +52,7 @@ pub fn render<T: Print, S: Print>(
     <link rel=\"stylesheet\" type=\"text/css\" href=\"{static_root_path}normalize{suffix}.css\">\
     <link rel=\"stylesheet\" type=\"text/css\" href=\"{static_root_path}rustdoc{suffix}.css\" \
           id=\"mainThemeStyle\">\
-    {themes}\
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"{static_root_path}dark{suffix}.css\">\
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"{static_root_path}light{suffix}.css\" \
-          id=\"themeStyle\">\
+    {style_files}\
     <script src=\"{static_root_path}storage{suffix}.js\"></script>\
     <noscript><link rel=\"stylesheet\" href=\"{static_root_path}noscript{suffix}.css\"></noscript>\
     {css_extension}\
@@ -98,6 +95,7 @@ pub fn render<T: Print, S: Print>(
                            placeholder=\"Click or press ‘S’ to search, ‘?’ for more options…\" \
                            type=\"search\">\
                 </div>\
+                <span class=\"help-button\">?</span>
                 <a id=\"settings-menu\" href=\"{root_path}settings.html\">\
                     <img src=\"{static_root_path}wheel{suffix}.svg\" \
                          width=\"18\" \
@@ -114,7 +112,6 @@ pub fn render<T: Print, S: Print>(
         window.rootPath = \"{root_path}\";\
         window.currentCrate = \"{krate}\";\
     </script>\
-    <script src=\"{root_path}aliases{suffix}.js\"></script>\
     <script src=\"{static_root_path}main{suffix}.js\"></script>\
     {static_extra_scripts}\
     {extra_scripts}\
@@ -142,7 +139,7 @@ pub fn render<T: Print, S: Print>(
             if layout.logo.is_empty() {
                 format!(
                     "<a href='{path}index.html'>\
-                     <div class='logo-container'>\
+                     <div class='logo-container rust-logo'>\
                      <img src='{static_root_path}rust-logo{suffix}.png' alt='logo'></div></a>",
                     path = p,
                     static_root_path = static_root_path,
@@ -173,13 +170,19 @@ pub fn render<T: Print, S: Print>(
         after_content = layout.external_html.after_content,
         sidebar = Buffer::html().to_display(sidebar),
         krate = layout.krate,
-        themes = themes
+        style_files = style_files
             .iter()
-            .filter_map(|t| t.file_stem())
-            .filter_map(|t| t.to_str())
+            .filter_map(|t| {
+                if let Some(stem) = t.path.file_stem() { Some((stem, t.disabled)) } else { None }
+            })
+            .filter_map(|t| {
+                if let Some(path) = t.0.to_str() { Some((path, t.1)) } else { None }
+            })
             .map(|t| format!(
-                r#"<link rel="stylesheet" type="text/css" href="{}.css">"#,
-                Escape(&format!("{}{}{}", static_root_path, t, page.resource_suffix))
+                r#"<link rel="stylesheet" type="text/css" href="{}.css" {} {}>"#,
+                Escape(&format!("{}{}{}", static_root_path, t.0, page.resource_suffix)),
+                if t.1 { "disabled" } else { "" },
+                if t.0 == "light" { "id=\"themeStyle\"" } else { "" }
             ))
             .collect::<String>(),
         suffix = page.resource_suffix,
@@ -207,8 +210,8 @@ pub fn render<T: Print, S: Print>(
             .collect::<String>(),
         filter_crates = if layout.generate_search_filter {
             "<select id=\"crate-search\">\
-            <option value=\"All crates\">All crates</option>\
-        </select>"
+                 <option value=\"All crates\">All crates</option>\
+             </select>"
         } else {
             ""
         },

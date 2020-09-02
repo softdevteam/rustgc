@@ -13,7 +13,6 @@ use crate::header::TestProps;
 use crate::json;
 use crate::util::get_pointer_width;
 use crate::util::{logv, PathBufExt};
-use diff;
 use regex::{Captures, Regex};
 use rustfix::{apply_suggestions, get_suggestions_from_json, Filter};
 
@@ -29,8 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str;
 
+use glob::glob;
 use lazy_static::lazy_static;
-use log::*;
+use tracing::*;
 
 use crate::extract_gdb_version;
 use crate::is_android_gdb_target;
@@ -45,7 +45,7 @@ fn disable_error_reporting<F: FnOnce() -> R, R>(f: F) -> R {
     use winapi::um::winbase::SEM_NOGPFAULTERRORBOX;
 
     lazy_static! {
-        static ref LOCK: Mutex<()> = { Mutex::new(()) };
+        static ref LOCK: Mutex<()> = Mutex::new(());
     }
     // Error mode is a global variable, so lock it so only one thread will change it
     let _lock = LOCK.lock().unwrap();
@@ -114,7 +114,7 @@ pub struct Mismatch {
 
 impl Mismatch {
     fn new(line_number: u32) -> Mismatch {
-        Mismatch { line_number: line_number, lines: Vec::new() }
+        Mismatch { line_number, lines: Vec::new() }
     }
 }
 
@@ -178,27 +178,30 @@ pub fn make_diff(expected: &str, actual: &str, context_size: usize) -> Vec<Misma
     results
 }
 
-fn print_diff(expected: &str, actual: &str, context_size: usize) {
+fn write_diff(expected: &str, actual: &str, context_size: usize) -> String {
+    use std::fmt::Write;
+    let mut output = String::new();
     let diff_results = make_diff(expected, actual, context_size);
     for result in diff_results {
         let mut line_number = result.line_number;
         for line in result.lines {
             match line {
                 DiffLine::Expected(e) => {
-                    println!("-\t{}", e);
+                    writeln!(output, "-\t{}", e).unwrap();
                     line_number += 1;
                 }
                 DiffLine::Context(c) => {
-                    println!("{}\t{}", line_number, c);
+                    writeln!(output, "{}\t{}", line_number, c).unwrap();
                     line_number += 1;
                 }
                 DiffLine::Resulting(r) => {
-                    println!("+\t{}", r);
+                    writeln!(output, "+\t{}", r).unwrap();
                 }
             }
         }
-        println!();
+        writeln!(output).unwrap();
     }
+    output
 }
 
 pub fn run(config: Config, testpaths: &TestPaths, revision: Option<&str>) {
@@ -227,7 +230,7 @@ pub fn run(config: Config, testpaths: &TestPaths, revision: Option<&str>) {
     debug!("running {:?}", testpaths.file.display());
     let props = TestProps::from_file(&testpaths.file, revision, &config);
 
-    let cx = TestCx { config: &config, props: &props, testpaths, revision: revision };
+    let cx = TestCx { config: &config, props: &props, testpaths, revision };
     create_dir_all(&cx.output_base_dir()).unwrap();
 
     if config.mode == Incremental {
@@ -575,8 +578,8 @@ impl<'test> TestCx<'test> {
         if self.props.pp_exact.is_some() {
             // Now we have to care about line endings
             let cr = "\r".to_owned();
-            actual = actual.replace(&cr, "").to_owned();
-            expected = expected.replace(&cr, "").to_owned();
+            actual = actual.replace(&cr, "");
+            expected = expected.replace(&cr, "");
         }
 
         self.compare_source(&expected, &actual);
@@ -624,7 +627,7 @@ impl<'test> TestCx<'test> {
             .arg("-L")
             .arg(&aux_dir)
             .args(&self.props.compile_flags)
-            .envs(self.props.exec_env.clone());
+            .envs(self.props.rustc_env.clone());
         self.maybe_add_external_args(
             &mut rustc,
             self.split_maybe_args(&self.config.target_rustcflags),
@@ -655,8 +658,12 @@ impl<'test> TestCx<'test> {
                  ------------------------------------------\n\
                  {}\n\
                  ------------------------------------------\n\
-                 \n",
-                expected, actual
+                 diff:\n\
+                 ------------------------------------------\n\
+                 {}\n",
+                expected,
+                actual,
+                write_diff(expected, actual, 3),
             ));
         }
     }
@@ -733,7 +740,7 @@ impl<'test> TestCx<'test> {
         let exe_file = self.make_exe_name();
 
         let prefixes = {
-            static PREFIXES: &'static [&'static str] = &["cdb", "cdbg"];
+            static PREFIXES: &[&str] = &["cdb", "cdbg"];
             // No "native rust support" variation for CDB yet.
             PREFIXES
         };
@@ -804,12 +811,12 @@ impl<'test> TestCx<'test> {
     fn run_debuginfo_gdb_test_no_opt(&self) {
         let prefixes = if self.config.gdb_native_rust {
             // GDB with Rust
-            static PREFIXES: &'static [&'static str] = &["gdb", "gdbr"];
+            static PREFIXES: &[&str] = &["gdb", "gdbr"];
             println!("NOTE: compiletest thinks it is using GDB with native rust support");
             PREFIXES
         } else {
             // Generic GDB
-            static PREFIXES: &'static [&'static str] = &["gdb", "gdbg"];
+            static PREFIXES: &[&str] = &["gdb", "gdbg"];
             println!("NOTE: compiletest thinks it is using GDB without native rust support");
             PREFIXES
         };
@@ -868,12 +875,12 @@ impl<'test> TestCx<'test> {
                 .arg(&exe_file)
                 .arg(&self.config.adb_test_dir)
                 .status()
-                .expect(&format!("failed to exec `{:?}`", adb_path));
+                .unwrap_or_else(|_| panic!("failed to exec `{:?}`", adb_path));
 
             Command::new(adb_path)
                 .args(&["forward", "tcp:5039", "tcp:5039"])
                 .status()
-                .expect(&format!("failed to exec `{:?}`", adb_path));
+                .unwrap_or_else(|_| panic!("failed to exec `{:?}`", adb_path));
 
             let adb_arg = format!(
                 "export LD_LIBRARY_PATH={}; \
@@ -890,7 +897,7 @@ impl<'test> TestCx<'test> {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
-                .expect(&format!("failed to exec `{:?}`", adb_path));
+                .unwrap_or_else(|_| panic!("failed to exec `{:?}`", adb_path));
 
             // Wait for the gdbserver to print out "Listening on port ..."
             // at which point we know that it's started and then we can
@@ -915,7 +922,7 @@ impl<'test> TestCx<'test> {
             let Output { status, stdout, stderr } = Command::new(&gdb_path)
                 .args(debugger_opts)
                 .output()
-                .expect(&format!("failed to exec `{:?}`", gdb_path));
+                .unwrap_or_else(|_| panic!("failed to exec `{:?}`", gdb_path));
             let cmdline = {
                 let mut gdb = Command::new(&format!("{}-gdb", self.config.target));
                 gdb.args(debugger_opts);
@@ -1056,11 +1063,11 @@ impl<'test> TestCx<'test> {
         }
 
         let prefixes = if self.config.lldb_native_rust {
-            static PREFIXES: &'static [&'static str] = &["lldb", "lldbr"];
+            static PREFIXES: &[&str] = &["lldb", "lldbr"];
             println!("NOTE: compiletest thinks it is using LLDB with native rust support");
             PREFIXES
         } else {
-            static PREFIXES: &'static [&'static str] = &["lldb", "lldbg"];
+            static PREFIXES: &[&str] = &["lldb", "lldbg"];
             println!("NOTE: compiletest thinks it is using LLDB without native rust support");
             PREFIXES
         };
@@ -1079,15 +1086,38 @@ impl<'test> TestCx<'test> {
         // Switch LLDB into "Rust mode"
         let rust_src_root =
             self.config.find_rust_src_root().expect("Could not find Rust source root");
-        let rust_pp_module_rel_path = Path::new("./src/etc/lldb_rust_formatters.py");
+        let rust_pp_module_rel_path = Path::new("./src/etc/lldb_lookup.py");
         let rust_pp_module_abs_path =
             rust_src_root.join(rust_pp_module_rel_path).to_str().unwrap().to_owned();
 
+        let rust_type_regexes = vec![
+            "^(alloc::([a-z_]+::)+)String$",
+            "^&str$",
+            "^&\\[.+\\]$",
+            "^(std::ffi::([a-z_]+::)+)OsString$",
+            "^(alloc::([a-z_]+::)+)Vec<.+>$",
+            "^(alloc::([a-z_]+::)+)VecDeque<.+>$",
+            "^(alloc::([a-z_]+::)+)BTreeSet<.+>$",
+            "^(alloc::([a-z_]+::)+)BTreeMap<.+>$",
+            "^(std::collections::([a-z_]+::)+)HashMap<.+>$",
+            "^(std::collections::([a-z_]+::)+)HashSet<.+>$",
+            "^(alloc::([a-z_]+::)+)Rc<.+>$",
+            "^(alloc::([a-z_]+::)+)Arc<.+>$",
+            "^(core::([a-z_]+::)+)Cell<.+>$",
+            "^(core::([a-z_]+::)+)Ref<.+>$",
+            "^(core::([a-z_]+::)+)RefMut<.+>$",
+            "^(core::([a-z_]+::)+)RefCell<.+>$",
+        ];
+
         script_str
             .push_str(&format!("command script import {}\n", &rust_pp_module_abs_path[..])[..]);
-        script_str.push_str("type summary add --no-value ");
-        script_str.push_str("--python-function lldb_rust_formatters.print_val ");
-        script_str.push_str("-x \".*\" --category Rust\n");
+        script_str.push_str("type synthetic add -l lldb_lookup.synthetic_lookup -x '.*' ");
+        script_str.push_str("--category Rust\n");
+        for type_regex in rust_type_regexes {
+            script_str.push_str("type summary add -F lldb_lookup.summary_lookup  -e -x -h ");
+            script_str.push_str(&format!("'{}' ", type_regex));
+            script_str.push_str("--category Rust\n");
+        }
         script_str.push_str("type category enable Rust\n");
 
         // Set breakpoints on every line that contains the string "#break"
@@ -1584,29 +1614,34 @@ impl<'test> TestCx<'test> {
             //
             // into
             //
-            //      remote-test-client run program:support-lib.so arg1 arg2
+            //      remote-test-client run program 2 support-lib.so support-lib2.so arg1 arg2
             //
             // The test-client program will upload `program` to the emulator
             // along with all other support libraries listed (in this case
-            // `support-lib.so`. It will then execute the program on the
-            // emulator with the arguments specified (in the environment we give
-            // the process) and then report back the same result.
+            // `support-lib.so` and `support-lib2.so`. It will then execute
+            // the program on the emulator with the arguments specified
+            // (in the environment we give the process) and then report back
+            // the same result.
             _ if self.config.remote_test_client.is_some() => {
                 let aux_dir = self.aux_output_dir_name();
-                let ProcArgs { mut prog, args } = self.make_run_args();
+                let ProcArgs { prog, args } = self.make_run_args();
+                let mut support_libs = Vec::new();
                 if let Ok(entries) = aux_dir.read_dir() {
                     for entry in entries {
                         let entry = entry.unwrap();
                         if !entry.path().is_file() {
                             continue;
                         }
-                        prog.push_str(":");
-                        prog.push_str(entry.path().to_str().unwrap());
+                        support_libs.push(entry.path());
                     }
                 }
                 let mut test_client =
                     Command::new(self.config.remote_test_client.as_ref().unwrap());
-                test_client.args(&["run", &prog]).args(args).envs(env.clone());
+                test_client
+                    .args(&["run", &support_libs.len().to_string(), &prog])
+                    .args(support_libs)
+                    .args(args)
+                    .envs(env.clone());
                 self.compose_and_run(
                     test_client,
                     self.config.run_lib_path.to_str().unwrap(),
@@ -1750,6 +1785,7 @@ impl<'test> TestCx<'test> {
             || self.config.target.contains("wasm32")
             || self.config.target.contains("nvptx")
             || self.is_vxworks_pure_static()
+            || self.config.target.contains("sgx")
         {
             // We primarily compile all auxiliary libraries as dynamic libraries
             // to avoid code size bloat and large binaries as much as possible
@@ -1806,8 +1842,8 @@ impl<'test> TestCx<'test> {
 
         // Need to be sure to put both the lib_path and the aux path in the dylib
         // search path for the child.
-        let mut path = env::split_paths(&env::var_os(dylib_env_var()).unwrap_or(OsString::new()))
-            .collect::<Vec<_>>();
+        let mut path =
+            env::split_paths(&env::var_os(dylib_env_var()).unwrap_or_default()).collect::<Vec<_>>();
         if let Some(p) = aux_path {
             path.insert(0, PathBuf::from(p))
         }
@@ -1818,7 +1854,7 @@ impl<'test> TestCx<'test> {
         command.env(dylib_env_var(), newpath);
 
         let mut child = disable_error_reporting(|| command.spawn())
-            .expect(&format!("failed to exec `{:?}`", &command));
+            .unwrap_or_else(|_| panic!("failed to exec `{:?}`", &command));
         if let Some(input) = input {
             child.stdin.as_mut().unwrap().write_all(input.as_bytes()).unwrap();
         }
@@ -1849,7 +1885,8 @@ impl<'test> TestCx<'test> {
         emit_metadata: EmitMetadata,
         allow_unused: AllowUnused,
     ) -> Command {
-        let is_rustdoc = self.is_rustdoc();
+        let is_aux = input_file.components().map(|c| c.as_os_str()).any(|c| c == "auxiliary");
+        let is_rustdoc = self.is_rustdoc() && !is_aux;
         let mut rustc = if !is_rustdoc {
             Command::new(&self.config.rustc_path)
         } else {
@@ -1905,6 +1942,7 @@ impl<'test> TestCx<'test> {
                 rustc.args(&[
                     "-Zdump-mir=all",
                     "-Zmir-opt-level=3",
+                    "-Zvalidate-mir",
                     "-Zdump-mir-exclude-pass-number",
                 ]);
 
@@ -1955,6 +1993,9 @@ impl<'test> TestCx<'test> {
             }
             Some(CompareMode::Polonius) => {
                 rustc.args(&["-Zpolonius", "-Zborrowck=mir"]);
+            }
+            Some(CompareMode::Chalk) => {
+                rustc.args(&["-Zchalk"]);
             }
             None => {}
         }
@@ -2405,8 +2446,8 @@ impl<'test> TestCx<'test> {
 
         self.check_no_compiler_crash(&proc_res, self.props.should_ice);
 
-        const PREFIX: &'static str = "MONO_ITEM ";
-        const CGU_MARKER: &'static str = "@@";
+        const PREFIX: &str = "MONO_ITEM ";
+        const CGU_MARKER: &str = "@@";
 
         let actual: Vec<MonoItem> = proc_res
             .stdout
@@ -2708,6 +2749,10 @@ impl<'test> TestCx<'test> {
             cmd.env("RUSTDOC", cwd.join(rustdoc));
         }
 
+        if let Some(ref rust_demangler) = self.config.rust_demangler_path {
+            cmd.env("RUST_DEMANGLER", cwd.join(rust_demangler));
+        }
+
         if let Some(ref node) = self.config.nodejs {
             cmd.env("NODE", node);
         }
@@ -2735,6 +2780,18 @@ impl<'test> TestCx<'test> {
         // Use dynamic musl for tests because static doesn't allow creating dylibs
         if self.config.host.contains("musl") {
             cmd.env("RUSTFLAGS", "-Ctarget-feature=-crt-static").env("IS_MUSL_HOST", "1");
+        }
+
+        if self.config.bless {
+            cmd.env("RUSTC_BLESS_TEST", "--bless");
+            // Assume this option is active if the environment variable is "defined", with _any_ value.
+            // As an example, a `Makefile` can use this option by:
+            //
+            //   ifdef RUSTC_BLESS_TEST
+            //       cp "$(TMPDIR)"/actual_something.ext expected_something.ext
+            //   else
+            //       $(DIFF) expected_something.ext "$(TMPDIR)"/actual_something.ext
+            //   endif
         }
 
         if self.config.target.contains("msvc") && self.config.cc != "" {
@@ -2931,7 +2988,7 @@ impl<'test> TestCx<'test> {
                 Filter::MachineApplicableOnly,
             )
             .unwrap_or_default();
-            if suggestions.len() > 0
+            if !suggestions.is_empty()
                 && !self.props.run_rustfix
                 && !self.props.rustfix_only_machine_applicable
             {
@@ -2945,7 +3002,7 @@ impl<'test> TestCx<'test> {
                     .open(coverage_file_path.as_path())
                     .expect("could not create or open file");
 
-                if let Err(_) = writeln!(file, "{}", self.testpaths.file.display()) {
+                if writeln!(file, "{}", self.testpaths.file.display()).is_err() {
                     panic!("couldn't write to {}", coverage_file_path.display());
                 }
             }
@@ -2962,10 +3019,9 @@ impl<'test> TestCx<'test> {
                 },
             )
             .unwrap();
-            let fixed_code = apply_suggestions(&unfixed_code, &suggestions).expect(&format!(
-                "failed to apply suggestions for {:?} with rustfix",
-                self.testpaths.file
-            ));
+            let fixed_code = apply_suggestions(&unfixed_code, &suggestions).unwrap_or_else(|_| {
+                panic!("failed to apply suggestions for {:?} with rustfix", self.testpaths.file)
+            });
 
             errors += self.compare_output("fixed", &fixed_code, &expected_fixed);
         } else if !expected_fixed.is_empty() {
@@ -3089,49 +3145,79 @@ impl<'test> TestCx<'test> {
     fn check_mir_dump(&self) {
         let test_file_contents = fs::read_to_string(&self.testpaths.file).unwrap();
 
-        let mut test_dir = self.testpaths.file.with_extension("");
+        let test_dir = self.testpaths.file.parent().unwrap();
+        let test_crate =
+            self.testpaths.file.file_stem().unwrap().to_str().unwrap().replace("-", "_");
 
+        let mut bit_width = String::new();
         if test_file_contents.lines().any(|l| l == "// EMIT_MIR_FOR_EACH_BIT_WIDTH") {
-            test_dir.push(get_pointer_width(&self.config.target))
+            bit_width = format!(".{}", get_pointer_width(&self.config.target));
         }
 
         if self.config.bless {
-            let _ = std::fs::remove_dir_all(&test_dir);
+            for e in
+                glob(&format!("{}/{}.*.mir{}", test_dir.display(), test_crate, bit_width)).unwrap()
+            {
+                std::fs::remove_file(e.unwrap()).unwrap();
+            }
+            for e in
+                glob(&format!("{}/{}.*.diff{}", test_dir.display(), test_crate, bit_width)).unwrap()
+            {
+                std::fs::remove_file(e.unwrap()).unwrap();
+            }
         }
+
         for l in test_file_contents.lines() {
             if l.starts_with("// EMIT_MIR ") {
-                let test_name = l.trim_start_matches("// EMIT_MIR ");
-                let expected_file = test_dir.join(test_name);
+                let test_name = l.trim_start_matches("// EMIT_MIR ").trim();
+                let mut test_names = test_name.split(' ');
+                // sometimes we specify two files so that we get a diff between the two files
+                let test_name = test_names.next().unwrap();
+                let mut expected_file;
+                let from_file;
+                let to_file;
 
-                let dumped_string = if test_name.ends_with(".diff") {
-                    let test_name = test_name.trim_end_matches(".diff");
-                    let before = format!("{}.before.mir", test_name);
-                    let after = format!("{}.after.mir", test_name);
-                    let before = self.get_mir_dump_dir().join(before);
-                    let after = self.get_mir_dump_dir().join(after);
-                    debug!(
-                        "comparing the contents of: {} with {}",
-                        before.display(),
-                        after.display()
+                if test_name.ends_with(".diff") {
+                    let trimmed = test_name.trim_end_matches(".diff");
+                    let test_against = format!("{}.after.mir", trimmed);
+                    from_file = format!("{}.before.mir", trimmed);
+                    expected_file = format!("{}{}", test_name, bit_width);
+                    assert!(
+                        test_names.next().is_none(),
+                        "two mir pass names specified for MIR diff"
                     );
-                    let before = fs::read_to_string(before).unwrap();
-                    let after = fs::read_to_string(after).unwrap();
-                    let before = self.normalize_output(&before, &[]);
-                    let after = self.normalize_output(&after, &[]);
-                    let mut dumped_string = String::new();
-                    for result in diff::lines(&before, &after) {
-                        use std::fmt::Write;
-                        match result {
-                            diff::Result::Left(s) => writeln!(dumped_string, "- {}", s).unwrap(),
-                            diff::Result::Right(s) => writeln!(dumped_string, "+ {}", s).unwrap(),
-                            diff::Result::Both(s, _) => writeln!(dumped_string, "  {}", s).unwrap(),
-                        }
-                    }
-                    dumped_string
+                    to_file = Some(test_against);
+                } else if let Some(first_pass) = test_names.next() {
+                    let second_pass = test_names.next().unwrap();
+                    assert!(
+                        test_names.next().is_none(),
+                        "three mir pass names specified for MIR diff"
+                    );
+                    expected_file =
+                        format!("{}{}.{}-{}.diff", test_name, bit_width, first_pass, second_pass);
+                    let second_file = format!("{}.{}.mir", test_name, second_pass);
+                    from_file = format!("{}.{}.mir", test_name, first_pass);
+                    to_file = Some(second_file);
+                } else {
+                    expected_file = format!("{}{}", test_name, bit_width);
+                    from_file = test_name.to_string();
+                    assert!(
+                        test_names.next().is_none(),
+                        "two mir pass names specified for MIR dump"
+                    );
+                    to_file = None;
+                };
+                if !expected_file.starts_with(&test_crate) {
+                    expected_file = format!("{}.{}", test_crate, expected_file);
+                }
+                let expected_file = test_dir.join(expected_file);
+
+                let dumped_string = if let Some(after) = to_file {
+                    self.diff_mir_files(from_file.into(), after.into())
                 } else {
                     let mut output_file = PathBuf::new();
                     output_file.push(self.get_mir_dump_dir());
-                    output_file.push(test_name);
+                    output_file.push(&from_file);
                     debug!(
                         "comparing the contents of: {} with {}",
                         output_file.display(),
@@ -3144,12 +3230,12 @@ impl<'test> TestCx<'test> {
                             output_file.parent().unwrap().display()
                         );
                     }
-                    self.check_mir_test_timestamp(test_name, &output_file);
+                    self.check_mir_test_timestamp(&from_file, &output_file);
                     let dumped_string = fs::read_to_string(&output_file).unwrap();
                     self.normalize_output(&dumped_string, &[])
                 };
+
                 if self.config.bless {
-                    let _ = std::fs::create_dir_all(&test_dir);
                     let _ = std::fs::remove_file(&expected_file);
                     std::fs::write(expected_file, dumped_string.as_bytes()).unwrap();
                 } else {
@@ -3161,7 +3247,7 @@ impl<'test> TestCx<'test> {
                     }
                     let expected_string = fs::read_to_string(&expected_file).unwrap();
                     if dumped_string != expected_string {
-                        print_diff(&expected_string, &dumped_string, 3);
+                        print!("{}", write_diff(&expected_string, &dumped_string, 3));
                         panic!(
                             "Actual MIR output differs from expected MIR output {}",
                             expected_file.display()
@@ -3170,6 +3256,37 @@ impl<'test> TestCx<'test> {
                 }
             }
         }
+    }
+
+    fn diff_mir_files(&self, before: PathBuf, after: PathBuf) -> String {
+        let to_full_path = |path: PathBuf| {
+            let full = self.get_mir_dump_dir().join(&path);
+            if !full.exists() {
+                panic!(
+                    "the mir dump file for {} does not exist (requested in {})",
+                    path.display(),
+                    self.testpaths.file.display(),
+                );
+            }
+            full
+        };
+        let before = to_full_path(before);
+        let after = to_full_path(after);
+        debug!("comparing the contents of: {} with {}", before.display(), after.display());
+        let before = fs::read_to_string(before).unwrap();
+        let after = fs::read_to_string(after).unwrap();
+        let before = self.normalize_output(&before, &[]);
+        let after = self.normalize_output(&after, &[]);
+        let mut dumped_string = String::new();
+        for result in diff::lines(&before, &after) {
+            use std::fmt::Write;
+            match result {
+                diff::Result::Left(s) => writeln!(dumped_string, "- {}", s).unwrap(),
+                diff::Result::Right(s) => writeln!(dumped_string, "+ {}", s).unwrap(),
+                diff::Result::Both(s, _) => writeln!(dumped_string, "  {}", s).unwrap(),
+            }
+        }
+        dumped_string
     }
 
     fn check_mir_test_timestamp(&self, test_name: &str, output_file: &Path) {
@@ -3218,8 +3335,17 @@ impl<'test> TestCx<'test> {
         normalize_path(parent_dir, "$DIR");
 
         // Paths into the libstd/libcore
-        let src_dir = self.config.src_base.parent().unwrap().parent().unwrap();
-        normalize_path(src_dir, "$SRC_DIR");
+        let src_dir = self
+            .config
+            .src_base
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("library");
+        normalize_path(&src_dir, "$SRC_DIR");
 
         // Paths into the build directory
         let test_build_dir = &self.config.build_base;
@@ -3338,6 +3464,10 @@ impl<'test> TestCx<'test> {
     }
 
     fn delete_file(&self, file: &PathBuf) {
+        if !file.exists() {
+            // Deleting a nonexistant file would error.
+            return;
+        }
         if let Err(e) = fs::remove_file(file) {
             self.fatal(&format!("failed to delete `{}`: {}", file.display(), e,));
         }
@@ -3353,7 +3483,7 @@ impl<'test> TestCx<'test> {
                 println!("normalized {}:\n{}\n", kind, actual);
             } else {
                 println!("diff of {}:\n", kind);
-                print_diff(expected, actual, 3);
+                print!("{}", write_diff(expected, actual, 3));
             }
         }
 
@@ -3400,7 +3530,7 @@ impl<'test> TestCx<'test> {
         let examined_content =
             self.load_expected_output_from_path(&examined_path).unwrap_or_else(|_| String::new());
 
-        if examined_path.exists() && canon_content == &examined_content {
+        if canon_content == examined_content {
             self.delete_file(&examined_path);
         }
     }
@@ -3467,6 +3597,7 @@ impl ProcRes {
     }
 }
 
+#[derive(Debug)]
 enum TargetLocation {
     ThisFile(PathBuf),
     ThisDirectory(PathBuf),

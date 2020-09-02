@@ -7,6 +7,7 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -39,7 +40,7 @@ pub struct Config {
     pub docs: bool,
     pub locked_deps: bool,
     pub vendor: bool,
-    pub target_config: HashMap<Interned<String>, Target>,
+    pub target_config: HashMap<TargetSelection, Target>,
     pub full_bootstrap: bool,
     pub extended: bool,
     pub tools: Option<HashSet<String>>,
@@ -85,7 +86,6 @@ pub struct Config {
 
     pub use_lld: bool,
     pub lld_enabled: bool,
-    pub lldb_enabled: bool,
     pub llvm_tools_enabled: bool,
 
     pub llvm_cflags: Option<String>,
@@ -98,6 +98,7 @@ pub struct Config {
     pub rust_codegen_units: Option<u32>,
     pub rust_codegen_units_std: Option<u32>,
     pub rust_debug_assertions: bool,
+    pub rust_debug_assertions_std: bool,
     pub rust_debuginfo_level_rustc: u32,
     pub rust_debuginfo_level_std: u32,
     pub rust_debuginfo_level_tools: u32,
@@ -111,10 +112,11 @@ pub struct Config {
     pub rust_verify_llvm_ir: bool,
     pub rust_thin_lto_import_instr_limit: Option<u32>,
     pub rust_remap_debuginfo: bool,
+    pub rust_new_symbol_mangling: bool,
 
-    pub build: Interned<String>,
-    pub hosts: Vec<Interned<String>>,
-    pub targets: Vec<Interned<String>>,
+    pub build: TargetSelection,
+    pub hosts: Vec<TargetSelection>,
+    pub targets: Vec<TargetSelection>,
     pub local_rebuild: bool,
     pub jemalloc: bool,
     pub control_flow_guard: bool,
@@ -158,6 +160,67 @@ pub struct Config {
     pub out: PathBuf,
 }
 
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TargetSelection {
+    pub triple: Interned<String>,
+    file: Option<Interned<String>>,
+}
+
+impl TargetSelection {
+    pub fn from_user(selection: &str) -> Self {
+        let path = Path::new(selection);
+
+        let (triple, file) = if path.exists() {
+            let triple = path
+                .file_stem()
+                .expect("Target specification file has no file stem")
+                .to_str()
+                .expect("Target specification file stem is not UTF-8");
+
+            (triple, Some(selection))
+        } else {
+            (selection, None)
+        };
+
+        let triple = INTERNER.intern_str(triple);
+        let file = file.map(|f| INTERNER.intern_str(f));
+
+        Self { triple, file }
+    }
+
+    pub fn rustc_target_arg(&self) -> &str {
+        self.file.as_ref().unwrap_or(&self.triple)
+    }
+
+    pub fn contains(&self, needle: &str) -> bool {
+        self.triple.contains(needle)
+    }
+
+    pub fn starts_with(&self, needle: &str) -> bool {
+        self.triple.starts_with(needle)
+    }
+
+    pub fn ends_with(&self, needle: &str) -> bool {
+        self.triple.ends_with(needle)
+    }
+}
+
+impl fmt::Display for TargetSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.triple)?;
+        if let Some(file) = self.file {
+            write!(f, "({})", file)?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq<&str> for TargetSelection {
+    fn eq(&self, other: &&str) -> bool {
+        self.triple == *other
+    }
+}
+
 /// Per-target configuration stored in the global configuration structure.
 #[derive(Default)]
 pub struct Target {
@@ -173,6 +236,7 @@ pub struct Target {
     pub ndk: Option<PathBuf>,
     pub crt_static: Option<bool>,
     pub musl_root: Option<PathBuf>,
+    pub musl_libdir: Option<PathBuf>,
     pub wasi_root: Option<PathBuf>,
     pub qemu_rootfs: Option<PathBuf>,
     pub no_std: bool,
@@ -212,6 +276,8 @@ struct Build {
     host: Vec<String>,
     #[serde(default)]
     target: Vec<String>,
+    // This is ignored, the rust code always gets the build directory from the `BUILD_DIR` env variable
+    build_dir: Option<String>,
     cargo: Option<String>,
     rustc: Option<String>,
     rustfmt: Option<String>, /* allow bootstrap.py to use rustfmt key */
@@ -313,6 +379,7 @@ struct Rust {
     codegen_units: Option<u32>,
     codegen_units_std: Option<u32>,
     debug_assertions: Option<bool>,
+    debug_assertions_std: Option<bool>,
     debuginfo_level: Option<u32>,
     debuginfo_level_rustc: Option<u32>,
     debuginfo_level_std: Option<u32>,
@@ -335,7 +402,6 @@ struct Rust {
     lld: Option<bool>,
     use_lld: Option<bool>,
     llvm_tools: Option<bool>,
-    lldb: Option<bool>,
     deny_warnings: Option<bool>,
     backtrace_on_ice: Option<bool>,
     verify_llvm_ir: Option<bool>,
@@ -345,6 +411,7 @@ struct Rust {
     test_compare_mode: Option<bool>,
     llvm_libunwind: Option<bool>,
     control_flow_guard: Option<bool>,
+    new_symbol_mangling: Option<bool>,
 }
 
 /// TOML representation of how each build target is configured.
@@ -361,6 +428,7 @@ struct TomlTarget {
     android_ndk: Option<String>,
     crt_static: Option<bool>,
     musl_root: Option<String>,
+    musl_libdir: Option<String>,
     wasi_root: Option<String>,
     qemu_rootfs: Option<String>,
     no_std: Option<bool>,
@@ -382,6 +450,7 @@ impl Config {
     pub fn default_opts() -> Config {
         let mut config = Config::default();
         config.llvm_optimize = true;
+        config.ninja = true;
         config.llvm_version_check = true;
         config.backtrace = true;
         config.rust_optimize = true;
@@ -399,7 +468,7 @@ impl Config {
         config.missing_tools = false;
 
         // set by bootstrap.py
-        config.build = INTERNER.intern_str(&env::var("BUILD").expect("'BUILD' to be set"));
+        config.build = TargetSelection::from_user(&env::var("BUILD").expect("'BUILD' to be set"));
         config.src = Config::path_from_python("SRC");
         config.out = Config::path_from_python("BUILD_DIR");
 
@@ -459,15 +528,17 @@ impl Config {
 
         let build = toml.build.clone().unwrap_or_default();
         // set by bootstrap.py
-        config.hosts.push(config.build.clone());
-        for host in build.host.iter() {
-            let host = INTERNER.intern_str(host);
+        config.hosts.push(config.build);
+        for host in build.host.iter().map(|h| TargetSelection::from_user(h)) {
             if !config.hosts.contains(&host) {
                 config.hosts.push(host);
             }
         }
-        for target in
-            config.hosts.iter().cloned().chain(build.target.iter().map(|s| INTERNER.intern_str(s)))
+        for target in config
+            .hosts
+            .iter()
+            .copied()
+            .chain(build.target.iter().map(|h| TargetSelection::from_user(h)))
         {
             if !config.targets.contains(&target) {
                 config.targets.push(target);
@@ -518,6 +589,7 @@ impl Config {
         let mut llvm_assertions = None;
         let mut debug = None;
         let mut debug_assertions = None;
+        let mut debug_assertions_std = None;
         let mut debuginfo_level = None;
         let mut debuginfo_level_rustc = None;
         let mut debuginfo_level_std = None;
@@ -560,6 +632,7 @@ impl Config {
         if let Some(ref rust) = toml.rust {
             debug = rust.debug;
             debug_assertions = rust.debug_assertions;
+            debug_assertions_std = rust.debug_assertions_std;
             debuginfo_level = rust.debuginfo_level;
             debuginfo_level_rustc = rust.debuginfo_level_rustc;
             debuginfo_level_std = rust.debuginfo_level_std;
@@ -567,6 +640,7 @@ impl Config {
             debuginfo_level_tests = rust.debuginfo_level_tests;
             optimize = rust.optimize;
             ignore_git = rust.ignore_git;
+            set(&mut config.rust_new_symbol_mangling, rust.new_symbol_mangling);
             set(&mut config.rust_optimize_tests, rust.optimize_tests);
             set(&mut config.codegen_tests, rust.codegen_tests);
             set(&mut config.rust_rpath, rust.rpath);
@@ -583,7 +657,6 @@ impl Config {
             }
             set(&mut config.use_lld, rust.use_lld);
             set(&mut config.lld_enabled, rust.lld);
-            set(&mut config.lldb_enabled, rust.lldb);
             set(&mut config.llvm_tools_enabled, rust.llvm_tools);
             config.rustc_parallel = rust.parallel_compiler.unwrap_or(false);
             config.rustc_default_linker = rust.default_linker.clone();
@@ -628,10 +701,11 @@ impl Config {
                 target.linker = cfg.linker.clone().map(PathBuf::from);
                 target.crt_static = cfg.crt_static;
                 target.musl_root = cfg.musl_root.clone().map(PathBuf::from);
+                target.musl_libdir = cfg.musl_libdir.clone().map(PathBuf::from);
                 target.wasi_root = cfg.wasi_root.clone().map(PathBuf::from);
                 target.qemu_rootfs = cfg.qemu_rootfs.clone().map(PathBuf::from);
 
-                config.target_config.insert(INTERNER.intern_string(triple.clone()), target);
+                config.target_config.insert(TargetSelection::from_user(triple), target);
             }
         }
 
@@ -659,10 +733,12 @@ impl Config {
 
         let default = debug == Some(true);
         config.rust_debug_assertions = debug_assertions.unwrap_or(default);
+        config.rust_debug_assertions_std =
+            debug_assertions_std.unwrap_or(config.rust_debug_assertions);
 
         let with_defaults = |debuginfo_level_specific: Option<u32>| {
             debuginfo_level_specific.or(debuginfo_level).unwrap_or(if debug == Some(true) {
-                2
+                1
             } else {
                 0
             })

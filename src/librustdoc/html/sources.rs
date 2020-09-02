@@ -1,10 +1,11 @@
 use crate::clean;
 use crate::docfs::PathError;
+use crate::error::Error;
 use crate::fold::DocFolder;
 use crate::html::format::Buffer;
 use crate::html::highlight;
 use crate::html::layout;
-use crate::html::render::{Error, SharedContext, BASIC_KEYWORDS};
+use crate::html::render::{SharedContext, BASIC_KEYWORDS};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_span::source_map::FileName;
 use std::ffi::OsStr;
@@ -51,7 +52,7 @@ impl<'a> DocFolder for SourceCollector<'a> {
                 Err(e) => {
                     println!(
                         "warning: source code was requested to be rendered, \
-                              but processing `{}` had an error: {}",
+                         but processing `{}` had an error: {}",
                         item.source.filename, e
                     );
                     println!("         skipping rendering of source code");
@@ -67,15 +68,15 @@ impl<'a> SourceCollector<'a> {
     /// Renders the given filename into its corresponding HTML source file.
     fn emit_source(&mut self, filename: &FileName) -> Result<(), Error> {
         let p = match *filename {
-            FileName::Real(ref file) => file,
+            FileName::Real(ref file) => file.local_path().to_path_buf(),
             _ => return Ok(()),
         };
-        if self.scx.local_sources.contains_key(&**p) {
+        if self.scx.local_sources.contains_key(&*p) {
             // We've already emitted this source
             return Ok(());
         }
 
-        let contents = match fs::read_to_string(&p) {
+        let mut contents = match fs::read_to_string(&p) {
             Ok(contents) => contents,
             Err(e) => {
                 return Err(Error::new(e, &p));
@@ -83,8 +84,9 @@ impl<'a> SourceCollector<'a> {
         };
 
         // Remove the utf-8 BOM if any
-        let contents =
-            if contents.starts_with("\u{feff}") { &contents[3..] } else { &contents[..] };
+        if contents.starts_with("\u{feff}") {
+            contents.drain(..3);
+        }
 
         // Create the intermediate directories
         let mut cur = self.dst.clone();
@@ -122,11 +124,11 @@ impl<'a> SourceCollector<'a> {
             &self.scx.layout,
             &page,
             "",
-            |buf: &mut _| print_src(buf, &contents),
-            &self.scx.themes,
+            |buf: &mut _| print_src(buf, contents),
+            &self.scx.style_files,
         );
         self.scx.fs.write(&cur, v.as_bytes())?;
-        self.scx.local_sources.insert(p.clone(), href);
+        self.scx.local_sources.insert(p, href);
         Ok(())
     }
 }
@@ -160,7 +162,7 @@ where
 
 /// Wrapper struct to render the source code of a file. This will do things like
 /// adding line numbers to the left-hand side.
-fn print_src(buf: &mut Buffer, s: &str) {
+fn print_src(buf: &mut Buffer, s: String) {
     let lines = s.lines().count();
     let mut cols = 0;
     let mut tmp = lines;

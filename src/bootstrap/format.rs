@@ -23,7 +23,7 @@ fn rustfmt(src: &Path, rustfmt: &Path, path: &Path, check: bool) {
     if !status.success() {
         eprintln!(
             "Running `{}` failed.\nIf you're running `tidy`, \
-            try again with `--bless` flag. Or, you just want to format \
+            try again with `--bless`. Or, if you just want to format \
             code, run `./x.py fmt` instead.",
             cmd_debug,
         );
@@ -87,7 +87,7 @@ pub fn format(build: &Build, check: bool) {
                 .lines()
                 .filter(|entry| entry.starts_with("??"))
                 .map(|entry| {
-                    entry.split(" ").nth(1).expect("every git status entry should list a path")
+                    entry.split(' ').nth(1).expect("every git status entry should list a path")
                 });
             for untracked_path in untracked_paths {
                 eprintln!("skip untracked path {} during rustfmt invocations", untracked_path);

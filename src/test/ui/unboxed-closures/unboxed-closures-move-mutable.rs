@@ -2,6 +2,7 @@
 // pretty-expanded FIXME #23616
 
 #![deny(unused_mut)]
+#![allow(unused_must_use)]
 
 // Test that mutating a mutable upvar in a capture-by-value unboxed
 // closure does not ice (issue #18238) and marks the upvar as used
@@ -13,11 +14,11 @@ fn set(x: &mut usize) { *x = 42; }
 fn main() {
     {
         let mut x = 0_usize;
-        move || x += 1;
+        move || x += 1; //~ WARN unused variable: `x`
     }
     {
         let mut x = 0_usize;
-        move || x += 1;
+        move || x += 1; //~ WARN unused variable: `x`
     }
     {
         let mut x = 0_usize;

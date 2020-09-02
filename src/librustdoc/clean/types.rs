@@ -3,28 +3,31 @@ use std::default::Default;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
+use std::lazy::SyncOnceCell as OnceCell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{slice, vec};
 
-use rustc_ast::ast::{self, AttrStyle, Ident};
 use rustc_ast::attr;
-use rustc_ast::util::comments::strip_doc_comment_decoration;
+use rustc_ast::util::comments::beautify_doc_string;
+use rustc_ast::{self as ast, AttrStyle};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
-use rustc_hir::lang_items;
+use rustc_hir::lang_items::LangItem;
 use rustc_hir::Mutability;
 use rustc_index::vec::IndexVec;
 use rustc_middle::middle::stability;
+use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::hygiene::MacroKind;
 use rustc_span::source_map::DUMMY_SP;
-use rustc_span::symbol::{sym, Symbol};
+use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{self, FileName};
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::abi::Abi;
+use smallvec::{smallvec, SmallVec};
 
 use crate::clean::cfg::Cfg;
 use crate::clean::external_path;
@@ -32,8 +35,9 @@ use crate::clean::inline;
 use crate::clean::types::Type::{QPath, ResolvedPath};
 use crate::core::DocContext;
 use crate::doctree;
-use crate::html::item_type::ItemType;
-use crate::html::render::{cache, ExternalLocation};
+use crate::formats::cache::cache;
+use crate::formats::item_type::ItemType;
+use crate::html::render::cache::ExternalLocation;
 
 use self::FnRetTy::*;
 use self::ItemEnum::*;
@@ -85,9 +89,7 @@ pub struct Item {
 
 impl fmt::Debug for Item {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let fake = MAX_DEF_ID.with(|m| {
-            m.borrow().get(&self.def_id.krate).map(|id| self.def_id >= *id).unwrap_or(false)
-        });
+        let fake = self.is_fake();
         let def_id: &dyn fmt::Debug = if fake { &"**FAKE**" } else { &self.def_id };
 
         fmt.debug_struct("Item")
@@ -197,7 +199,8 @@ impl Item {
                 classes.push("unstable");
             }
 
-            if s.deprecation.is_some() {
+            // FIXME: what about non-staged API items that are deprecated?
+            if self.deprecation.is_some() {
                 classes.push("deprecated");
             }
 
@@ -210,7 +213,7 @@ impl Item {
     }
 
     pub fn is_non_exhaustive(&self) -> bool {
-        self.attrs.other_attrs.iter().any(|a| a.check_name(sym::non_exhaustive))
+        self.attrs.other_attrs.iter().any(|a| a.has_name(sym::non_exhaustive))
     }
 
     /// Returns a documentation-level item type from the item.
@@ -218,14 +221,6 @@ impl Item {
         ItemType::from(self)
     }
 
-    /// Returns the info in the item's `#[deprecated]` or `#[rustc_deprecated]` attributes.
-    ///
-    /// If the item is not deprecated, returns `None`.
-    pub fn deprecation(&self) -> Option<&Deprecation> {
-        self.deprecation
-            .as_ref()
-            .or_else(|| self.stability.as_ref().and_then(|s| s.deprecation.as_ref()))
-    }
     pub fn is_default(&self) -> bool {
         match self.inner {
             ItemEnum::MethodItem(ref meth) => {
@@ -237,6 +232,13 @@ impl Item {
             }
             _ => false,
         }
+    }
+
+    /// See comments on next_def_id
+    pub fn is_fake(&self) -> bool {
+        MAX_DEF_ID.with(|m| {
+            m.borrow().get(&self.def_id.krate).map(|id| self.def_id >= *id).unwrap_or(false)
+        })
     }
 }
 
@@ -280,10 +282,19 @@ pub enum ItemEnum {
 }
 
 impl ItemEnum {
-    pub fn is_associated(&self) -> bool {
+    pub fn is_type_alias(&self) -> bool {
         match *self {
             ItemEnum::TypedefItem(_, _) | ItemEnum::AssocTypeItem(_, _) => true,
             _ => false,
+        }
+    }
+
+    pub fn as_assoc_kind(&self) -> Option<AssocKind> {
+        match *self {
+            ItemEnum::AssocConstItem(..) => Some(AssocKind::Const),
+            ItemEnum::AssocTypeItem(..) => Some(AssocKind::Type),
+            ItemEnum::TyMethodItem(..) | ItemEnum::MethodItem(..) => Some(AssocKind::Fn),
+            _ => None,
         }
     }
 }
@@ -310,7 +321,7 @@ impl<'a> Iterator for ListAttributesIter<'a> {
 
         for attr in &mut self.attrs {
             if let Some(list) = attr.meta_item_list() {
-                if attr.check_name(self.name) {
+                if attr.has_name(self.name) {
                     self.current_list = list.into_iter();
                     if let Some(nested) = self.current_list.next() {
                         return Some(nested);
@@ -346,7 +357,7 @@ pub trait NestedAttributesExt {
 
 impl<I: IntoIterator<Item = ast::NestedMetaItem>> NestedAttributesExt for I {
     fn has_word(self, word: Symbol) -> bool {
-        self.into_iter().any(|attr| attr.is_word() && attr.check_name(word))
+        self.into_iter().any(|attr| attr.is_word() && attr.has_name(word))
     }
 }
 
@@ -421,12 +432,12 @@ pub struct Attributes {
 impl Attributes {
     /// Extracts the content from an attribute `#[doc(cfg(content))]`.
     pub fn extract_cfg(mi: &ast::MetaItem) -> Option<&ast::MetaItem> {
-        use rustc_ast::ast::NestedMetaItem::MetaItem;
+        use rustc_ast::NestedMetaItem::MetaItem;
 
         if let ast::MetaItemKind::List(ref nmis) = mi.kind {
             if nmis.len() == 1 {
                 if let MetaItem(ref cfg_mi) = nmis[0] {
-                    if cfg_mi.check_name(sym::cfg) {
+                    if cfg_mi.has_name(sym::cfg) {
                         if let ast::MetaItemKind::List(ref cfg_nmis) = cfg_mi.kind {
                             if cfg_nmis.len() == 1 {
                                 if let MetaItem(ref content_mi) = cfg_nmis[0] {
@@ -448,7 +459,7 @@ impl Attributes {
     pub fn extract_include(mi: &ast::MetaItem) -> Option<(String, String)> {
         mi.meta_item_list().and_then(|list| {
             for meta in list {
-                if meta.check_name(sym::include) {
+                if meta.has_name(sym::include) {
                     // the actual compiled `#[doc(include="filename")]` gets expanded to
                     // `#[doc(include(file="filename", contents="file contents")]` so we need to
                     // look for that instead
@@ -457,11 +468,11 @@ impl Attributes {
                         let mut contents: Option<String> = None;
 
                         for it in list {
-                            if it.check_name(sym::file) {
+                            if it.has_name(sym::file) {
                                 if let Some(name) = it.value_str() {
                                     filename = Some(name.to_string());
                                 }
-                            } else if it.check_name(sym::contents) {
+                            } else if it.has_name(sym::contents) {
                                 if let Some(docs) = it.value_str() {
                                     contents = Some(docs.to_string());
                                 }
@@ -483,12 +494,12 @@ impl Attributes {
 
     pub fn has_doc_flag(&self, flag: Symbol) -> bool {
         for attr in &self.other_attrs {
-            if !attr.check_name(sym::doc) {
+            if !attr.has_name(sym::doc) {
                 continue;
             }
 
             if let Some(items) = attr.meta_item_list() {
-                if items.iter().filter_map(|i| i.meta_item()).any(|it| it.check_name(flag)) {
+                if items.iter().filter_map(|i| i.meta_item()).any(|it| it.has_name(flag)) {
                     return true;
                 }
             }
@@ -507,10 +518,11 @@ impl Attributes {
             .iter()
             .filter_map(|attr| {
                 if let Some(value) = attr.doc_str() {
-                    let (value, mk_fragment): (_, fn(_, _, _) -> _) = if attr.is_doc_comment() {
-                        (strip_doc_comment_decoration(&value.as_str()), DocFragment::SugaredDoc)
+                    let value = beautify_doc_string(value);
+                    let mk_fragment: fn(_, _, _) -> _ = if attr.is_doc_comment() {
+                        DocFragment::SugaredDoc
                     } else {
-                        (value.to_string(), DocFragment::RawDoc)
+                        DocFragment::RawDoc
                     };
 
                     let line = doc_line;
@@ -522,7 +534,7 @@ impl Attributes {
                     }
                     None
                 } else {
-                    if attr.check_name(sym::doc) {
+                    if attr.has_name(sym::doc) {
                         if let Some(mi) = attr.meta() {
                             if let Some(cfg_mi) = Attributes::extract_cfg(&mi) {
                                 // Extracted #[doc(cfg(...))]
@@ -549,7 +561,7 @@ impl Attributes {
         // treat #[target_feature(enable = "feat")] attributes as if they were
         // #[doc(cfg(target_feature = "feat"))] attributes as well
         for attr in attrs.lists(sym::target_feature) {
-            if attr.check_name(sym::enable) {
+            if attr.has_name(sym::enable) {
                 if let Some(feat) = attr.value_str() {
                     let meta = attr::mk_name_value_item_str(
                         Ident::with_dummy_span(sym::target_feature),
@@ -595,6 +607,7 @@ impl Attributes {
     /// Cache must be populated before call
     pub fn links(&self, krate: &CrateNum) -> Vec<(String, String)> {
         use crate::html::format::href;
+        use crate::html::render::CURRENT_DEPTH;
 
         self.links
             .iter()
@@ -615,12 +628,13 @@ impl Attributes {
                         if let Some(ref fragment) = *fragment {
                             let cache = cache();
                             let url = match cache.extern_locations.get(krate) {
-                                Some(&(_, ref src, ExternalLocation::Local)) => {
-                                    src.to_str().expect("invalid file path")
+                                Some(&(_, _, ExternalLocation::Local)) => {
+                                    let depth = CURRENT_DEPTH.with(|l| l.get());
+                                    "../".repeat(depth)
                                 }
-                                Some(&(_, _, ExternalLocation::Remote(ref s))) => s,
+                                Some(&(_, _, ExternalLocation::Remote(ref s))) => s.to_string(),
                                 Some(&(_, _, ExternalLocation::Unknown)) | None => {
-                                    "https://doc.rust-lang.org/nightly"
+                                    String::from("https://doc.rust-lang.org/nightly")
                                 }
                             };
                             // This is a primitive so the url is done "by hand".
@@ -642,6 +656,15 @@ impl Attributes {
                 }
             })
             .collect()
+    }
+
+    pub fn get_doc_aliases(&self) -> FxHashSet<String> {
+        self.other_attrs
+            .lists(sym::doc)
+            .filter(|a| a.has_name(sym::alias))
+            .filter_map(|a| a.value_str().map(|s| s.to_string().replace("\"", "")))
+            .filter(|v| !v.is_empty())
+            .collect::<FxHashSet<_>>()
     }
 }
 
@@ -687,7 +710,7 @@ pub enum GenericBound {
 
 impl GenericBound {
     pub fn maybe_sized(cx: &DocContext<'_>) -> GenericBound {
-        let did = cx.tcx.require_lang_item(lang_items::SizedTraitLangItem, None);
+        let did = cx.tcx.require_lang_item(LangItem::Sized, None);
         let empty = cx.tcx.intern_substs(&[]);
         let path = external_path(cx, cx.tcx.item_name(did), Some(did), false, vec![], empty);
         inline::record_extern_fqn(cx, did, TypeKind::Trait);
@@ -738,6 +761,10 @@ impl Lifetime {
 
     pub fn statik() -> Lifetime {
         Lifetime("'static".to_string())
+    }
+
+    pub fn elided() -> Lifetime {
+        Lifetime("'_".to_string())
     }
 }
 
@@ -951,6 +978,7 @@ pub struct Trait {
     pub items: Vec<Item>,
     pub generics: Generics,
     pub bounds: Vec<GenericBound>,
+    pub is_spotlight: bool,
     pub is_auto: bool,
 }
 
@@ -1162,7 +1190,7 @@ impl GetDefId for Type {
     fn def_id(&self) -> Option<DefId> {
         match *self {
             ResolvedPath { did, .. } => Some(did),
-            Primitive(p) => crate::html::render::cache().primitive_locations.get(&p).cloned(),
+            Primitive(p) => cache().primitive_locations.get(&p).cloned(),
             BorrowedRef { type_: box Generic(..), .. } => {
                 Primitive(PrimitiveType::Reference).def_id()
             }
@@ -1186,33 +1214,33 @@ impl GetDefId for Type {
 }
 
 impl PrimitiveType {
-    pub fn from_str(s: &str) -> Option<PrimitiveType> {
+    pub fn from_symbol(s: Symbol) -> Option<PrimitiveType> {
         match s {
-            "isize" => Some(PrimitiveType::Isize),
-            "i8" => Some(PrimitiveType::I8),
-            "i16" => Some(PrimitiveType::I16),
-            "i32" => Some(PrimitiveType::I32),
-            "i64" => Some(PrimitiveType::I64),
-            "i128" => Some(PrimitiveType::I128),
-            "usize" => Some(PrimitiveType::Usize),
-            "u8" => Some(PrimitiveType::U8),
-            "u16" => Some(PrimitiveType::U16),
-            "u32" => Some(PrimitiveType::U32),
-            "u64" => Some(PrimitiveType::U64),
-            "u128" => Some(PrimitiveType::U128),
-            "bool" => Some(PrimitiveType::Bool),
-            "char" => Some(PrimitiveType::Char),
-            "str" => Some(PrimitiveType::Str),
-            "f32" => Some(PrimitiveType::F32),
-            "f64" => Some(PrimitiveType::F64),
-            "array" => Some(PrimitiveType::Array),
-            "slice" => Some(PrimitiveType::Slice),
-            "tuple" => Some(PrimitiveType::Tuple),
-            "unit" => Some(PrimitiveType::Unit),
-            "pointer" => Some(PrimitiveType::RawPointer),
-            "reference" => Some(PrimitiveType::Reference),
-            "fn" => Some(PrimitiveType::Fn),
-            "never" => Some(PrimitiveType::Never),
+            sym::isize => Some(PrimitiveType::Isize),
+            sym::i8 => Some(PrimitiveType::I8),
+            sym::i16 => Some(PrimitiveType::I16),
+            sym::i32 => Some(PrimitiveType::I32),
+            sym::i64 => Some(PrimitiveType::I64),
+            sym::i128 => Some(PrimitiveType::I128),
+            sym::usize => Some(PrimitiveType::Usize),
+            sym::u8 => Some(PrimitiveType::U8),
+            sym::u16 => Some(PrimitiveType::U16),
+            sym::u32 => Some(PrimitiveType::U32),
+            sym::u64 => Some(PrimitiveType::U64),
+            sym::u128 => Some(PrimitiveType::U128),
+            sym::bool => Some(PrimitiveType::Bool),
+            sym::char => Some(PrimitiveType::Char),
+            sym::str => Some(PrimitiveType::Str),
+            sym::f32 => Some(PrimitiveType::F32),
+            sym::f64 => Some(PrimitiveType::F64),
+            sym::array => Some(PrimitiveType::Array),
+            sym::slice => Some(PrimitiveType::Slice),
+            sym::tuple => Some(PrimitiveType::Tuple),
+            sym::unit => Some(PrimitiveType::Unit),
+            sym::pointer => Some(PrimitiveType::RawPointer),
+            sym::reference => Some(PrimitiveType::Reference),
+            kw::Fn => Some(PrimitiveType::Fn),
+            sym::never => Some(PrimitiveType::Never),
             _ => None,
         }
     }
@@ -1246,6 +1274,86 @@ impl PrimitiveType {
             Fn => "fn",
             Never => "never",
         }
+    }
+
+    pub fn impls(&self, tcx: TyCtxt<'_>) -> &'static SmallVec<[DefId; 4]> {
+        Self::all_impls(tcx).get(self).expect("missing impl for primitive type")
+    }
+
+    pub fn all_impls(tcx: TyCtxt<'_>) -> &'static FxHashMap<PrimitiveType, SmallVec<[DefId; 4]>> {
+        static CELL: OnceCell<FxHashMap<PrimitiveType, SmallVec<[DefId; 4]>>> = OnceCell::new();
+
+        CELL.get_or_init(move || {
+            use self::PrimitiveType::*;
+
+            /// A macro to create a FxHashMap.
+            ///
+            /// Example:
+            ///
+            /// ```
+            /// let letters = map!{"a" => "b", "c" => "d"};
+            /// ```
+            ///
+            /// Trailing commas are allowed.
+            /// Commas between elements are required (even if the expression is a block).
+            macro_rules! map {
+                ($( $key: expr => $val: expr ),* $(,)*) => {{
+                    let mut map = ::rustc_data_structures::fx::FxHashMap::default();
+                    $( map.insert($key, $val); )*
+                    map
+                }}
+            }
+
+            let single = |a: Option<DefId>| a.into_iter().collect();
+            let both = |a: Option<DefId>, b: Option<DefId>| -> SmallVec<_> {
+                a.into_iter().chain(b).collect()
+            };
+
+            let lang_items = tcx.lang_items();
+            map! {
+                Isize => single(lang_items.isize_impl()),
+                I8 => single(lang_items.i8_impl()),
+                I16 => single(lang_items.i16_impl()),
+                I32 => single(lang_items.i32_impl()),
+                I64 => single(lang_items.i64_impl()),
+                I128 => single(lang_items.i128_impl()),
+                Usize => single(lang_items.usize_impl()),
+                U8 => single(lang_items.u8_impl()),
+                U16 => single(lang_items.u16_impl()),
+                U32 => single(lang_items.u32_impl()),
+                U64 => single(lang_items.u64_impl()),
+                U128 => single(lang_items.u128_impl()),
+                F32 => both(lang_items.f32_impl(), lang_items.f32_runtime_impl()),
+                F64 => both(lang_items.f64_impl(), lang_items.f64_runtime_impl()),
+                Char => single(lang_items.char_impl()),
+                Bool => single(lang_items.bool_impl()),
+                Str => both(lang_items.str_impl(), lang_items.str_alloc_impl()),
+                Slice => {
+                    lang_items
+                        .slice_impl()
+                        .into_iter()
+                        .chain(lang_items.slice_u8_impl())
+                        .chain(lang_items.slice_alloc_impl())
+                        .chain(lang_items.slice_u8_alloc_impl())
+                        .collect()
+                },
+                Array => single(lang_items.array_impl()),
+                Tuple => smallvec![],
+                Unit => smallvec![],
+                RawPointer => {
+                    lang_items
+                        .const_ptr_impl()
+                        .into_iter()
+                        .chain(lang_items.mut_ptr_impl())
+                        .chain(lang_items.const_slice_ptr_impl())
+                        .chain(lang_items.mut_slice_ptr_impl())
+                        .collect()
+                },
+                Reference => smallvec![],
+                Fn => smallvec![],
+                Never => smallvec![],
+            }
+        })
     }
 
     pub fn to_url_str(&self) -> &'static str {
@@ -1509,9 +1617,8 @@ pub struct ProcMacro {
 #[derive(Clone, Debug)]
 pub struct Stability {
     pub level: stability::StabilityLevel,
-    pub feature: Option<String>,
+    pub feature: String,
     pub since: String,
-    pub deprecation: Option<Deprecation>,
     pub unstable_reason: Option<String>,
     pub issue: Option<NonZeroU32>,
 }
@@ -1520,6 +1627,7 @@ pub struct Stability {
 pub struct Deprecation {
     pub since: Option<String>,
     pub note: Option<String>,
+    pub is_since_rustc_version: bool,
 }
 
 /// An type binding on an associated type (e.g., `A = Bar` in `Foo<A = Bar>` or

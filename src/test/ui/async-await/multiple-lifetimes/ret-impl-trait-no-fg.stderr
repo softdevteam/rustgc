@@ -25,30 +25,18 @@ LL | async fn async_ret_impl_trait<'a, 'b>(a: &'a u8, b: &'b u8) -> impl Trait<'
 error[E0700]: hidden type for `impl Trait` captures lifetime that does not appear in bounds
   --> $DIR/ret-impl-trait-no-fg.rs:9:1
    |
-LL | / async fn async_ret_impl_trait<'a, 'b>(a: &'a u8, b: &'b u8) -> impl Trait<'a, 'b> {
-LL | |
-LL | |
-LL | |
-...  |
-LL | |     (a, b)
-LL | | }
-   | |_^
+LL | async fn async_ret_impl_trait<'a, 'b>(a: &'a u8, b: &'b u8) -> impl Trait<'a, 'b> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: hidden type `(&u8, &u8)` captures lifetime '_#4r
+   = note: hidden type `(&u8, &u8)` captures lifetime '_#5r
 
 error[E0700]: hidden type for `impl Trait` captures lifetime that does not appear in bounds
   --> $DIR/ret-impl-trait-no-fg.rs:9:1
    |
-LL | / async fn async_ret_impl_trait<'a, 'b>(a: &'a u8, b: &'b u8) -> impl Trait<'a, 'b> {
-LL | |
-LL | |
-LL | |
-...  |
-LL | |     (a, b)
-LL | | }
-   | |_^
+LL | async fn async_ret_impl_trait<'a, 'b>(a: &'a u8, b: &'b u8) -> impl Trait<'a, 'b> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: hidden type `(&u8, &u8)` captures lifetime '_#5r
+   = note: hidden type `(&u8, &u8)` captures lifetime '_#6r
 
 error: aborting due to 5 previous errors
 

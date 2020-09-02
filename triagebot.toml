@@ -10,6 +10,8 @@ allow-unauthenticated = [
 
 [assign]
 
+[glacier]
+
 [ping.icebreakers-llvm]
 alias = ["llvm", "llvms"]
 message = """\
@@ -18,7 +20,7 @@ Hey LLVM ICE-breakers! This bug has been identified as a good
 [instructions] for tackling these sorts of bugs. Maybe take a look?
 Thanks! <3
 
-[instructions]: https://rustc-dev-guide.rust-lang.org/ice-breaker/llvm.html
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/llvm.html
 """
 label = "ICEBreaker-LLVM"
 
@@ -30,10 +32,70 @@ Hey Cleanup Crew ICE-breakers! This bug has been identified as a good
 [instructions] for tackling these sorts of bugs. Maybe take a look?
 Thanks! <3
 
-[instructions]: https://rustc-dev-guide.rust-lang.org/ice-breaker/cleanup-crew.html
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/cleanup-crew.html
 """
 label = "ICEBreaker-Cleanup-Crew"
 
+[ping.windows]
+message = """\
+Hey Windows Group! This bug has been identified as a good "Windows candidate".
+In case it's useful, here are some [instructions] for tackling these sorts of
+bugs. Maybe take a look?
+Thanks! <3
+
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/windows.html
+"""
+label = "O-windows"
+
+[ping.arm]
+message = """\
+Hey ARM Group! This bug has been identified as a good "ARM candidate".
+In case it's useful, here are some [instructions] for tackling these sorts of
+bugs. Maybe take a look?
+Thanks! <3
+
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/arm.html
+"""
+label = "O-ARM"
+
+[ping.risc-v]
+message = """\
+Hey RISC-V Group! This bug has been identified as a good "RISC-V candidate".
+In case it's useful, here are some [instructions] for tackling these sorts of
+bugs. Maybe take a look?
+Thanks! <3
+
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/risc-v.html
+"""
+label = "O-riscv"
+
 [prioritize]
 label = "I-prioritize"
-zulip_stream = 227806
+
+[autolabel."I-prioritize"]
+trigger_labels = [
+    "regression-from-stable-to-stable",
+    "regression-from-stable-to-beta",
+    "regression-from-stable-to-nightly",
+    "I-unsound 💥",
+]
+exclude_labels = [
+    "P-*",
+    "T-infra",
+    "T-release",
+    "requires-nightly",
+]
+
+[notify-zulip."I-prioritize"]
+zulip_stream = 245100 # #t-compiler/wg-prioritization/alerts
+topic = "I-prioritize #{number} {title}"
+message_on_add = """\
+@*WG-prioritization/alerts* issue #{number} has been requested for prioritization.
+
+# [Procedure](https://forge.rust-lang.org/compiler/prioritization/procedure.html#assign-priority-to-unprioritized-issues-with-i-prioritize-label)
+- Priority?
+- Regression?
+- Notify people/groups?
+- Needs `I-nominated`?
+"""
+message_on_remove = "Issue #{number}'s prioritization request has been removed."
