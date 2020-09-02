@@ -9,7 +9,7 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 
-use crate::alloc::{AllocInit, AllocRef};
+use crate::alloc::AllocRef;
 use crate::boehm::{self, BoehmGcAllocator};
 use crate::vec::Vec;
 
@@ -120,8 +120,7 @@ struct GcBox<T: ?Sized>(ManuallyDrop<T>);
 impl<T> GcBox<T> {
     fn new(value: T) -> *mut GcBox<T> {
         let layout = Layout::new::<T>();
-        let ptr = BoehmGcAllocator.alloc(layout, AllocInit::Uninitialized).unwrap().ptr.as_ptr()
-            as *mut GcBox<T>;
+        let ptr = BoehmGcAllocator.alloc(layout).unwrap().as_ptr() as *mut GcBox<T>;
         let gcbox = GcBox(ManuallyDrop::new(value));
 
         unsafe {
@@ -137,9 +136,7 @@ impl<T> GcBox<T> {
 
     fn new_from_layout(layout: Layout) -> NonNull<GcBox<MaybeUninit<T>>> {
         unsafe {
-            let base_ptr =
-                BoehmGcAllocator.alloc(layout, AllocInit::Uninitialized).unwrap().ptr.as_ptr()
-                    as *mut usize;
+            let base_ptr = BoehmGcAllocator.alloc(layout).unwrap().as_ptr() as *mut usize;
             NonNull::new_unchecked((base_ptr.add(1)) as *mut GcBox<MaybeUninit<T>>)
         }
     }
