@@ -117,7 +117,7 @@
 #![feature(raw_ref_op)]
 #![feature(rustc_attrs)]
 #![feature(receiver_trait)]
-#![feature(min_specialization)]
+#![feature(specialization)]
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
 #![feature(staged_api)]
