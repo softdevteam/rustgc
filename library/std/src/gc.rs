@@ -1,4 +1,3 @@
-#![unstable(feature = "gc", issue = "none")]
 #![allow(missing_docs)]
 
 #[unstable(feature = "gc", issue = "none")]

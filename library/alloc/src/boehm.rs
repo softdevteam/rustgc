@@ -6,6 +6,7 @@ use core::ptr::NonNull;
 #[doc(inline)]
 use core::alloc::*;
 
+#[unstable(feature = "gc", reason = "gc", issue = "none")]
 #[derive(Debug)]
 pub struct BoehmAllocator;
 pub(crate) struct BoehmGcAllocator;

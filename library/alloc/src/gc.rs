@@ -41,6 +41,7 @@ pub struct Gc<T: ?Sized> {
 
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn new(v: T) -> Self {
         Gc { ptr: unsafe { NonNull::new_unchecked(GcBox::new(v)) }, _phantom: PhantomData }
     }
@@ -53,6 +54,7 @@ impl<T> Gc<T> {
     ///
     /// `layout` must be at least as large as `T`, and have an alignment which
     /// is the same, or bigger than, `T`.
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn new_from_layout(layout: Layout) -> Option<Gc<MaybeUninit<T>>> {
         let tl = Layout::new::<T>();
         if layout.size() < tl.size() && layout.align() >= tl.align() {
@@ -63,6 +65,7 @@ impl<T> Gc<T> {
 }
 
 impl Gc<dyn Any> {
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn downcast<T: Any>(&self) -> Result<Gc<T>, Gc<dyn Any>> {
         if (*self).is::<T>() {
             let ptr = self.ptr.cast::<GcBox<T>>();
@@ -75,14 +78,17 @@ impl Gc<dyn Any> {
 
 impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn into_raw(this: Self) -> *const T {
         this.ptr.as_ptr() as *const T
     }
 
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.ptr.as_ptr() == other.ptr.as_ptr()
     }
 
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub fn from_raw(raw: *const T) -> Gc<T> {
         Gc { ptr: unsafe { NonNull::new_unchecked(raw as *mut GcBox<T>) }, _phantom: PhantomData }
     }
@@ -97,6 +103,7 @@ impl<T> Gc<MaybeUninit<T>> {
     /// that the inner value really is in an initialized state. Calling this
     /// when the content is not yet fully initialized causes immediate undefined
     /// behaviour.
+    #[unstable(feature = "gc", reason = "gc", issue = "none")]
     pub unsafe fn assume_init(self) -> Gc<T> {
         let ptr = self.ptr.as_ptr() as *mut GcBox<MaybeUninit<T>>;
         unsafe { Gc::from_inner((&mut *ptr).assume_init()) }
