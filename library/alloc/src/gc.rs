@@ -99,7 +99,7 @@ impl<T> Gc<MaybeUninit<T>> {
     /// behaviour.
     pub unsafe fn assume_init(self) -> Gc<T> {
         let ptr = self.ptr.as_ptr() as *mut GcBox<MaybeUninit<T>>;
-        Gc::from_inner((&mut *ptr).assume_init())
+        unsafe { Gc::from_inner((&mut *ptr).assume_init()) }
     }
 }
 
@@ -139,7 +139,9 @@ impl<T> GcBox<T> {
 
     fn register_finalizer(&mut self) {
         unsafe extern "C" fn fshim<T>(obj: *mut c_void, _meta: *mut c_void) {
-            ManuallyDrop::drop(&mut *(obj as *mut ManuallyDrop<T>));
+            unsafe {
+                ManuallyDrop::drop(&mut *(obj as *mut ManuallyDrop<T>));
+            }
         }
 
         unsafe {
@@ -192,7 +194,7 @@ impl<T> GcBox<MaybeUninit<T>> {
         // is reclaimed, T will be dropped. We need to find its vptr and replace the
         // GcDummyDrop vptr in the block header with it.
         self.register_finalizer();
-        NonNull::new_unchecked(self as *mut _ as *mut GcBox<T>)
+        unsafe { NonNull::new_unchecked(self as *mut _ as *mut GcBox<T>) }
     }
 }
 

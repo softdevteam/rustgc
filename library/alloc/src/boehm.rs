@@ -13,15 +13,15 @@ pub(crate) struct BoehmGcAllocator;
 #[unstable(feature = "allocator_api", issue = "32838")]
 unsafe impl GlobalAlloc for BoehmAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        GC_malloc_uncollectable(layout.size()) as *mut u8
+        unsafe { GC_malloc_uncollectable(layout.size()) as *mut u8 }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
-        GC_free(ptr as *mut c_void);
+        unsafe { GC_free(ptr as *mut c_void) };
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, _: Layout, new_size: usize) -> *mut u8 {
-        GC_realloc(ptr as *mut c_void, new_size) as *mut u8
+        unsafe { GC_realloc(ptr as *mut c_void, new_size) as *mut u8 }
     }
 }
 
