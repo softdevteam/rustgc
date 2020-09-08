@@ -298,7 +298,7 @@ pub struct Vec<T> {
 // Inherent methods
 ////////////////////////////////////////////////////////////////////////////////
 
-#[cfg_attr(not(bootstrap), lang = "vec_with_capacity_gc")]
+#[cfg_attr(not(any(bootstrap, test)), lang = "vec_with_capacity_gc")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(missing_docs)]
 #[allow(unused_variables)]
@@ -307,7 +307,7 @@ pub fn vec_with_capacity_gc<T>(capacity: usize) -> Vec<T> {
     unsafe { Vec { buf: RawVec::from_raw_parts(temp_buf.ptr(), temp_buf.capacity()), len: 0 } }
 }
 
-#[cfg_attr(not(bootstrap), lang = "vec_push_gc")]
+#[cfg_attr(not(any(bootstrap, test)), lang = "vec_push_gc")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(missing_docs)]
 #[allow(unused_variables)]
