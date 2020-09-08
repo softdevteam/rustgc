@@ -2,6 +2,7 @@
 #![feature(box_syntax)]
 #![feature(drain_filter)]
 #![feature(exact_size_is_empty)]
+#![feature(gc)]
 #![feature(new_uninit)]
 #![feature(pattern)]
 #![feature(str_split_once)]
@@ -25,6 +26,7 @@ mod boxed;
 mod btree_set_hash;
 mod cow_str;
 mod fmt;
+mod gc;
 mod heap;
 mod linked_list;
 mod rc;

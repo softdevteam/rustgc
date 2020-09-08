@@ -53,15 +53,35 @@ impl<T> Gc<T> {
     /// This can be useful if you want to store a value with a custom layout,
     /// but have the collector treat the value as if it were T.
     ///
-    /// `layout` must be at least as large as `T`, and have an alignment which
-    /// is the same, or bigger than, `T`.
-    #[unstable(feature = "gc", reason = "gc", issue = "none")]
-    pub fn new_from_layout(layout: Layout) -> Option<Gc<MaybeUninit<T>>> {
+    /// # Panics
+    ///
+    /// If `layout` is smaller than that required by `T` and/or has an alignment
+    /// which is smaller than that required by `T`.
+    pub fn new_from_layout(layout: Layout) -> Gc<MaybeUninit<T>> {
         let tl = Layout::new::<T>();
-        if layout.size() < tl.size() && layout.align() >= tl.align() {
-            return None;
+        if layout.size() < tl.size() || layout.align() < tl.align() {
+            panic!(
+                "Requested layout {:?} is either smaller than size {} and/or not aligned to {}",
+                layout,
+                tl.size(),
+                tl.align()
+            );
         }
-        Some(Gc::from_inner(GcBox::new_from_layout(layout)))
+        unsafe { Gc::new_from_layout_unchecked(layout) }
+    }
+
+    /// Constructs a new `Gc<MaybeUninit<T>>` which is capable of storing data
+    /// up-to the size permissible by `layout`.
+    ///
+    /// This can be useful if you want to store a value with a custom layout,
+    /// but have the collector treat the value as if it were T.
+    ///
+    /// # Safety
+    ///
+    /// The caller is responsible for ensuring that both `layout`'s size and
+    /// alignment must match or exceed that required to store `T`.
+    pub unsafe fn new_from_layout_unchecked(layout: Layout) -> Gc<MaybeUninit<T>> {
+        Gc::from_inner(GcBox::new_from_layout(layout))
     }
 }
 
