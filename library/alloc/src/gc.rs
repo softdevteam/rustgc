@@ -3,9 +3,9 @@ use core::alloc::Layout;
 use core::any::Any;
 use core::fmt;
 use core::gc::ManageableContents;
-use core::marker::PhantomData;
+use core::marker::{PhantomData, Unsize};
 use core::mem::{self, ManuallyDrop, MaybeUninit};
-use core::ops::{Deref, DerefMut};
+use core::ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn};
 use core::ptr::{self, NonNull};
 
 use boehm_shim;
@@ -130,6 +130,9 @@ impl<T> Gc<MaybeUninit<T>> {
         unsafe { Gc::from_inner((&mut *ptr).assume_init()) }
     }
 }
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Gc<U>> for Gc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Gc<U>> for Gc<T> {}
 
 /// A `GcBox` is a 0-cost wrapper which allows a single `Drop` implementation
 /// while also permitting multiple, copyable `Gc` references. The `drop` method

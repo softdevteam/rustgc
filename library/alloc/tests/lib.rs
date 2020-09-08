@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![feature(arbitrary_self_types)]
 #![feature(box_syntax)]
 #![feature(drain_filter)]
 #![feature(exact_size_is_empty)]
