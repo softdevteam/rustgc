@@ -4,6 +4,9 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::PathBuf;
 
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_hir::def_id::DefId;
+use rustc_middle::middle::privacy::AccessLevels;
 use rustc_session::config::{self, parse_crate_types_from_list, parse_externs, CrateType};
 use rustc_session::config::{
     build_codegen_options, build_debugging_options, get_cmd_lint_options, host_triple,
@@ -20,6 +23,7 @@ use crate::core::new_handler;
 use crate::externalfiles::ExternalHtml;
 use crate::html;
 use crate::html::markdown::IdMap;
+use crate::html::render::StylePath;
 use crate::html::static_files;
 use crate::opts;
 use crate::passes::{self, Condition, DefaultPassOption};
@@ -79,9 +83,9 @@ pub struct Options {
     /// Codegen options strings to hand to the compiler.
     pub codegen_options_strs: Vec<String>,
     /// Debugging (`-Z`) options to pass to the compiler.
-    pub debugging_options: DebuggingOptions,
+    pub debugging_opts: DebuggingOptions,
     /// Debugging (`-Z`) options strings to pass to the compiler.
-    pub debugging_options_strs: Vec<String>,
+    pub debugging_opts_strs: Vec<String>,
     /// The target used to compile the crate against.
     pub target: TargetTriple,
     /// Edition used when reading the crate. Defaults to "2015". Also used by default when
@@ -123,10 +127,6 @@ pub struct Options {
     ///
     /// Be aware: This option can come both from the CLI and from crate attributes!
     pub default_passes: DefaultPassOption,
-    /// Document items that have lower than `pub` visibility.
-    pub document_private: bool,
-    /// Document items that have `doc(hidden)`.
-    pub document_hidden: bool,
     /// Any passes manually selected by the user.
     ///
     /// Be aware: This option can come both from the CLI and from crate attributes!
@@ -177,8 +177,6 @@ impl fmt::Debug for Options {
             .field("test_args", &self.test_args)
             .field("persist_doctests", &self.persist_doctests)
             .field("default_passes", &self.default_passes)
-            .field("document_private", &self.document_private)
-            .field("document_hidden", &self.document_hidden)
             .field("manual_passes", &self.manual_passes)
             .field("display_warnings", &self.display_warnings)
             .field("show_coverage", &self.show_coverage)
@@ -213,7 +211,7 @@ pub struct RenderOptions {
     pub sort_modules_alphabetically: bool,
     /// List of themes to extend the docs with. Original argument name is included to assist in
     /// displaying errors if it fails a theme check.
-    pub themes: Vec<PathBuf>,
+    pub themes: Vec<StylePath>,
     /// If present, CSS file that contains rules to add to the default CSS.
     pub extension_css: Option<PathBuf>,
     /// A map of crate names to the URL to use instead of querying the crate's `html_root_url`.
@@ -248,8 +246,24 @@ pub struct RenderOptions {
     /// If false, the `select` element to have search filtering by crates on rendered docs
     /// won't be generated.
     pub generate_search_filter: bool,
-    /// Option (disabled by default) to generate files used by RLS and some other tools.
-    pub generate_redirect_pages: bool,
+    /// Document items that have lower than `pub` visibility.
+    pub document_private: bool,
+    /// Document items that have `doc(hidden)`.
+    pub document_hidden: bool,
+}
+
+/// Temporary storage for data obtained during `RustdocVisitor::clean()`.
+/// Later on moved into `CACHE_KEY`.
+#[derive(Default, Clone)]
+pub struct RenderInfo {
+    pub inlined: FxHashSet<DefId>,
+    pub external_paths: crate::core::ExternalPaths,
+    pub exact_paths: FxHashMap<DefId, Vec<String>>,
+    pub access_levels: AccessLevels<DefId>,
+    pub deref_trait_did: Option<DefId>,
+    pub deref_mut_trait_did: Option<DefId>,
+    pub owned_box_did: Option<DefId>,
+    pub output_format: Option<OutputFormat>,
 }
 
 impl Options {
@@ -304,9 +318,9 @@ impl Options {
         let error_format = config::parse_error_format(&matches, color, json_rendered);
 
         let codegen_options = build_codegen_options(matches, error_format);
-        let debugging_options = build_debugging_options(matches, error_format);
+        let debugging_opts = build_debugging_options(matches, error_format);
 
-        let diag = new_handler(error_format, None, &debugging_options);
+        let diag = new_handler(error_format, None, &debugging_opts);
 
         // check for deprecated options
         check_deprecated_options(&matches, &diag);
@@ -351,7 +365,7 @@ impl Options {
             .iter()
             .map(|s| SearchPath::from_cli_opt(s, error_format))
             .collect();
-        let externs = parse_externs(&matches, &debugging_options, error_format);
+        let externs = parse_externs(&matches, &debugging_opts, error_format);
         let extern_html_root_urls = match parse_extern_html_roots(&matches) {
             Ok(ex) => ex,
             Err(err) => {
@@ -402,19 +416,17 @@ impl Options {
                     return Err(1);
                 } else if !ret.is_empty() {
                     diag.struct_warn(&format!(
-                        "theme file \"{}\" is missing CSS rules from the \
-                                               default theme",
+                        "theme file \"{}\" is missing CSS rules from the default theme",
                         theme_s
                     ))
                     .warn("the theme may appear incorrect when loaded")
                     .help(&format!(
-                        "to see what rules are missing, call `rustdoc \
-                                        --check-theme \"{}\"`",
+                        "to see what rules are missing, call `rustdoc  --check-theme \"{}\"`",
                         theme_s
                     ))
                     .emit();
                 }
-                themes.push(theme_file);
+                themes.push(StylePath { path: theme_file, disabled: true });
             }
         }
 
@@ -447,7 +459,7 @@ impl Options {
             None => return Err(3),
         };
 
-        match matches.opt_str("r").as_ref().map(|s| &**s) {
+        match matches.opt_str("r").as_deref() {
             Some("rust") | None => {}
             Some(s) => {
                 diag.struct_err(&format!("unknown input format: {}", s)).emit();
@@ -494,7 +506,7 @@ impl Options {
         let output_format = match matches.opt_str("output-format") {
             Some(s) => match OutputFormat::try_from(s.as_str()) {
                 Ok(o) => {
-                    if o.is_json() && !show_coverage {
+                    if o.is_json() && !(show_coverage || nightly_options::is_nightly_build()) {
                         diag.struct_err("json output format isn't supported for doc generation")
                             .emit();
                         return Err(1);
@@ -530,10 +542,9 @@ impl Options {
         let static_root_path = matches.opt_str("static-root-path");
         let generate_search_filter = !matches.opt_present("disable-per-crate-search");
         let persist_doctests = matches.opt_str("persist-doctests").map(PathBuf::from);
-        let generate_redirect_pages = matches.opt_present("generate-redirect-pages");
         let test_builder = matches.opt_str("test-builder").map(PathBuf::from);
         let codegen_options_strs = matches.opt_strs("C");
-        let debugging_options_strs = matches.opt_strs("Z");
+        let debugging_opts_strs = matches.opt_strs("Z");
         let lib_strs = matches.opt_strs("L");
         let extern_strs = matches.opt_strs("extern");
         let runtool = matches.opt_str("runtool");
@@ -556,8 +567,8 @@ impl Options {
             cfgs,
             codegen_options,
             codegen_options_strs,
-            debugging_options,
-            debugging_options_strs,
+            debugging_opts,
+            debugging_opts_strs,
             target,
             edition,
             maybe_sysroot,
@@ -567,8 +578,6 @@ impl Options {
             should_test,
             test_args,
             default_passes,
-            document_private,
-            document_hidden,
             manual_passes,
             display_warnings,
             show_coverage,
@@ -596,7 +605,8 @@ impl Options {
                 markdown_css,
                 markdown_playground_url,
                 generate_search_filter,
-                generate_redirect_pages,
+                document_private,
+                document_hidden,
             },
             output_format,
         })
@@ -614,7 +624,9 @@ fn check_deprecated_options(matches: &getopts::Matches, diag: &rustc_errors::Han
 
     for flag in deprecated_flags.iter() {
         if matches.opt_present(flag) {
-            if *flag == "output-format" && matches.opt_present("show-coverage") {
+            if *flag == "output-format"
+                && (matches.opt_present("show-coverage") || nightly_options::is_nightly_build())
+            {
                 continue;
             }
             let mut err =

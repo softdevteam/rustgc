@@ -193,11 +193,12 @@ def interact(proc, queue):
 
 def main():
     global MAILBOX
-    tests = [os.path.splitext(f)[0] for f in glob('*.rs')
-                                    if not f.startswith('_')]
-    whitelist = sys.argv[1:]
-    if whitelist:
-        tests = [test for test in tests if test in whitelist]
+    all_tests = [os.path.splitext(f)[0] for f in glob('*.rs') if not f.startswith('_')]
+    args = sys.argv[1:]
+    if args:
+        tests = [test for test in all_tests if test in args]
+    else
+        tests = all_tests
     if not tests:
         print("Error: No tests to run")
         sys.exit(1)
@@ -210,8 +211,6 @@ def main():
     mailman.daemon = True
     mailman.start()
     for test in tests:
-        if whitelist and test not in whitelist:
-            continue
         run(test)
     MAILBOX.put(None)
     mailman.join()

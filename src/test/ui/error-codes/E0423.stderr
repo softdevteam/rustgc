@@ -33,21 +33,30 @@ LL |     struct Foo { a: bool };
    |     ---------------------- `Foo` defined here
 LL | 
 LL |     let f = Foo();
-   |             ^^^
-   |             |
-   |             did you mean `Foo { /* fields */ }`?
-   |             help: a function with a similar name exists (notice the capitalization): `foo`
+   |             ^^^^^
 ...
 LL | fn foo() {
    | -------- similarly named function `foo` defined here
+   |
+help: use struct literal syntax instead
+   |
+LL |     let f = Foo { a: val };
+   |             ^^^^^^^^^^^^^^
+help: a function with a similar name exists
+   |
+LL |     let f = foo();
+   |             ^^^
 
 error[E0423]: expected value, found struct `T`
   --> $DIR/E0423.rs:14:8
    |
 LL |     if T {} == T {} { println!("Ok"); }
-   |        ^---
-   |        |
-   |        help: surround the struct literal with parenthesis: `(T {})`
+   |        ^ not a value
+   |
+help: surround the struct literal with parentheses
+   |
+LL |     if (T {}) == T {} { println!("Ok"); }
+   |        ^    ^
 
 error: aborting due to 5 previous errors
 

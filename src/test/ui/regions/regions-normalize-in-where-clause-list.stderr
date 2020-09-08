@@ -5,9 +5,7 @@ LL | / fn bar<'a, 'b>()
 LL | |
 LL | |
 LL | |     where <() as Project<'a, 'b>>::Item : Eq
-LL | | {
-LL | | }
-   | |_^
+   | |____________________________________________^
    |
 note: first, the lifetime cannot outlive the lifetime `'a` as defined on the function body at 22:8...
   --> $DIR/regions-normalize-in-where-clause-list.rs:22:8
@@ -26,11 +24,9 @@ LL | / fn bar<'a, 'b>()
 LL | |
 LL | |
 LL | |     where <() as Project<'a, 'b>>::Item : Eq
-LL | | {
-LL | | }
-   | |_^
-   = note: expected  `Project<'a, 'b>`
-              found  `Project<'_, '_>`
+   | |____________________________________________^
+   = note: expected `Project<'a, 'b>`
+              found `Project<'_, '_>`
 
 error[E0495]: cannot infer an appropriate lifetime for lifetime parameter `'a` due to conflicting requirements
   --> $DIR/regions-normalize-in-where-clause-list.rs:22:1
@@ -39,9 +35,7 @@ LL | / fn bar<'a, 'b>()
 LL | |
 LL | |
 LL | |     where <() as Project<'a, 'b>>::Item : Eq
-LL | | {
-LL | | }
-   | |_^
+   | |____________________________________________^
    |
 note: first, the lifetime cannot outlive the lifetime `'a` as defined on the function body at 22:8...
   --> $DIR/regions-normalize-in-where-clause-list.rs:22:8
@@ -60,11 +54,9 @@ LL | / fn bar<'a, 'b>()
 LL | |
 LL | |
 LL | |     where <() as Project<'a, 'b>>::Item : Eq
-LL | | {
-LL | | }
-   | |_^
-   = note: expected  `Project<'a, 'b>`
-              found  `Project<'_, '_>`
+   | |____________________________________________^
+   = note: expected `Project<'a, 'b>`
+              found `Project<'_, '_>`
 
 error[E0495]: cannot infer an appropriate lifetime for lifetime parameter `'a` due to conflicting requirements
   --> $DIR/regions-normalize-in-where-clause-list.rs:22:4
@@ -87,8 +79,8 @@ note: ...so that the types are compatible
    |
 LL | fn bar<'a, 'b>()
    |    ^^^
-   = note: expected  `Project<'a, 'b>`
-              found  `Project<'_, '_>`
+   = note: expected `Project<'a, 'b>`
+              found `Project<'_, '_>`
 
 error: aborting due to 3 previous errors
 

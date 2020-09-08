@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 
 // ignore-emscripten
+// ignore-endian-big behavior of simd_bitmask is endian-specific
 
 // Test that the simd_bitmask intrinsic produces correct results.
 
@@ -39,7 +40,7 @@ fn main() {
     let e = 0b_1101;
 
     // Check usize / isize
-    let msize: Tx4<usize> = Tx4(usize::max_value(), 0, usize::max_value(), usize::max_value());
+    let msize: Tx4<usize> = Tx4(usize::MAX, 0, usize::MAX, usize::MAX);
 
     unsafe {
         let r: u8 = simd_bitmask(z);

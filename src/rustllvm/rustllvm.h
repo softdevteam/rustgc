@@ -3,6 +3,7 @@
 #include "llvm-c/Object.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/Lint.h"
 #include "llvm/Analysis/Passes.h"
@@ -82,6 +83,8 @@ enum LLVMRustAttribute {
   NonLazyBind = 23,
   OptimizeNone = 24,
   ReturnsTwice = 25,
+  ReadNone = 26,
+  InaccessibleMemOnly = 27,
 };
 
 typedef struct OpaqueRustString *RustStringRef;

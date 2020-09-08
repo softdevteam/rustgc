@@ -9,13 +9,13 @@
 #![feature(nll)]
 #![feature(or_patterns)]
 #![feature(test)]
-#![feature(vec_remove_item)]
-#![feature(ptr_offset_from)]
 #![feature(crate_visibility_modifier)]
 #![feature(never_type)]
+#![feature(once_cell)]
 #![recursion_limit = "256"]
 
-extern crate env_logger;
+#[macro_use]
+extern crate lazy_static;
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
 extern crate rustc_attr;
@@ -43,13 +43,13 @@ extern crate rustc_trait_selection;
 extern crate rustc_typeck;
 extern crate test as testing;
 #[macro_use]
-extern crate log;
+extern crate tracing;
 
 use std::default::Default;
 use std::env;
-use std::panic;
 use std::process;
 
+use rustc_errors::ErrorReported;
 use rustc_session::config::{make_crate_type_option, ErrorOutputType, RustcOptGroup};
 use rustc_session::getopts;
 use rustc_session::{early_error, early_warn};
@@ -62,47 +62,34 @@ mod config;
 mod core;
 mod docfs;
 mod doctree;
+#[macro_use]
+mod error;
+mod doctest;
 mod fold;
-pub mod html {
-    crate mod escape;
-    crate mod format;
-    crate mod highlight;
-    crate mod item_type;
-    crate mod layout;
-    pub mod markdown;
-    crate mod render;
-    crate mod sources;
-    crate mod static_files;
-    crate mod toc;
-}
+crate mod formats;
+pub mod html;
+mod json;
 mod markdown;
 mod passes;
-mod test;
 mod theme;
 mod visit_ast;
 mod visit_lib;
 
 struct Output {
     krate: clean::Crate,
-    renderinfo: html::render::RenderInfo,
+    renderinfo: config::RenderInfo,
     renderopts: config::RenderOptions,
 }
 
 pub fn main() {
-    let thread_stack_size: usize = if cfg!(target_os = "haiku") {
-        16_000_000 // 16MB on Haiku
-    } else {
-        32_000_000 // 32MB on other platforms
-    };
     rustc_driver::set_sigpipe_handler();
-    env_logger::init_from_env("RUSTDOC_LOG");
-    let res = std::thread::Builder::new()
-        .stack_size(thread_stack_size)
-        .spawn(move || get_args().map(|args| main_args(&args)).unwrap_or(1))
-        .unwrap()
-        .join()
-        .unwrap_or(rustc_driver::EXIT_FAILURE);
-    process::exit(res);
+    rustc_driver::install_ice_hook();
+    rustc_driver::init_env_logger("RUSTDOC_LOG");
+    let exit_code = rustc_driver::catch_with_exit_code(|| match get_args() {
+        Some(args) => main_args(&args),
+        _ => Err(ErrorReported),
+    });
+    process::exit(exit_code);
 }
 
 fn get_args() -> Option<Vec<String>> {
@@ -165,9 +152,8 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optmulti(
                 "",
                 "passes",
-                "list of passes to also run, you might want \
-                        to pass it multiple times; a value of `list` \
-                        will print available passes",
+                "list of passes to also run, you might want to pass it multiple times; a value of \
+                 `list` will print available passes",
                 "PASSES",
             )
         }),
@@ -197,7 +183,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "html-in-header",
                 "files to include inline in the <head> section of a rendered Markdown file \
-                        or generated documentation",
+                 or generated documentation",
                 "FILES",
             )
         }),
@@ -206,7 +192,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "html-before-content",
                 "files to include inline between <body> and the content of a rendered \
-                        Markdown file or generated documentation",
+                 Markdown file or generated documentation",
                 "FILES",
             )
         }),
@@ -215,7 +201,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "html-after-content",
                 "files to include inline between the content and </body> of a rendered \
-                        Markdown file or generated documentation",
+                 Markdown file or generated documentation",
                 "FILES",
             )
         }),
@@ -224,7 +210,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "markdown-before-content",
                 "files to include inline between <body> and the content of a rendered \
-                        Markdown file or generated documentation",
+                 Markdown file or generated documentation",
                 "FILES",
             )
         }),
@@ -233,7 +219,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "markdown-after-content",
                 "files to include inline between the content and </body> of a rendered \
-                        Markdown file or generated documentation",
+                 Markdown file or generated documentation",
                 "FILES",
             )
         }),
@@ -248,8 +234,8 @@ fn opts() -> Vec<RustcOptGroup> {
                 "e",
                 "extend-css",
                 "To add some CSS rules with a given file to generate doc with your \
-                      own theme. However, your theme might break if the rustdoc's generated HTML \
-                      changes, so be careful!",
+                 own theme. However, your theme might break if the rustdoc's generated HTML \
+                 changes, so be careful!",
                 "PATH",
             )
         }),
@@ -262,7 +248,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "playground-url",
                 "URL to send code snippets to, may be reset by --markdown-playground-url \
-                      or `#![doc(html_playground_url=...)]`",
+                 or `#![doc(html_playground_url=...)]`",
                 "URL",
             )
         }),
@@ -276,8 +262,7 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optflag(
                 "",
                 "sort-modules-by-appearance",
-                "sort modules by where they appear in the \
-                                                         program, rather than alphabetically",
+                "sort modules by where they appear in the program, rather than alphabetically",
             )
         }),
         stable("theme", |o| {
@@ -296,7 +281,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "resource-suffix",
                 "suffix to add to CSS and JavaScript files, e.g., \"light.css\" will become \
-                      \"light-suffix.css\"",
+                 \"light-suffix.css\"",
                 "PATH",
             )
         }),
@@ -358,7 +343,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "static-root-path",
                 "Path string to force loading static files from in output pages. \
-                      If not set, uses combinations of '../' to reach the documentation root.",
+                 If not set, uses combinations of '../' to reach the documentation root.",
                 "PATH",
             )
         }),
@@ -375,13 +360,6 @@ fn opts() -> Vec<RustcOptGroup> {
                 "persist-doctests",
                 "Directory to persist doctest executables into",
                 "PATH",
-            )
-        }),
-        unstable("generate-redirect-pages", |o| {
-            o.optflag(
-                "",
-                "generate-redirect-pages",
-                "Generate extra pages to support legacy URLs and tool links",
             )
         }),
         unstable("show-coverage", |o| {
@@ -432,7 +410,10 @@ fn usage(argv0: &str) {
     println!("{}", options.usage(&format!("{} [options] <input>", argv0)));
 }
 
-fn main_args(args: &[String]) -> i32 {
+/// A result type used by several functions under `main()`.
+type MainResult = Result<(), ErrorReported>;
+
+fn main_args(args: &[String]) -> MainResult {
     let mut options = getopts::Options::new();
     for option in opts() {
         (option.apply)(&mut options);
@@ -443,83 +424,111 @@ fn main_args(args: &[String]) -> i32 {
             early_error(ErrorOutputType::default(), &err.to_string());
         }
     };
+
+    // Note that we discard any distinction between different non-zero exit
+    // codes from `from_matches` here.
     let options = match config::Options::from_matches(&matches) {
         Ok(opts) => opts,
-        Err(code) => return code,
+        Err(code) => return if code == 0 { Ok(()) } else { Err(ErrorReported) },
     };
-    rustc_interface::interface::default_thread_pool(options.edition, move || main_options(options))
+    rustc_interface::util::setup_callbacks_and_run_in_thread_pool_with_globals(
+        options.edition,
+        1, // this runs single-threaded, even in a parallel compiler
+        &None,
+        move || main_options(options),
+    )
 }
 
-fn main_options(options: config::Options) -> i32 {
-    let diag = core::new_handler(options.error_format, None, &options.debugging_options);
+fn wrap_return(diag: &rustc_errors::Handler, res: Result<(), String>) -> MainResult {
+    match res {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            diag.struct_err(&err).emit();
+            Err(ErrorReported)
+        }
+    }
+}
+
+fn run_renderer<T: formats::FormatRenderer>(
+    krate: clean::Crate,
+    renderopts: config::RenderOptions,
+    render_info: config::RenderInfo,
+    diag: &rustc_errors::Handler,
+    edition: rustc_span::edition::Edition,
+) -> MainResult {
+    match formats::run_format::<T>(krate, renderopts, render_info, &diag, edition) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let mut msg = diag.struct_err(&format!("couldn't generate documentation: {}", e.error));
+            let file = e.file.display().to_string();
+            if file.is_empty() {
+                msg.emit()
+            } else {
+                msg.note(&format!("failed to create or modify \"{}\"", file)).emit()
+            }
+            Err(ErrorReported)
+        }
+    }
+}
+
+fn main_options(options: config::Options) -> MainResult {
+    let diag = core::new_handler(options.error_format, None, &options.debugging_opts);
 
     match (options.should_test, options.markdown_input()) {
-        (true, true) => return markdown::test(options, &diag),
-        (true, false) => return test::run(options),
+        (true, true) => return wrap_return(&diag, markdown::test(options)),
+        (true, false) => return doctest::run(options),
         (false, true) => {
-            return markdown::render(options.input, options.render_options, &diag, options.edition);
+            return wrap_return(
+                &diag,
+                markdown::render(&options.input, options.render_options, options.edition),
+            );
         }
         (false, false) => {}
     }
 
     // need to move these items separately because we lose them by the time the closure is called,
     // but we can't crates the Handler ahead of time because it's not Send
-    let diag_opts = (options.error_format, options.edition, options.debugging_options.clone());
+    let diag_opts = (options.error_format, options.edition, options.debugging_opts.clone());
     let show_coverage = options.show_coverage;
-    rust_input(options, move |out| {
-        if show_coverage {
-            // if we ran coverage, bail early, we don't need to also generate docs at this point
-            // (also we didn't load in any of the useful passes)
-            return rustc_driver::EXIT_SUCCESS;
-        }
 
-        let Output { krate, renderinfo, renderopts } = out;
-        info!("going to format");
-        let (error_format, edition, debugging_options) = diag_opts;
-        let diag = core::new_handler(error_format, None, &debugging_options);
-        match html::render::run(krate, renderopts, renderinfo, &diag, edition) {
-            Ok(_) => rustc_driver::EXIT_SUCCESS,
-            Err(e) => {
-                diag.struct_err(&format!("couldn't generate documentation: {}", e.error))
-                    .note(&format!("failed to create or modify \"{}\"", e.file.display()))
-                    .emit();
-                rustc_driver::EXIT_FAILURE
-            }
-        }
-    })
-}
-
-/// Interprets the input file as a rust source file, passing it through the
-/// compiler all the way through the analysis passes. The rustdoc output is then
-/// generated from the cleaned AST of the crate.
-///
-/// This form of input will run all of the plug/cleaning passes
-fn rust_input<R, F>(options: config::Options, f: F) -> R
-where
-    R: 'static + Send,
-    F: 'static + Send + FnOnce(Output) -> R,
-{
     // First, parse the crate and extract all relevant information.
     info!("starting to run rustc");
 
-    let result = rustc_driver::catch_fatal_errors(move || {
-        let crate_name = options.crate_name.clone();
-        let crate_version = options.crate_version.clone();
-        let (mut krate, renderinfo, renderopts) = core::run_core(options);
+    // Interpret the input file as a rust source file, passing it through the
+    // compiler all the way through the analysis passes. The rustdoc output is
+    // then generated from the cleaned AST of the crate. This runs all the
+    // plug/cleaning passes.
+    let crate_name = options.crate_name.clone();
+    let crate_version = options.crate_version.clone();
+    let output_format = options.output_format;
+    let (mut krate, renderinfo, renderopts, sess) = core::run_core(options);
 
-        info!("finished with rustc");
+    info!("finished with rustc");
 
-        if let Some(name) = crate_name {
-            krate.name = name
-        }
+    if let Some(name) = crate_name {
+        krate.name = name
+    }
 
-        krate.version = crate_version;
+    krate.version = crate_version;
 
-        f(Output { krate, renderinfo, renderopts })
-    });
+    let out = Output { krate, renderinfo, renderopts };
 
-    match result {
-        Ok(output) => output,
-        Err(_) => panic::resume_unwind(Box::new(rustc_errors::FatalErrorMarker)),
+    if show_coverage {
+        // if we ran coverage, bail early, we don't need to also generate docs at this point
+        // (also we didn't load in any of the useful passes)
+        return Ok(());
+    }
+
+    let Output { krate, renderinfo, renderopts } = out;
+    info!("going to format");
+    let (error_format, edition, debugging_options) = diag_opts;
+    let diag = core::new_handler(error_format, None, &debugging_options);
+    match output_format {
+        None | Some(config::OutputFormat::Html) => sess.time("render_html", || {
+            run_renderer::<html::render::Context>(krate, renderopts, renderinfo, &diag, edition)
+        }),
+        Some(config::OutputFormat::Json) => sess.time("render_json", || {
+            run_renderer::<json::JsonRenderer>(krate, renderopts, renderinfo, &diag, edition)
+        }),
     }
 }

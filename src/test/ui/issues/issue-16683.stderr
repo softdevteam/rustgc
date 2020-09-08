@@ -7,10 +7,8 @@ LL |         self.a();
 note: first, the lifetime cannot outlive the anonymous lifetime #1 defined on the method body at 3:5...
   --> $DIR/issue-16683.rs:3:5
    |
-LL | /     fn b(&self) {
-LL | |         self.a();
-LL | |     }
-   | |_____^
+LL |     fn b(&self) {
+   |     ^^^^^^^^^^^
 note: ...so that reference does not outlive borrowed content
   --> $DIR/issue-16683.rs:4:9
    |
@@ -26,8 +24,8 @@ note: ...so that the types are compatible
    |
 LL |         self.a();
    |              ^
-   = note: expected  `&'a Self`
-              found  `&Self`
+   = note: expected `&'a Self`
+              found `&Self`
 
 error: aborting due to previous error
 

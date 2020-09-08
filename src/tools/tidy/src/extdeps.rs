@@ -3,13 +3,14 @@
 use std::fs;
 use std::path::Path;
 
-/// List of whitelisted sources for packages.
-const WHITELISTED_SOURCES: &[&str] = &["\"registry+https://github.com/rust-lang/crates.io-index\""];
+/// List of allowed sources for packages.
+const ALLOWED_SOURCES: &[&str] = &["\"registry+https://github.com/rust-lang/crates.io-index\""];
 
-/// Checks for external package sources.
-pub fn check(path: &Path, bad: &mut bool) {
-    // `Cargo.lock` of rust (tidy runs inside `src/`).
-    let path = path.join("../Cargo.lock");
+/// Checks for external package sources. `root` is the path to the directory that contains the
+/// workspace `Cargo.toml`.
+pub fn check(root: &Path, bad: &mut bool) {
+    // `Cargo.lock` of rust.
+    let path = root.join("Cargo.lock");
 
     // Open and read the whole file.
     let cargo_lock = t!(fs::read_to_string(&path));
@@ -24,8 +25,8 @@ pub fn check(path: &Path, bad: &mut bool) {
         // Extract source value.
         let source = line.splitn(2, '=').nth(1).unwrap().trim();
 
-        // Ensure source is whitelisted.
-        if !WHITELISTED_SOURCES.contains(&&*source) {
+        // Ensure source is allowed.
+        if !ALLOWED_SOURCES.contains(&&*source) {
             println!("invalid source: {}", source);
             *bad = true;
         }

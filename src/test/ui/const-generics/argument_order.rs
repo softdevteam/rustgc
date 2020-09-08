@@ -1,9 +1,22 @@
-#![feature(const_generics)]
-//~^ WARN the feature `const_generics` is incomplete and may cause the compiler to crash
+// revisions: full min
+#![cfg_attr(full, feature(const_generics))]
+#![cfg_attr(full, allow(incomplete_features))]
+#![cfg_attr(min, feature(min_const_generics))]
 
-struct Bad<const N: usize, T> { //~ ERROR type parameters must be declared prior
+struct Bad<const N: usize, T> {
+    //[min]~^ ERROR type parameters must be declared prior to const parameters
     arr: [u8; { N }],
     another: T,
 }
 
-fn main() { }
+struct AlsoBad<const N: usize, 'a, T, 'b, const M: usize, U> {
+    //~^ ERROR lifetime parameters must be declared prior
+    //[min]~^^ ERROR type parameters must be declared prior to const parameters
+    a: &'a T,
+    b: &'b U,
+}
+
+fn main() {
+    let _: AlsoBad<7, 'static, u32, 'static, 17, u16>;
+    //~^ ERROR lifetime provided when a type was expected
+ }

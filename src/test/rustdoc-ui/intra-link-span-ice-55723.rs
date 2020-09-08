@@ -1,4 +1,4 @@
-#![deny(intra_doc_link_resolution_failure)]
+#![deny(broken_intra_doc_links)]
 
 // An error in calculating spans while reporting intra-doc link resolution errors caused rustdoc to
 // attempt to slice in the middle of a multibyte character. See
@@ -7,7 +7,7 @@
 /// ## For example:
 ///
 /// （arr[i]）
-//~^ ERROR `[i]` cannot be resolved, ignoring it.
+//~^ ERROR `i`
 pub fn test_ice() {
     unimplemented!();
 }

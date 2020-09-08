@@ -1,0 +1,10 @@
+[package]
+name = "boehm_shim"
+version = "0.1.0"
+authors = ["Jacob Hughes <jh@jakehughes.uk>"]
+edition = "2018"
+
+[dependencies]
+
+core = { path = "../core" }
+compiler_builtins = { version = "0.1.10", features = ['rustc-dep-of-std'] }

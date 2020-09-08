@@ -15,7 +15,7 @@
 //! We have two separate encoding schemes: a skiplist-like approach, and a
 //! compressed bitset. The datasets we consider mostly use the skiplist (it's
 //! smaller) but the lowercase and uppercase sets are sufficiently sparse for
-//! the bitset to be worthwhile -- for those sets the biset is a 2x size win.
+//! the bitset to be worthwhile -- for those sets the bitset is a 2x size win.
 //! Since the bitset is also faster, this seems an obvious choice. (As a
 //! historical note, the bitset was also the prior implementation, so its
 //! relative complexity had already been paid).
@@ -220,7 +220,7 @@ fn main() {
     let write_location = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!("Must provide path to write unicode tables to");
         eprintln!(
-            "e.g. {} src/libcore/unicode/unicode_data.rs",
+            "e.g. {} library/core/unicode/unicode_data.rs",
             std::env::args().next().unwrap_or_default()
         );
         std::process::exit(1);
@@ -315,7 +315,7 @@ fn version() -> String {
 fn fmt_list<V: std::fmt::Debug>(values: impl IntoIterator<Item = V>) -> String {
     let pieces = values.into_iter().map(|b| format!("{:?}, ", b)).collect::<Vec<_>>();
     let mut out = String::new();
-    let mut line = format!("\n    ");
+    let mut line = String::from("\n    ");
     for piece in pieces {
         if line.len() + piece.len() < 98 {
             line.push_str(&piece);

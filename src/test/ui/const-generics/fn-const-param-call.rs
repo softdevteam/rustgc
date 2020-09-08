@@ -1,15 +1,18 @@
-// run-pass
+// Check that functions cannot be used as const parameters.
+// revisions: full min
 
-#![feature(const_generics, const_compare_raw_pointers)]
-//~^ WARN the feature `const_generics` is incomplete and may cause the compiler to crash
+#![cfg_attr(full, feature(const_generics))]
+#![cfg_attr(full, allow(incomplete_features))]
+#![cfg_attr(min, feature(min_const_generics))]
 
 fn function() -> u32 {
     17
 }
 
-struct Wrapper<const F: fn() -> u32>;
+struct Wrapper<const F: fn() -> u32>; //~ ERROR: using function pointers as const generic parameters
 
 impl<const F: fn() -> u32> Wrapper<F> {
+//~^ ERROR: using function pointers as const generic parameters
     fn call() -> u32 {
         F()
     }

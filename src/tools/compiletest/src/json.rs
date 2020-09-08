@@ -4,7 +4,6 @@
 use crate::errors::{Error, ErrorKind};
 use crate::runtest::ProcRes;
 use serde::Deserialize;
-use serde_json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -76,7 +75,7 @@ pub fn extract_rendered(output: &str) -> String {
             if line.starts_with('{') {
                 if let Ok(diagnostic) = serde_json::from_str::<Diagnostic>(line) {
                     diagnostic.rendered
-                } else if let Ok(_) = serde_json::from_str::<ArtifactNotification>(line) {
+                } else if serde_json::from_str::<ArtifactNotification>(line).is_ok() {
                     // Ignore the notification.
                     None
                 } else {
