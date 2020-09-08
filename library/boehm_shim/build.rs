@@ -50,6 +50,6 @@ fn main() {
     let mut libpath = PathBuf::from(&boehm_src);
     libpath.push(BUILD_DIR);
 
-    println!("cargo:rustc-link-search=static={}", &libpath.as_path().to_str().unwrap());
-    println!("cargo:rustc-link-lib=dylib=gc");
+    println!("cargo:rustc-link-search=native={}", &libpath.as_path().to_str().unwrap());
+    println!("cargo:rustc-link-lib=static=gc");
 }
