@@ -7,4 +7,4 @@ set -e
 # Ensure the build fails if it uses excessive amounts of memory.
 ulimit -d $((1024 * 1024 * 8)) # 8 GiB
 
-./x.py test --exclude src/tools/tidy --stage 1
+./x.py test --stage 1

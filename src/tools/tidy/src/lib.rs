@@ -52,6 +52,7 @@ fn filter_dirs(path: &Path) -> bool {
     let skip = [
         "src/llvm-project",
         "library/backtrace",
+        "library/boehm_shim/target",
         "library/stdarch",
         "src/tools/cargo",
         "src/tools/clippy",
