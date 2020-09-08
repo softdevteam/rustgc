@@ -158,7 +158,7 @@ impl<T> GcBox<T> {
     fn new_from_layout(layout: Layout) -> NonNull<GcBox<MaybeUninit<T>>> {
         unsafe {
             let base_ptr = BoehmGcAllocator.alloc(layout).unwrap().as_ptr() as *mut usize;
-            NonNull::new_unchecked((base_ptr.add(1)) as *mut GcBox<MaybeUninit<T>>)
+            NonNull::new_unchecked(base_ptr as *mut GcBox<MaybeUninit<T>>)
         }
     }
 
