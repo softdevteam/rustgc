@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 core = { path = "../core" }
+boehm_shim = { path = "../boehm_shim/" }
 compiler_builtins = { version = "0.1.10", features = ['rustc-dep-of-std'] }
 
 [dev-dependencies]

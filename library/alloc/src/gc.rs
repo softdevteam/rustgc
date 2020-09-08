@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 use core::alloc::Layout;
 use core::any::Any;
-use core::ffi::c_void;
 use core::fmt;
 use core::gc::ManageableContents;
 use core::marker::PhantomData;
@@ -9,8 +8,10 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 
+use boehm_shim;
+
 use crate::alloc::AllocRef;
-use crate::boehm::{self, BoehmGcAllocator};
+use crate::boehm::BoehmGcAllocator;
 use crate::vec::Vec;
 
 /// A garbage collected pointer.
@@ -142,15 +143,15 @@ impl<T> GcBox<T> {
     }
 
     fn register_finalizer(&mut self) {
-        unsafe extern "C" fn fshim<T>(obj: *mut c_void, _meta: *mut c_void) {
+        unsafe extern "C" fn fshim<T>(obj: *mut u8, _meta: *mut u8) {
             unsafe {
                 ManuallyDrop::drop(&mut *(obj as *mut ManuallyDrop<T>));
             }
         }
 
         unsafe {
-            boehm::GC_register_finalizer(
-                self as *mut _ as *mut c_void,
+            boehm_shim::gc_register_finalizer(
+                self as *mut _ as *mut u8,
                 fshim::<T>,
                 ptr::null_mut(),
                 ptr::null_mut(),

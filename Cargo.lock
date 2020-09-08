@@ -35,6 +35,7 @@ dependencies = [
 name = "alloc"
 version = "0.0.0"
 dependencies = [
+ "boehm_shim",
  "compiler_builtins",
  "core",
  "rand",
@@ -193,6 +194,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa79dedbb091f449f1f39e53edf88d5dbe95f895dae6135a8d7b881fb5af73f5"
 dependencies = [
  "byte-tools",
+]
+
+[[package]]
+name = "boehm_shim"
+version = "0.1.0"
+dependencies = [
+ "compiler_builtins",
+ "core",
 ]
 
 [[package]]
@@ -4429,6 +4438,7 @@ version = "0.0.0"
 dependencies = [
  "addr2line",
  "alloc",
+ "boehm_shim",
  "cfg-if",
  "compiler_builtins",
  "core",

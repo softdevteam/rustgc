@@ -116,6 +116,7 @@
 #![feature(ptr_internals)]
 #![feature(raw_ref_op)]
 #![feature(rustc_attrs)]
+#![feature(rustc_private)]
 #![feature(receiver_trait)]
 #![feature(specialization)]
 #![feature(slice_ptr_get)]
@@ -143,6 +144,9 @@
 extern crate std;
 #[cfg(test)]
 extern crate test;
+
+#[allow(unused_extern_crates)]
+extern crate boehm_shim;
 
 // Module with internal macros used by other modules (needs to be included before other modules).
 #[macro_use]
