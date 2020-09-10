@@ -3,6 +3,7 @@ use core::alloc::Layout;
 use core::any::Any;
 use core::fmt;
 use core::gc::ManageableContents;
+use core::hash::{Hash, Hasher};
 use core::marker::{PhantomData, Unsize};
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn};
@@ -35,6 +36,7 @@ use crate::vec::Vec;
 /// `Gc<T>` automatically dereferences to `T` (via the `Deref` trait), so
 /// you can call `T`'s methods on a value of type `Gc<T>`.
 #[unstable(feature = "gc", reason = "gc", issue = "none")]
+#[derive(PartialEq, Eq)]
 pub struct Gc<T: ?Sized> {
     ptr: NonNull<GcBox<T>>,
     _phantom: PhantomData<T>,
@@ -263,5 +265,12 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Gc<T> {
 impl<T: ?Sized + fmt::Display> fmt::Display for Gc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
+    }
+}
+
+#[unstable(feature = "gc", reason = "gc", issue = "none")]
+impl<T: ?Sized + Hash> Hash for Gc<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (**self).hash(state);
     }
 }
