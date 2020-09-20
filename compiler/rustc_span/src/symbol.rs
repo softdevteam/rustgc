@@ -715,6 +715,7 @@ symbols! {
         no_crate_inject,
         no_debug,
         no_default_passes,
+        no_finalize,
         no_implicit_prelude,
         no_inline,
         no_link,
