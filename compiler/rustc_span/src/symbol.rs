@@ -698,6 +698,7 @@ symbols! {
         nearbyintf64,
         needs_allocator,
         needs_drop,
+        needs_finalizer,
         needs_panic_runtime,
         neg,
         negate_unsigned,

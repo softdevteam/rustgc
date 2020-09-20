@@ -898,9 +898,17 @@ rustc_queries! {
         query is_freeze_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
             desc { "computing whether `{}` is freeze", env.value }
         }
+        /// Query backing `TyS::is_no_finalize`.
+        query is_no_finalize_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+            desc { "computing whether `{}` is `NoFinalize`", env.value }
+        }
         /// Query backing `TyS::needs_drop`.
         query needs_drop_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
             desc { "computing whether `{}` needs drop", env.value }
+        }
+        /// Query backing `TyS::needs_finalizer`.
+        query needs_finalizer_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+            desc { "computing whether `{}` needs finalizer", env.value }
         }
 
         /// Query backing `TyS::is_structural_eq_shallow`.
@@ -919,6 +927,15 @@ rustc_queries! {
         /// then `Err(AlwaysRequiresDrop)` is returned.
         query adt_drop_tys(def_id: DefId) -> Result<&'tcx ty::List<Ty<'tcx>>, AlwaysRequiresDrop> {
             desc { |tcx| "computing when `{}` needs drop", tcx.def_path_str(def_id) }
+            cache_on_disk_if { true }
+        }
+
+        /// A list of types where the ADT requires finalization when used with
+        /// GC if and only if any of those types require finalization. If the
+        /// ADT is known to always need finalization then
+        /// `Err(AlwaysRequiresDrop)` is returned.
+        query adt_finalize_tys(def_id: DefId) -> Result<&'tcx ty::List<Ty<'tcx>>, AlwaysRequiresDrop> {
+            desc { |tcx| "computing when `{}` needs finalize", tcx.def_path_str(def_id) }
             cache_on_disk_if { true }
         }
 

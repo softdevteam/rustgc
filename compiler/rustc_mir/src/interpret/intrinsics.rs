@@ -61,6 +61,7 @@ crate fn eval_nullary_intrinsic<'tcx>(
             ConstValue::Slice { data: alloc, start: 0, end: alloc.len() }
         }
         sym::needs_drop => ConstValue::from_bool(tp_ty.needs_drop(tcx, param_env)),
+        sym::needs_finalizer => ConstValue::from_bool(tp_ty.needs_finalizer(tcx, param_env)),
         sym::size_of | sym::min_align_of | sym::pref_align_of => {
             let layout = tcx.layout_of(param_env.and(tp_ty)).map_err(|e| err_inval!(Layout(e)))?;
             let n = match name {
@@ -136,6 +137,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             sym::min_align_of
             | sym::pref_align_of
             | sym::needs_drop
+            | sym::needs_finalizer
             | sym::size_of
             | sym::type_id
             | sym::type_name
@@ -146,6 +148,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         self.tcx.types.usize
                     }
                     sym::needs_drop => self.tcx.types.bool,
+                    sym::needs_finalizer => self.tcx.types.bool,
                     sym::type_id => self.tcx.types.u64,
                     sym::type_name => self.tcx.mk_static_str(),
                     _ => bug!("already checked for nullary intrinsics"),
