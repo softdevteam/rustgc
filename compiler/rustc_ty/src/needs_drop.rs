@@ -21,6 +21,14 @@ fn needs_drop_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>
     res
 }
 
+fn needs_finalizer_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+    let adt_fields =
+        move |adt_def: &ty::AdtDef| tcx.adt_finalize_tys(adt_def.did).map(|tys| tys.iter());
+    let res = NeedsDropTypes::new(tcx, query.param_env, query.value, adt_fields).next().is_some();
+    debug!("needs_finalize_raw({:?}) = {:?}", query, res);
+    res
+}
+
 struct NeedsDropTypes<'tcx, F> {
     tcx: TyCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
@@ -183,6 +191,42 @@ fn adt_drop_tys(tcx: TyCtxt<'_>, def_id: DefId) -> Result<&ty::List<Ty<'_>>, Alw
     res.map(|components| tcx.intern_type_list(&components))
 }
 
+fn adt_finalize_tys(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+) -> Result<&ty::List<Ty<'_>>, AlwaysRequiresDrop> {
+    let adt_ty = tcx.type_of(def_id);
+    let param_env = tcx.param_env(def_id);
+
+    let adt_components = move |adt_def: &ty::AdtDef| {
+        if tcx.type_of(adt_def.did).is_no_finalize_modulo_regions(tcx.at(DUMMY_SP), param_env) {
+            debug!("adt_finalize_tys: `{:?}` implements `NoFinalize`", adt_def);
+            return Ok(Vec::new().into_iter());
+        } else if adt_def.is_manually_drop() {
+            debug!("adt_finalize_tys: `{:?}` is manually drop", adt_def);
+            return Ok(Vec::new().into_iter());
+        } else if adt_def.destructor(tcx).is_some() {
+            debug!("adt_finalize_tys: `{:?}` implements `Drop`", adt_def);
+            return Err(AlwaysRequiresDrop);
+        } else if adt_def.is_union() {
+            debug!("adt_finalize_tys: `{:?}` is a union", adt_def);
+            return Ok(Vec::new().into_iter());
+        }
+        Ok(adt_def.all_fields().map(|field| tcx.type_of(field.did)).collect::<Vec<_>>().into_iter())
+    };
+    let res: Result<Vec<_>, _> =
+        NeedsDropTypes::new(tcx, param_env, adt_ty, adt_components).collect();
+
+    debug!("adt_finalize_tys(`{}`) = `{:?}`", tcx.def_path_str(def_id), res);
+    res.map(|components| tcx.intern_type_list(&components))
+}
+
 pub(crate) fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers { needs_drop_raw, adt_drop_tys, ..*providers };
+    *providers = ty::query::Providers {
+        needs_drop_raw,
+        needs_finalizer_raw,
+        adt_drop_tys,
+        adt_finalize_tys,
+        ..*providers
+    };
 }

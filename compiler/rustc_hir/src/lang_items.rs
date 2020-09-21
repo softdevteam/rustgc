@@ -206,6 +206,7 @@ language_item_table! {
     Freeze,                  sym::freeze,              freeze_trait,               Target::Trait;
 
     Drop,                    sym::drop,                drop_trait,                 Target::Trait;
+    NoFinalize,              sym::no_finalize,         no_finalize_trait,          Target::Trait;
 
     CoerceUnsized,           sym::coerce_unsized,      coerce_unsized_trait,       Target::Trait;
     DispatchFromDyn,         sym::dispatch_from_dyn,   dispatch_from_dyn_trait,    Target::Trait;

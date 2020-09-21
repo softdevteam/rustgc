@@ -690,6 +690,17 @@ impl<'tcx> ty::TyS<'tcx> {
         tcx_at.is_copy_raw(param_env.and(self))
     }
 
+    // Checks whether values of this type `T` implement the `NoFinalize` trait
+    // -- non-finalizable types are those that can be used inside a Gc without a
+    // finalizer method required when their memory is reclaimed.
+    pub fn is_no_finalize_modulo_regions(
+        &'tcx self,
+        tcx_at: TyCtxtAt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+    ) -> bool {
+        tcx_at.is_no_finalize_raw(param_env.and(self))
+    }
+
     /// Checks whether values of this type `T` have a size known at
     /// compile time (i.e., whether `T: Sized`). Lifetimes are ignored
     /// for the purposes of this check, so it can be an
@@ -772,6 +783,36 @@ impl<'tcx> ty::TyS<'tcx> {
                 // query keys used.
                 let erased = tcx.normalize_erasing_regions(param_env, query_ty);
                 tcx.needs_drop_raw(param_env.and(erased))
+            }
+        }
+    }
+
+    /// If `ty.needs_finalizer(...)` returns `true`, then `ty` is definitely
+    /// non-copy and *might* have a destructor attached; if it returns
+    /// `false`, then `ty` definitely has no destructor (i.e., no drop glue)
+    /// *or* `ty` implements the `NoFinalize` trait.
+    ///
+    /// (Note that this implies that if `ty` has a destructor attached,
+    /// then `needs_drop` will definitely return `true` for `ty`.)
+    ///
+    /// Note that this method is used to check eligible types in unions.
+    #[inline]
+    pub fn needs_finalizer(&'tcx self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        // Avoid querying in simple cases.
+        match needs_drop_components(self, &tcx.data_layout) {
+            Err(AlwaysRequiresDrop) => true,
+            Ok(components) => {
+                let query_ty = match *components {
+                    [] => return false,
+                    // If we've got a single component, call the query with that
+                    // to increase the chance that we hit the query cache.
+                    [component_ty] => component_ty,
+                    _ => self,
+                };
+                // This doesn't depend on regions, so try to minimize distinct
+                // query keys used.
+                let erased = tcx.normalize_erasing_regions(param_env, query_ty);
+                tcx.needs_finalizer_raw(param_env.and(erased))
             }
         }
     }

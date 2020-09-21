@@ -7,3 +7,7 @@
 /// free its memory and omit the drop method. This prevents the need to register a finalizer when
 /// managed by the Gc which is expensive.
 pub trait ManageableContents {}
+
+#[unstable(feature = "gc", issue = "none")]
+#[cfg_attr(not(bootstrap), lang = "no_finalize")]
+pub trait NoFinalize {}

@@ -166,6 +166,7 @@ language_item_table! {
     FreezeTraitLangItem,         "freeze",             freeze_trait,            Target::Trait;
 
     DropTraitLangItem,           "drop",               drop_trait,              Target::Trait;
+    NoFinalizeTraitLangItem,     "no_finalize",        no_finalize_trait,       Target::Trait;
 
     CoerceUnsizedTraitLangItem,  "coerce_unsized",     coerce_unsized_trait,    Target::Trait;
     DispatchFromDynTraitLangItem,"dispatch_from_dyn",  dispatch_from_dyn_trait, Target::Trait;

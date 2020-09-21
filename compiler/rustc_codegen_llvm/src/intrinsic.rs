@@ -191,6 +191,7 @@ impl IntrinsicCallMethods<'tcx> for Builder<'a, 'll, 'tcx> {
             | sym::pref_align_of
             | sym::min_align_of
             | sym::needs_drop
+            | sym::needs_finalizer
             | sym::type_id
             | sym::type_name
             | sym::variant_count => {

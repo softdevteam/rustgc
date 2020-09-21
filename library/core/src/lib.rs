@@ -102,6 +102,7 @@
 #![feature(duration_consts_2)]
 #![feature(extern_types)]
 #![feature(fundamental)]
+#![feature(gc)]
 #![feature(intrinsics)]
 #![feature(try_find)]
 #![feature(is_sorted)]
