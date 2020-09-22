@@ -25,7 +25,7 @@ pub unsafe fn gc_free(dead: *mut u8) {
 
 pub unsafe fn gc_register_finalizer(
     obj: *mut u8,
-    finalizer: unsafe extern "C" fn(*mut u8, *mut u8),
+    finalizer: Option<unsafe extern "C" fn(*mut u8, *mut u8)>,
     client_data: *mut u8,
     old_finalizer: *mut extern "C" fn(*mut u8, *mut u8),
     old_client_data: *mut *mut u8,
