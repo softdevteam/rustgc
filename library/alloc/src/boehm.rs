@@ -7,10 +7,45 @@ use boehm_shim;
 #[doc(inline)]
 use core::alloc::*;
 
-#[unstable(feature = "gc", reason = "gc", issue = "none")]
+pub unsafe fn gc_malloc(size: usize) -> *mut u8 {
+    unsafe { boehm_shim::gc_malloc(size) }
+}
+
+pub unsafe fn gc_realloc(old: *mut u8, new_size: usize) -> *mut u8 {
+    unsafe { boehm_shim::gc_realloc(old, new_size) }
+}
+
+pub unsafe fn gc_malloc_uncollectable(size: usize) -> *mut u8 {
+    unsafe { boehm_shim::gc_malloc_uncollectable(size) }
+}
+
+pub unsafe fn gc_free(dead: *mut u8) {
+    unsafe { boehm_shim::gc_free(dead) }
+}
+
+pub unsafe fn gc_register_finalizer(
+    obj: *mut u8,
+    finalizer: unsafe extern "C" fn(*mut u8, *mut u8),
+    client_data: *mut u8,
+    old_finalizer: *mut extern "C" fn(*mut u8, *mut u8),
+    old_client_data: *mut *mut u8,
+) {
+    unsafe {
+        boehm_shim::gc_register_finalizer(
+            obj,
+            finalizer,
+            client_data,
+            old_finalizer,
+            old_client_data,
+        )
+    }
+}
+
+#[unstable(feature = "allocator_api", issue = "32838")]
 #[derive(Debug)]
 pub struct BoehmAllocator;
-pub(crate) struct BoehmGcAllocator;
+#[derive(Debug)]
+pub struct BoehmGcAllocator;
 
 #[unstable(feature = "allocator_api", issue = "32838")]
 unsafe impl GlobalAlloc for BoehmAllocator {
