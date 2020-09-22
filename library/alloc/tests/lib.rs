@@ -27,7 +27,6 @@ mod boxed;
 mod btree_set_hash;
 mod cow_str;
 mod fmt;
-mod gc;
 mod heap;
 mod linked_list;
 mod rc;
