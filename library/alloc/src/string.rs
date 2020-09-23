@@ -44,6 +44,7 @@
 
 use core::char::{decode_utf16, REPLACEMENT_CHARACTER};
 use core::fmt;
+use core::gc::NoFinalize;
 use core::hash;
 use core::iter::{FromIterator, FusedIterator};
 use core::ops::Bound::{Excluded, Included, Unbounded};
@@ -2507,3 +2508,6 @@ impl From<char> for String {
         c.to_string()
     }
 }
+
+#[unstable(feature = "gc", issue = "none")]
+impl NoFinalize for String {}
