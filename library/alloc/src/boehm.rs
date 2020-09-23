@@ -50,7 +50,7 @@ pub struct BoehmGcAllocator;
 #[unstable(feature = "allocator_api", issue = "32838")]
 unsafe impl GlobalAlloc for BoehmAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { boehm_shim::gc_malloc_uncollectable(layout.size()) as *mut u8 }
+        unsafe { boehm_shim::gc_malloc(layout.size()) as *mut u8 }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
