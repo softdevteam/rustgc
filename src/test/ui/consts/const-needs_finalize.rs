@@ -34,12 +34,12 @@ static STATIC_NESTED_NO_FINALIZE: bool = mem::needs_finalizer::<NestedNoFinalize
 
 fn main() {
     assert!(!CONST_U8);
-    assert!(CONST_STRING);
+    assert!(!CONST_STRING);
     assert!(!CONST_TRIVIAL);
     assert!(CONST_NON_TRIVIAL);
 
     assert!(!STATIC_U8);
-    assert!(STATIC_STRING);
+    assert!(!STATIC_STRING);
     assert!(!STATIC_TRIVIAL);
     assert!(STATIC_NON_TRIVIAL);
 
