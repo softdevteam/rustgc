@@ -5,9 +5,10 @@ use AttributeType::*;
 
 use crate::{Features, Stability};
 
-use lazy_static::lazy_static;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::symbol::{sym, Symbol};
+
+use std::lazy::SyncLazy;
 
 type GateFn = fn(&Features) -> bool;
 
@@ -25,6 +26,11 @@ const GATED_CFGS: &[GatedCfg] = &[
     (sym::target_thread_local, sym::cfg_target_thread_local, cfg_fn!(cfg_target_thread_local)),
     (sym::target_has_atomic, sym::cfg_target_has_atomic, cfg_fn!(cfg_target_has_atomic)),
     (sym::target_has_atomic_load_store, sym::cfg_target_has_atomic, cfg_fn!(cfg_target_has_atomic)),
+    (
+        sym::target_has_atomic_equal_alignment,
+        sym::cfg_target_has_atomic,
+        cfg_fn!(cfg_target_has_atomic),
+    ),
     (sym::sanitize, sym::cfg_sanitize, cfg_fn!(cfg_sanitize)),
     (sym::version, sym::cfg_version, cfg_fn!(cfg_version)),
 ];
@@ -330,6 +336,8 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         optimize, AssumedUsed, template!(List: "size|speed"), optimize_attribute,
         experimental!(optimize),
     ),
+    // RFC 2867
+    gated!(instruction_set, AssumedUsed, template!(List: "set"), isa_attribute, experimental!(instruction_set)),
 
     gated!(ffi_returns_twice, AssumedUsed, template!(Word), experimental!(ffi_returns_twice)),
     gated!(ffi_pure, AssumedUsed, template!(Word), experimental!(ffi_pure)),
@@ -342,6 +350,8 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         register_tool, CrateLevel, template!(List: "tool1, tool2, ..."),
         experimental!(register_tool),
     ),
+
+    gated!(cmse_nonsecure_entry, AssumedUsed, template!(Word), experimental!(cmse_nonsecure_entry)),
 
     // ==========================================================================
     // Internal attributes: Stability, deprecation, and unsafe:
@@ -458,7 +468,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // ==========================================================================
 
     rustc_attr!(rustc_promotable, AssumedUsed, template!(Word), IMPL_DETAIL),
-    rustc_attr!(rustc_allow_const_fn_ptr, AssumedUsed, template!(Word), IMPL_DETAIL),
     rustc_attr!(rustc_args_required_const, AssumedUsed, template!(List: "N"), INTERNAL_UNSTABLE),
 
     // ==========================================================================
@@ -589,8 +598,8 @@ pub fn is_builtin_attr_name(name: Symbol) -> bool {
     BUILTIN_ATTRIBUTE_MAP.get(&name).is_some()
 }
 
-lazy_static! {
-    pub static ref BUILTIN_ATTRIBUTE_MAP: FxHashMap<Symbol, &'static BuiltinAttribute> = {
+pub static BUILTIN_ATTRIBUTE_MAP: SyncLazy<FxHashMap<Symbol, &BuiltinAttribute>> =
+    SyncLazy::new(|| {
         let mut map = FxHashMap::default();
         for attr in BUILTIN_ATTRIBUTES.iter() {
             if map.insert(attr.0, attr).is_some() {
@@ -598,5 +607,4 @@ lazy_static! {
             }
         }
         map
-    };
-}
+    });

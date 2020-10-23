@@ -54,16 +54,9 @@
 //! [aliasing]: ../../nomicon/aliasing.html
 //! [book]: ../../book/ch19-01-unsafe-rust.html#dereferencing-a-raw-pointer
 //! [ub]: ../../reference/behavior-considered-undefined.html
-//! [null]: ./fn.null.html
 //! [zst]: ../../nomicon/exotic-sizes.html#zero-sized-types-zsts
-//! [atomic operations]: ../../std/sync/atomic/index.html
-//! [`copy`]: ../../std/ptr/fn.copy.html
+//! [atomic operations]: crate::sync::atomic
 //! [`offset`]: ../../std/primitive.pointer.html#method.offset
-//! [`read_unaligned`]: ./fn.read_unaligned.html
-//! [`write_unaligned`]: ./fn.write_unaligned.html
-//! [`read_volatile`]: ./fn.read_volatile.html
-//! [`write_volatile`]: ./fn.write_volatile.html
-//! [`NonNull::dangling`]: ./struct.NonNull.html#method.dangling
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -118,9 +111,9 @@ mod mut_ptr;
 /// done automatically by the compiler. This means the fields of packed structs
 /// are not dropped in-place.
 ///
-/// [`ptr::read`]: ../ptr/fn.read.html
-/// [`ptr::read_unaligned`]: ../ptr/fn.read_unaligned.html
-/// [pinned]: ../pin/index.html
+/// [`ptr::read`]: self::read
+/// [`ptr::read_unaligned`]: self::read_unaligned
+/// [pinned]: crate::pin
 ///
 /// # Safety
 ///
@@ -136,14 +129,12 @@ mod mut_ptr;
 /// Additionally, if `T` is not [`Copy`], using the pointed-to value after
 /// calling `drop_in_place` can cause undefined behavior. Note that `*to_drop =
 /// foo` counts as a use because it will cause the value to be dropped
-/// again. [`write`] can be used to overwrite data without causing it to be
+/// again. [`write()`] can be used to overwrite data without causing it to be
 /// dropped.
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
-/// [`Copy`]: ../marker/trait.Copy.html
-/// [`write`]: ../ptr/fn.write.html
+/// [valid]: self#safety
 ///
 /// # Examples
 ///
@@ -238,14 +229,24 @@ pub(crate) struct FatPtr<T> {
     pub(crate) len: usize,
 }
 
+// Manual impl needed to avoid `T: Clone` bound.
+impl<T> Clone for FatPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+// Manual impl needed to avoid `T: Copy` bound.
+impl<T> Copy for FatPtr<T> {}
+
 /// Forms a raw slice from a pointer and a length.
 ///
 /// The `len` argument is the number of **elements**, not the number of bytes.
 ///
 /// This function is safe, but actually using the return value is unsafe.
-/// See the documentation of [`from_raw_parts`] for slice safety requirements.
+/// See the documentation of [`slice::from_raw_parts`] for slice safety requirements.
 ///
-/// [`from_raw_parts`]: ../../std/slice/fn.from_raw_parts.html
+/// [`slice::from_raw_parts`]: crate::slice::from_raw_parts
 ///
 /// # Examples
 ///
@@ -274,10 +275,9 @@ pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
 /// See the documentation of [`slice_from_raw_parts`] for more details.
 ///
 /// This function is safe, but actually using the return value is unsafe.
-/// See the documentation of [`from_raw_parts_mut`] for slice safety requirements.
+/// See the documentation of [`slice::from_raw_parts_mut`] for slice safety requirements.
 ///
-/// [`slice_from_raw_parts`]: fn.slice_from_raw_parts.html
-/// [`from_raw_parts_mut`]: ../../std/slice/fn.from_raw_parts_mut.html
+/// [`slice::from_raw_parts_mut`]: crate::slice::from_raw_parts_mut
 ///
 /// # Examples
 ///
@@ -316,8 +316,6 @@ pub const fn slice_from_raw_parts_mut<T>(data: *mut T, len: usize) -> *mut [T] {
 ///   overlapping region of memory from `x` will be used. This is demonstrated
 ///   in the second example below.
 ///
-/// [`mem::swap`]: ../mem/fn.swap.html
-///
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
@@ -328,7 +326,7 @@ pub const fn slice_from_raw_parts_mut<T>(data: *mut T, len: usize) -> *mut [T] {
 ///
 /// Note that even if `T` has size `0`, the pointers must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
+/// [valid]: self#safety
 ///
 /// # Examples
 ///
@@ -406,7 +404,7 @@ pub unsafe fn swap<T>(x: *mut T, y: *mut T) {
 /// Note that even if the effectively copied size (`count * size_of::<T>()`) is `0`,
 /// the pointers must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
+/// [valid]: self#safety
 ///
 /// # Examples
 ///
@@ -533,8 +531,6 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, len: usize) {
 /// operates on raw pointers instead of references. When references are
 /// available, [`mem::replace`] should be preferred.
 ///
-/// [`mem::replace`]: ../mem/fn.replace.html
-///
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
@@ -547,7 +543,7 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, len: usize) {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
+/// [valid]: self#safety
 ///
 /// # Examples
 ///
@@ -653,7 +649,7 @@ pub unsafe fn replace<T>(dst: *mut T, mut src: T) -> T {
 /// `*src` can violate memory safety. Note that assigning to `*src` counts as a
 /// use because it will attempt to drop the value at `*src`.
 ///
-/// [`write`] can be used to overwrite data without causing it to be dropped.
+/// [`write()`] can be used to overwrite data without causing it to be dropped.
 ///
 /// ```
 /// use std::ptr;
@@ -682,11 +678,7 @@ pub unsafe fn replace<T>(dst: *mut T, mut src: T) -> T {
 /// assert_eq!(s, "bar");
 /// ```
 ///
-/// [`mem::swap`]: ../mem/fn.swap.html
-/// [valid]: ../ptr/index.html#safety
-/// [`Copy`]: ../marker/trait.Copy.html
-/// [`read_unaligned`]: ./fn.read_unaligned.html
-/// [`write`]: ./fn.write.html
+/// [valid]: self#safety
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub unsafe fn read<T>(src: *const T) -> T {
@@ -723,11 +715,8 @@ pub unsafe fn read<T>(src: *const T) -> T {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL.
 ///
-/// [`Copy`]: ../marker/trait.Copy.html
-/// [`read`]: ./fn.read.html
-/// [`write_unaligned`]: ./fn.write_unaligned.html
-/// [read-ownership]: ./fn.read.html#ownership-of-the-returned-value
-/// [valid]: ../ptr/index.html#safety
+/// [read-ownership]: read#ownership-of-the-returned-value
+/// [valid]: self#safety
 ///
 /// ## On `packed` structs
 ///
@@ -819,8 +808,6 @@ pub unsafe fn read_unaligned<T>(src: *const T) -> T {
 /// This is appropriate for initializing uninitialized memory, or overwriting
 /// memory that has previously been [`read`] from.
 ///
-/// [`read`]: ./fn.read.html
-///
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
@@ -832,8 +819,7 @@ pub unsafe fn read_unaligned<T>(src: *const T) -> T {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
-/// [`write_unaligned`]: ./fn.write_unaligned.html
+/// [valid]: self#safety
 ///
 /// # Examples
 ///
@@ -888,8 +874,6 @@ pub unsafe fn read_unaligned<T>(src: *const T) -> T {
 /// assert_eq!(foo, "bar");
 /// assert_eq!(bar, "foo");
 /// ```
-///
-/// [`mem::swap`]: ../mem/fn.swap.html
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub unsafe fn write<T>(dst: *mut T, src: T) {
@@ -904,7 +888,7 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
 /// Overwrites a memory location with the given value without reading or
 /// dropping the old value.
 ///
-/// Unlike [`write`], the pointer may be unaligned.
+/// Unlike [`write()`], the pointer may be unaligned.
 ///
 /// `write_unaligned` does not drop the contents of `dst`. This is safe, but it
 /// could leak allocations or resources, so care should be taken not to overwrite
@@ -916,9 +900,6 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
 /// This is appropriate for initializing uninitialized memory, or overwriting
 /// memory that has previously been read with [`read_unaligned`].
 ///
-/// [`write`]: ./fn.write.html
-/// [`read_unaligned`]: ./fn.read_unaligned.html
-///
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
@@ -927,7 +908,7 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL.
 ///
-/// [valid]: ../ptr/index.html#safety
+/// [valid]: self#safety
 ///
 /// ## On `packed` structs
 ///
@@ -1007,8 +988,6 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 /// to not be elided or reordered by the compiler across other volatile
 /// operations.
 ///
-/// [`write_volatile`]: ./fn.write_volatile.html
-///
 /// # Notes
 ///
 /// Rust does not currently have a rigorously and formally defined memory model,
@@ -1041,10 +1020,8 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
-/// [`Copy`]: ../marker/trait.Copy.html
-/// [`read`]: ./fn.read.html
-/// [read-ownership]: ./fn.read.html#ownership-of-the-returned-value
+/// [valid]: self#safety
+/// [read-ownership]: read#ownership-of-the-returned-value
 ///
 /// Just like in C, whether an operation is volatile has no bearing whatsoever
 /// on questions involving concurrent access from multiple threads. Volatile
@@ -1089,8 +1066,6 @@ pub unsafe fn read_volatile<T>(src: *const T) -> T {
 /// Additionally, it does not drop `src`. Semantically, `src` is moved into the
 /// location pointed to by `dst`.
 ///
-/// [`read_volatile`]: ./fn.read_volatile.html
-///
 /// # Notes
 ///
 /// Rust does not currently have a rigorously and formally defined memory model,
@@ -1115,7 +1090,7 @@ pub unsafe fn read_volatile<T>(src: *const T) -> T {
 ///
 /// Note that even if `T` has size `0`, the pointer must be non-NULL and properly aligned.
 ///
-/// [valid]: ../ptr/index.html#safety
+/// [valid]: self#safety
 ///
 /// Just like in C, whether an operation is volatile has no bearing whatsoever
 /// on questions involving concurrent access from multiple threads. Volatile

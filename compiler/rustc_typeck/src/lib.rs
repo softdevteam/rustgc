@@ -55,8 +55,8 @@ This API is completely unstable and subject to change.
 
 */
 
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![allow(non_camel_case_types)]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![feature(array_value_iter)]
 #![feature(bool_to_option)]
 #![feature(box_syntax)]
 #![feature(crate_visibility_modifier)]
@@ -84,6 +84,7 @@ mod check_unused;
 mod coherence;
 mod collect;
 mod constrained_generic_params;
+mod errors;
 mod impl_wf_check;
 mod mem_categorization;
 mod outlives;
@@ -158,7 +159,7 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: LocalDefId) {
     let main_id = tcx.hir().local_def_id_to_hir_id(main_def_id);
     let main_span = tcx.def_span(main_def_id);
     let main_t = tcx.type_of(main_def_id);
-    match main_t.kind {
+    match main_t.kind() {
         ty::FnDef(..) => {
             if let Some(Node::Item(it)) = tcx.hir().find(main_id) {
                 if let hir::ItemKind::Fn(ref sig, ref generics, _) = it.kind {
@@ -254,7 +255,7 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: LocalDefId) {
     let start_id = tcx.hir().local_def_id_to_hir_id(start_def_id);
     let start_span = tcx.def_span(start_def_id);
     let start_t = tcx.type_of(start_def_id);
-    match start_t.kind {
+    match start_t.kind() {
         ty::FnDef(..) => {
             if let Some(Node::Item(it)) = tcx.hir().find(start_id) {
                 if let hir::ItemKind::Fn(ref sig, ref generics, _) = it.kind {
@@ -316,7 +317,7 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: LocalDefId) {
                 }
             }
 
-            let se_ty = tcx.mk_fn_ptr(ty::Binder::bind(tcx.mk_fn_sig(
+            let se_ty = tcx.mk_fn_ptr(ty::Binder::dummy(tcx.mk_fn_sig(
                 [tcx.types.isize, tcx.mk_imm_ptr(tcx.mk_imm_ptr(tcx.types.u8))].iter().cloned(),
                 tcx.types.isize,
                 false,
@@ -359,7 +360,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorReported> {
 
     // this ensures that later parts of type checking can assume that items
     // have valid types and not error
-    // FIXME(matthewjasper) We shouldn't need to do this.
+    // FIXME(matthewjasper) We shouldn't need to use `track_errors`.
     tcx.sess.track_errors(|| {
         tcx.sess.time("type_collecting", || {
             for &module in tcx.hir().krate().modules.keys() {

@@ -5,9 +5,9 @@ use rustc_span::Span;
 use rustc_target::abi::call::FnAbi;
 
 pub trait IntrinsicCallMethods<'tcx>: BackendTypes {
-    /// Remember to add all intrinsics here, in librustc_typeck/check/mod.rs,
-    /// and in libcore/intrinsics.rs; if you need access to any llvm intrinsics,
-    /// add them to librustc_codegen_llvm/context.rs
+    /// Remember to add all intrinsics here, in `compiler/rustc_typeck/src/check/mod.rs`,
+    /// and in `library/core/src/intrinsics.rs`; if you need access to any LLVM intrinsics,
+    /// add them to `compiler/rustc_codegen_llvm/src/context.rs`.
     fn codegen_intrinsic_call(
         &mut self,
         instance: ty::Instance<'tcx>,
@@ -20,7 +20,9 @@ pub trait IntrinsicCallMethods<'tcx>: BackendTypes {
     fn abort(&mut self);
     fn assume(&mut self, val: Self::Value);
     fn expect(&mut self, cond: Self::Value, expected: bool) -> Self::Value;
-    fn sideeffect(&mut self);
+    /// Normally, sideeffect is only emitted if -Zinsert-sideeffect is passed;
+    /// in some cases though we want to emit it regardless.
+    fn sideeffect(&mut self, unconditional: bool);
     /// Trait method used to inject `va_start` on the "spoofed" `VaListImpl` in
     /// Rust defined C-variadic functions.
     fn va_start(&mut self, val: Self::Value) -> Self::Value;

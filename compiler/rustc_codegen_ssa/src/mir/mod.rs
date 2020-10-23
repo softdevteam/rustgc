@@ -153,7 +153,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         bx.set_personality_fn(cx.eh_personality());
     }
 
-    bx.sideeffect();
+    bx.sideeffect(false);
 
     let cleanup_kinds = analyze::cleanup_kinds(&mir);
     // Allocate a `Block` for every basic block, except
@@ -369,8 +369,8 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 // individual LLVM function arguments.
 
                 let arg_ty = fx.monomorphize(&arg_decl.ty);
-                let tupled_arg_tys = match arg_ty.kind {
-                    ty::Tuple(ref tys) => tys,
+                let tupled_arg_tys = match arg_ty.kind() {
+                    ty::Tuple(tys) => tys,
                     _ => bug!("spread argument isn't a tuple?!"),
                 };
 
@@ -486,6 +486,7 @@ mod block;
 pub mod constant;
 pub mod coverageinfo;
 pub mod debuginfo;
+mod intrinsic;
 pub mod operand;
 pub mod place;
 mod rvalue;

@@ -30,6 +30,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
             let kind = match e.kind {
                 ExprKind::Box(ref inner) => hir::ExprKind::Box(self.lower_expr(inner)),
                 ExprKind::Array(ref exprs) => hir::ExprKind::Array(self.lower_exprs(exprs)),
+                ExprKind::ConstBlock(ref anon_const) => {
+                    let anon_const = self.lower_anon_const(anon_const);
+                    hir::ExprKind::ConstBlock(anon_const)
+                }
                 ExprKind::Repeat(ref expr, ref count) => {
                     let expr = self.lower_expr(expr);
                     let count = self.lower_anon_const(count);
@@ -432,17 +436,25 @@ impl<'hir> LoweringContext<'_, 'hir> {
         self.with_catch_scope(body.id, |this| {
             let mut block = this.lower_block_noalloc(body, true);
 
-            let try_span = this.mark_span_with_reason(
-                DesugaringKind::TryBlock,
-                body.span,
-                this.allow_try_trait.clone(),
-            );
-
             // Final expression of the block (if present) or `()` with span at the end of block
-            let tail_expr = block
-                .expr
-                .take()
-                .unwrap_or_else(|| this.expr_unit(this.sess.source_map().end_point(try_span)));
+            let (try_span, tail_expr) = if let Some(expr) = block.expr.take() {
+                (
+                    this.mark_span_with_reason(
+                        DesugaringKind::TryBlock,
+                        expr.span,
+                        this.allow_try_trait.clone(),
+                    ),
+                    expr,
+                )
+            } else {
+                let try_span = this.mark_span_with_reason(
+                    DesugaringKind::TryBlock,
+                    this.sess.source_map().end_point(body.span),
+                    this.allow_try_trait.clone(),
+                );
+
+                (try_span, this.expr_unit(try_span))
+            };
 
             let ok_wrapped_span =
                 this.mark_span_with_reason(DesugaringKind::TryBlock, tail_expr.span, None);
@@ -977,7 +989,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                             asm::InlineAsmReg::parse(
                                 sess.asm_arch?,
                                 |feature| sess.target_features.contains(&Symbol::intern(feature)),
-                                &sess.target.target,
+                                &sess.target,
                                 s,
                             )
                             .map_err(|e| {
@@ -1121,7 +1133,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // features. We check that at least one type is available for
                 // the current target.
                 let reg_class = reg.reg_class();
-                let mut required_features = vec![];
+                let mut required_features: Vec<&str> = vec![];
                 for &(_, feature) in reg_class.supported_types(asm_arch) {
                     if let Some(feature) = feature {
                         if self.sess.target_features.contains(&Symbol::intern(feature)) {
@@ -1135,7 +1147,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         break;
                     }
                 }
-                required_features.sort();
+                // We are sorting primitive strs here and can use unstable sort here
+                required_features.sort_unstable();
                 required_features.dedup();
                 match &required_features[..] {
                     [] => {}
@@ -1177,52 +1190,47 @@ impl<'hir> LoweringContext<'_, 'hir> {
                                          input| {
                             match used_regs.entry(r) {
                                 Entry::Occupied(o) => {
-                                    if !skip {
-                                        skip = true;
-
-                                        let idx2 = *o.get();
-                                        let op2 = &operands[idx2];
-                                        let op_sp2 = asm.operands[idx2].1;
-                                        let reg2 = match op2.reg() {
-                                            Some(asm::InlineAsmRegOrRegClass::Reg(r)) => r,
-                                            _ => unreachable!(),
-                                        };
-
-                                        let msg = format!(
-                                            "register `{}` conflicts with register `{}`",
-                                            reg.name(),
-                                            reg2.name()
-                                        );
-                                        let mut err = sess.struct_span_err(op_sp, &msg);
-                                        err.span_label(
-                                            op_sp,
-                                            &format!("register `{}`", reg.name()),
-                                        );
-                                        err.span_label(
-                                            op_sp2,
-                                            &format!("register `{}`", reg2.name()),
-                                        );
-
-                                        match (op, op2) {
-                                            (
-                                                hir::InlineAsmOperand::In { .. },
-                                                hir::InlineAsmOperand::Out { late, .. },
-                                            )
-                                            | (
-                                                hir::InlineAsmOperand::Out { late, .. },
-                                                hir::InlineAsmOperand::In { .. },
-                                            ) => {
-                                                assert!(!*late);
-                                                let out_op_sp = if input { op_sp2 } else { op_sp };
-                                                let msg = "use `lateout` instead of \
-                                                     `out` to avoid conflict";
-                                                err.span_help(out_op_sp, msg);
-                                            }
-                                            _ => {}
-                                        }
-
-                                        err.emit();
+                                    if skip {
+                                        return;
                                     }
+                                    skip = true;
+
+                                    let idx2 = *o.get();
+                                    let op2 = &operands[idx2];
+                                    let op_sp2 = asm.operands[idx2].1;
+                                    let reg2 = match op2.reg() {
+                                        Some(asm::InlineAsmRegOrRegClass::Reg(r)) => r,
+                                        _ => unreachable!(),
+                                    };
+
+                                    let msg = format!(
+                                        "register `{}` conflicts with register `{}`",
+                                        reg.name(),
+                                        reg2.name()
+                                    );
+                                    let mut err = sess.struct_span_err(op_sp, &msg);
+                                    err.span_label(op_sp, &format!("register `{}`", reg.name()));
+                                    err.span_label(op_sp2, &format!("register `{}`", reg2.name()));
+
+                                    match (op, op2) {
+                                        (
+                                            hir::InlineAsmOperand::In { .. },
+                                            hir::InlineAsmOperand::Out { late, .. },
+                                        )
+                                        | (
+                                            hir::InlineAsmOperand::Out { late, .. },
+                                            hir::InlineAsmOperand::In { .. },
+                                        ) => {
+                                            assert!(!*late);
+                                            let out_op_sp = if input { op_sp2 } else { op_sp };
+                                            let msg = "use `lateout` instead of \
+                                                    `out` to avoid conflict";
+                                            err.span_help(out_op_sp, msg);
+                                        }
+                                        _ => {}
+                                    }
+
+                                    err.emit();
                                 }
                                 Entry::Vacant(v) => {
                                     v.insert(idx);
@@ -1552,7 +1560,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 hir::LangItem::TryFromError,
                 unstable_span,
                 from_expr,
-                try_span,
+                unstable_span,
             );
             let thin_attrs = ThinVec::from(attrs);
             let catch_scope = self.catch_scopes.last().copied();

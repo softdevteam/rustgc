@@ -5,8 +5,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::SelfProfiler;
 use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LocalDefId, CRATE_DEF_INDEX, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathData;
-use rustc_query_system::query::QueryCache;
-use rustc_query_system::query::QueryState;
+use rustc_query_system::query::{QueryCache, QueryContext, QueryState};
 use std::fmt::Debug;
 use std::io::Write;
 
@@ -55,18 +54,22 @@ impl<'p, 'c, 'tcx> QueryKeyStringBuilder<'p, 'c, 'tcx> {
         };
 
         let dis_buffer = &mut [0u8; 16];
+        let crate_name;
+        let other_name;
         let name;
         let dis;
         let end_index;
 
         match def_key.disambiguated_data.data {
             DefPathData::CrateRoot => {
-                name = self.tcx.original_crate_name(def_id.krate);
+                crate_name = self.tcx.original_crate_name(def_id.krate).as_str();
+                name = &*crate_name;
                 dis = "";
                 end_index = 3;
             }
             other => {
-                name = other.as_symbol();
+                other_name = other.to_string();
+                name = other_name.as_str();
                 if def_key.disambiguated_data.disambiguator == 0 {
                     dis = "";
                     end_index = 3;
@@ -80,7 +83,6 @@ impl<'p, 'c, 'tcx> QueryKeyStringBuilder<'p, 'c, 'tcx> {
             }
         }
 
-        let name = &*name.as_str();
         let components = [
             StringComponent::Ref(parent_string_id),
             StringComponent::Value("::"),
@@ -228,7 +230,7 @@ where
 pub(super) fn alloc_self_profile_query_strings_for_query_cache<'tcx, C>(
     tcx: TyCtxt<'tcx>,
     query_name: &'static str,
-    query_state: &QueryState<TyCtxt<'tcx>, C>,
+    query_state: &QueryState<crate::dep_graph::DepKind, <TyCtxt<'tcx> as QueryContext>::Query, C>,
     string_cache: &mut QueryKeyStringCache,
 ) where
     C: QueryCache,

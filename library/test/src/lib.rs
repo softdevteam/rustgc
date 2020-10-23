@@ -24,11 +24,13 @@
 #![feature(rustc_private)]
 #![feature(nll)]
 #![feature(bool_to_option)]
+#![feature(available_concurrency)]
 #![feature(set_stdio)]
 #![feature(panic_unwind)]
 #![feature(staged_api)]
 #![feature(termination_trait_lib)]
 #![feature(test)]
+#![feature(total_cmp)]
 
 // Public reexports
 pub use self::bench::{black_box, Bencher};
@@ -236,11 +238,9 @@ where
     let event = TestEvent::TeFiltered(filtered_descs);
     notify_about_test_event(event)?;
 
-    let (filtered_tests, filtered_benchs): (Vec<_>, _) =
-        filtered_tests.into_iter().partition(|e| match e.testfn {
-            StaticTestFn(_) | DynTestFn(_) => true,
-            _ => false,
-        });
+    let (filtered_tests, filtered_benchs): (Vec<_>, _) = filtered_tests
+        .into_iter()
+        .partition(|e| matches!(e.testfn, StaticTestFn(_) | DynTestFn(_)));
 
     let concurrency = opts.test_threads.unwrap_or_else(get_concurrency);
 

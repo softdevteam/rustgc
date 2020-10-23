@@ -3,8 +3,8 @@ use super::{StringReader, UnmatchedBrace};
 use rustc_ast::token::{self, DelimToken, Token};
 use rustc_ast::tokenstream::{
     DelimSpan,
-    IsJoint::{self, *},
-    TokenStream, TokenTree, TreeAndJoint,
+    Spacing::{self, *},
+    TokenStream, TokenTree, TreeAndSpacing,
 };
 use rustc_ast_pretty::pprust::token_to_string;
 use rustc_data_structures::fx::FxHashMap;
@@ -12,11 +12,10 @@ use rustc_errors::PResult;
 use rustc_span::Span;
 
 impl<'a> StringReader<'a> {
-    crate fn into_token_trees(self) -> (PResult<'a, TokenStream>, Vec<UnmatchedBrace>) {
+    pub(super) fn into_token_trees(self) -> (PResult<'a, TokenStream>, Vec<UnmatchedBrace>) {
         let mut tt_reader = TokenTreesReader {
             string_reader: self,
             token: Token::dummy(),
-            joint_to_prev: Joint,
             open_braces: Vec::new(),
             unmatched_braces: Vec::new(),
             matching_delim_spans: Vec::new(),
@@ -32,7 +31,6 @@ impl<'a> StringReader<'a> {
 struct TokenTreesReader<'a> {
     string_reader: StringReader<'a>,
     token: Token,
-    joint_to_prev: IsJoint,
     /// Stack of open delimiters and their spans. Used for error message.
     open_braces: Vec<(token::DelimToken, Span)>,
     unmatched_braces: Vec<UnmatchedBrace>,
@@ -53,7 +51,7 @@ impl<'a> TokenTreesReader<'a> {
     fn parse_all_token_trees(&mut self) -> PResult<'a, TokenStream> {
         let mut buf = TokenStreamBuilder::default();
 
-        self.real_token();
+        self.bump();
         while self.token != token::Eof {
             buf.push(self.parse_token_tree()?);
         }
@@ -79,7 +77,7 @@ impl<'a> TokenTreesReader<'a> {
         }
     }
 
-    fn parse_token_tree(&mut self) -> PResult<'a, TreeAndJoint> {
+    fn parse_token_tree(&mut self) -> PResult<'a, TreeAndSpacing> {
         let sm = self.string_reader.sess.source_map();
 
         match self.token.kind {
@@ -126,7 +124,7 @@ impl<'a> TokenTreesReader<'a> {
 
                 // Parse the open delimiter.
                 self.open_braces.push((delim, self.token.span));
-                self.real_token();
+                self.bump();
 
                 // Parse the token trees within the delimiters.
                 // We stop at any delimiter so we can try to recover if the user
@@ -151,12 +149,9 @@ impl<'a> TokenTreesReader<'a> {
                             }
                         }
 
-                        match (open_brace, delim) {
-                            //only add braces
-                            (DelimToken::Brace, DelimToken::Brace) => {
-                                self.matching_block_spans.push((open_brace_span, close_brace_span));
-                            }
-                            _ => {}
+                        //only add braces
+                        if let (DelimToken::Brace, DelimToken::Brace) = (open_brace, delim) {
+                            self.matching_block_spans.push((open_brace_span, close_brace_span));
                         }
 
                         if self.open_braces.is_empty() {
@@ -171,7 +166,7 @@ impl<'a> TokenTreesReader<'a> {
                             ));
                         }
                         // Parse the closing delimiter.
-                        self.real_token();
+                        self.bump();
                     }
                     // Incorrect delimiter.
                     token::CloseDelim(other) => {
@@ -217,7 +212,7 @@ impl<'a> TokenTreesReader<'a> {
                         //     bar(baz(
                         // }  // Incorrect delimiter but matches the earlier `{`
                         if !self.open_braces.iter().any(|&(b, _)| b == other) {
-                            self.real_token();
+                            self.bump();
                         }
                     }
                     token::Eof => {
@@ -264,37 +259,29 @@ impl<'a> TokenTreesReader<'a> {
             }
             _ => {
                 let tt = TokenTree::Token(self.token.take());
-                self.real_token();
-                let is_joint = self.joint_to_prev == Joint && self.token.is_op();
-                Ok((tt, if is_joint { Joint } else { NonJoint }))
+                let mut spacing = self.bump();
+                if !self.token.is_op() {
+                    spacing = Alone;
+                }
+                Ok((tt, spacing))
             }
         }
     }
 
-    fn real_token(&mut self) {
-        self.joint_to_prev = Joint;
-        loop {
-            let token = self.string_reader.next_token();
-            match token.kind {
-                token::Whitespace | token::Comment | token::Shebang(_) | token::Unknown(_) => {
-                    self.joint_to_prev = NonJoint;
-                }
-                _ => {
-                    self.token = token;
-                    return;
-                }
-            }
-        }
+    fn bump(&mut self) -> Spacing {
+        let (spacing, token) = self.string_reader.next_token();
+        self.token = token;
+        spacing
     }
 }
 
 #[derive(Default)]
 struct TokenStreamBuilder {
-    buf: Vec<TreeAndJoint>,
+    buf: Vec<TreeAndSpacing>,
 }
 
 impl TokenStreamBuilder {
-    fn push(&mut self, (tree, joint): TreeAndJoint) {
+    fn push(&mut self, (tree, joint): TreeAndSpacing) {
         if let Some((TokenTree::Token(prev_token), Joint)) = self.buf.last() {
             if let TokenTree::Token(token) = &tree {
                 if let Some(glued) = prev_token.glue(token) {

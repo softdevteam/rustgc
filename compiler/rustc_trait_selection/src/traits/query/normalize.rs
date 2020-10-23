@@ -7,6 +7,7 @@ use crate::infer::canonical::OriginalQueryValues;
 use crate::infer::{InferCtxt, InferOk};
 use crate::traits::error_reporting::InferCtxtExt;
 use crate::traits::{Obligation, ObligationCause, PredicateObligation, Reveal};
+use rustc_data_structures::sso::SsoHashMap;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_infer::traits::Normalized;
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
@@ -43,7 +44,7 @@ impl<'cx, 'tcx> AtExt<'tcx> for At<'cx, 'tcx> {
     {
         debug!(
             "normalize::<{}>(value={:?}, param_env={:?})",
-            ::std::any::type_name::<T>(),
+            std::any::type_name::<T>(),
             value,
             self.param_env,
         );
@@ -57,19 +58,20 @@ impl<'cx, 'tcx> AtExt<'tcx> for At<'cx, 'tcx> {
             param_env: self.param_env,
             obligations: vec![],
             error: false,
+            cache: SsoHashMap::new(),
             anon_depth: 0,
         };
 
         let result = value.fold_with(&mut normalizer);
         debug!(
             "normalize::<{}>: result={:?} with {} obligations",
-            ::std::any::type_name::<T>(),
+            std::any::type_name::<T>(),
             result,
             normalizer.obligations.len(),
         );
         debug!(
             "normalize::<{}>: obligations={:?}",
-            ::std::any::type_name::<T>(),
+            std::any::type_name::<T>(),
             normalizer.obligations,
         );
         if normalizer.error {
@@ -85,6 +87,7 @@ struct QueryNormalizer<'cx, 'tcx> {
     cause: &'cx ObligationCause<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     obligations: Vec<PredicateObligation<'tcx>>,
+    cache: SsoHashMap<Ty<'tcx>, Ty<'tcx>>,
     error: bool,
     anon_depth: usize,
 }
@@ -99,8 +102,12 @@ impl<'cx, 'tcx> TypeFolder<'tcx> for QueryNormalizer<'cx, 'tcx> {
             return ty;
         }
 
+        if let Some(ty) = self.cache.get(&ty) {
+            return ty;
+        }
+
         let ty = ty.super_fold_with(self);
-        match ty.kind {
+        let res = (|| match *ty.kind() {
             ty::Opaque(def_id, substs) => {
                 // Only normalize `impl Trait` after type-checking, usually in codegen.
                 match self.param_env.reveal() {
@@ -197,7 +204,9 @@ impl<'cx, 'tcx> TypeFolder<'tcx> for QueryNormalizer<'cx, 'tcx> {
             }
 
             _ => ty,
-        }
+        })();
+        self.cache.insert(ty, res);
+        res
     }
 
     fn fold_const(&mut self, constant: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {

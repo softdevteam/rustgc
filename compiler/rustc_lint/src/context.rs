@@ -31,6 +31,7 @@ use rustc_middle::lint::LintDiagnosticBuilder;
 use rustc_middle::middle::privacy::AccessLevels;
 use rustc_middle::middle::stability;
 use rustc_middle::ty::layout::{LayoutError, TyAndLayout};
+use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, print::Printer, subst::GenericArg, Ty, TyCtxt};
 use rustc_session::lint::{add_elided_lifetime_in_path_suggestion, BuiltinLintDiagnostics};
 use rustc_session::lint::{FutureIncompatibleInfo, Level, Lint, LintBuffer, LintId};
@@ -710,14 +711,14 @@ impl<'tcx> LateContext<'tcx> {
         }
     }
 
-    pub fn current_lint_root(&self) -> hir::HirId {
-        self.last_node_with_lint_attrs
-    }
-
     /// Check if a `DefId`'s path matches the given absolute type path usage.
     ///
     /// Anonymous scopes such as `extern` imports are matched with `kw::Invalid`;
     /// inherent `impl` blocks are matched with the name of the type.
+    ///
+    /// Instead of using this method, it is often preferable to instead use
+    /// `rustc_diagnostic_item` or a `lang_item`. This is less prone to errors
+    /// as paths get invalidated if the target definition moves.
     ///
     /// # Examples
     ///
@@ -789,16 +790,18 @@ impl<'tcx> LateContext<'tcx> {
                 trait_ref: Option<ty::TraitRef<'tcx>>,
             ) -> Result<Self::Path, Self::Error> {
                 if trait_ref.is_none() {
-                    if let ty::Adt(def, substs) = self_ty.kind {
+                    if let ty::Adt(def, substs) = self_ty.kind() {
                         return self.print_def_path(def.did, substs);
                     }
                 }
 
                 // This shouldn't ever be needed, but just in case:
-                Ok(vec![match trait_ref {
-                    Some(trait_ref) => Symbol::intern(&format!("{:?}", trait_ref)),
-                    None => Symbol::intern(&format!("<{}>", self_ty)),
-                }])
+                with_no_trimmed_paths(|| {
+                    Ok(vec![match trait_ref {
+                        Some(trait_ref) => Symbol::intern(&format!("{:?}", trait_ref)),
+                        None => Symbol::intern(&format!("<{}>", self_ty)),
+                    }])
+                })
             }
 
             fn path_append_impl(
@@ -812,12 +815,16 @@ impl<'tcx> LateContext<'tcx> {
 
                 // This shouldn't ever be needed, but just in case:
                 path.push(match trait_ref {
-                    Some(trait_ref) => Symbol::intern(&format!(
-                        "<impl {} for {}>",
-                        trait_ref.print_only_trait_path(),
-                        self_ty
-                    )),
-                    None => Symbol::intern(&format!("<impl {}>", self_ty)),
+                    Some(trait_ref) => with_no_trimmed_paths(|| {
+                        Symbol::intern(&format!(
+                            "<impl {} for {}>",
+                            trait_ref.print_only_trait_path(),
+                            self_ty
+                        ))
+                    }),
+                    None => {
+                        with_no_trimmed_paths(|| Symbol::intern(&format!("<impl {}>", self_ty)))
+                    }
                 });
 
                 Ok(path)
@@ -835,7 +842,7 @@ impl<'tcx> LateContext<'tcx> {
                     return Ok(path);
                 }
 
-                path.push(disambiguated_data.data.as_symbol());
+                path.push(Symbol::intern(&disambiguated_data.data.to_string()));
                 Ok(path)
             }
 

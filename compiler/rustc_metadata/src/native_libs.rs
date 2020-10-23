@@ -149,7 +149,7 @@ impl Collector<'tcx> {
             }
             return;
         }
-        let is_osx = self.tcx.sess.target.target.options.is_like_osx;
+        let is_osx = self.tcx.sess.target.options.is_like_osx;
         if lib.kind == NativeLibKind::Framework && !is_osx {
             let msg = "native frameworks are only available on macOS targets";
             match span {
@@ -170,7 +170,7 @@ impl Collector<'tcx> {
             feature_err(
                 &self.tcx.sess.parse_sess,
                 sym::static_nobundle,
-                span.unwrap_or_else(|| rustc_span::DUMMY_SP),
+                span.unwrap_or(rustc_span::DUMMY_SP),
                 "kind=\"static-nobundle\" is unstable",
             )
             .emit();
@@ -179,7 +179,7 @@ impl Collector<'tcx> {
             feature_err(
                 &self.tcx.sess.parse_sess,
                 sym::raw_dylib,
-                span.unwrap_or_else(|| rustc_span::DUMMY_SP),
+                span.unwrap_or(rustc_span::DUMMY_SP),
                 "kind=\"raw-dylib\" is unstable",
             )
             .emit();

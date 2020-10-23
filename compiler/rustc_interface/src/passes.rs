@@ -2,7 +2,6 @@ use crate::interface::{Compiler, Result};
 use crate::proc_macro_decls;
 use crate::util;
 
-use once_cell::sync::Lazy;
 use rustc_ast::mut_visit::MutVisitor;
 use rustc_ast::{self as ast, visit};
 use rustc_codegen_ssa::back::link::emit_metadata;
@@ -46,6 +45,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Write};
+use std::lazy::SyncLazy;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::{env, fs, iter, mem};
@@ -551,6 +551,10 @@ fn write_out_deps(
             .map(|fmap| escape_dep_filename(&fmap.unmapped_path.as_ref().unwrap_or(&fmap.name)))
             .collect();
 
+        if let Some(ref backend) = sess.opts.debugging_opts.codegen_backend {
+            files.push(backend.to_string());
+        }
+
         if sess.binary_dep_depinfo() {
             boxed_resolver.borrow().borrow_mut().access(|resolver| {
                 for cnum in resolver.cstore().crates_untracked() {
@@ -681,7 +685,7 @@ pub fn prepare_outputs(
     Ok(outputs)
 }
 
-pub static DEFAULT_QUERY_PROVIDERS: Lazy<Providers> = Lazy::new(|| {
+pub static DEFAULT_QUERY_PROVIDERS: SyncLazy<Providers> = SyncLazy::new(|| {
     let providers = &mut Providers::default();
     providers.analysis = analysis;
     proc_macro_decls::provide(providers);
@@ -704,7 +708,7 @@ pub static DEFAULT_QUERY_PROVIDERS: Lazy<Providers> = Lazy::new(|| {
     *providers
 });
 
-pub static DEFAULT_EXTERN_QUERY_PROVIDERS: Lazy<Providers> = Lazy::new(|| {
+pub static DEFAULT_EXTERN_QUERY_PROVIDERS: SyncLazy<Providers> = SyncLazy::new(|| {
     let mut extern_providers = *DEFAULT_QUERY_PROVIDERS;
     rustc_metadata::provide_extern(&mut extern_providers);
     rustc_codegen_ssa::provide_extern(&mut extern_providers);

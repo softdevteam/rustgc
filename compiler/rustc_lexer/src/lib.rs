@@ -2,7 +2,7 @@
 //!
 //! The idea with `librustc_lexer` is to make a reusable library,
 //! by separating out pure lexing and rustc-specific concerns, like spans,
-//! error reporting an interning.  So, rustc_lexer operates directly on `&str`,
+//! error reporting, and interning.  So, rustc_lexer operates directly on `&str`,
 //! produces simple tokens which are a pair of type-tag and a bit of original text,
 //! and does not report errors, instead storing them as flags on the token.
 //!
@@ -48,6 +48,7 @@ impl Token {
 }
 
 /// Enum representing common lexeme types.
+// perf note: Changing all `usize` to `u32` doesn't change performance. See #77629
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TokenKind {
     // Multi-char tokens:
@@ -160,6 +161,7 @@ pub enum LiteralKind {
 /// - `r##~"abcde"##`: `InvalidStarter`
 /// - `r###"abcde"##`: `NoTerminator { expected: 3, found: 2, possible_terminator_offset: Some(11)`
 /// - Too many `#`s (>65535): `TooManyDelimiters`
+// perf note: It doesn't matter that this makes `Token` 36 bytes bigger. See #77629
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RawStrError {
     /// Non `#` characters exist between `r` and `"` eg. `r#~"..`
@@ -191,12 +193,16 @@ pub fn strip_shebang(input: &str) -> Option<usize> {
     // For simplicity we consider any line starting with `#!` a shebang,
     // regardless of restrictions put on shebangs by specific platforms.
     if let Some(input_tail) = input.strip_prefix("#!") {
-        // Ok, this is a shebang but if the next non-whitespace token is `[` or maybe
-        // a doc comment (due to `TokenKind::(Line,Block)Comment` ambiguity at lexer level),
+        // Ok, this is a shebang but if the next non-whitespace token is `[`,
         // then it may be valid Rust code, so consider it Rust code.
-        let next_non_whitespace_token = tokenize(input_tail).map(|tok| tok.kind).find(|tok|
-            !matches!(tok, TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. })
-        );
+        let next_non_whitespace_token = tokenize(input_tail).map(|tok| tok.kind).find(|tok| {
+            !matches!(
+                tok,
+                TokenKind::Whitespace
+                    | TokenKind::LineComment { doc_style: None }
+                    | TokenKind::BlockComment { doc_style: None, .. }
+            )
+        });
         if next_non_whitespace_token != Some(TokenKind::OpenBracket) {
             // No other choice than to consider this a shebang.
             return Some(2 + input_tail.lines().next().unwrap_or_default().len());
@@ -685,7 +691,12 @@ impl Cursor<'_> {
         let mut max_hashes = 0;
 
         // Count opening '#' symbols.
-        let n_start_hashes = self.eat_while(|c| c == '#');
+        let mut eaten = 0;
+        while self.first() == '#' {
+            eaten += 1;
+            self.bump();
+        }
+        let n_start_hashes = eaten;
 
         // Check that string is started.
         match self.bump() {
@@ -720,16 +731,11 @@ impl Cursor<'_> {
             // Note that this will not consume extra trailing `#` characters:
             // `r###"abcde"####` is lexed as a `RawStr { n_hashes: 3 }`
             // followed by a `#` token.
-            let mut hashes_left = n_start_hashes;
-            let is_closing_hash = |c| {
-                if c == '#' && hashes_left != 0 {
-                    hashes_left -= 1;
-                    true
-                } else {
-                    false
-                }
-            };
-            let n_end_hashes = self.eat_while(is_closing_hash);
+            let mut n_end_hashes = 0;
+            while self.first() == '#' && n_end_hashes < n_start_hashes {
+                n_end_hashes += 1;
+                self.bump();
+            }
 
             if n_end_hashes == n_start_hashes {
                 return (n_start_hashes, None);
@@ -803,17 +809,9 @@ impl Cursor<'_> {
     }
 
     /// Eats symbols while predicate returns true or until the end of file is reached.
-    /// Returns amount of eaten symbols.
-    fn eat_while<F>(&mut self, mut predicate: F) -> usize
-    where
-        F: FnMut(char) -> bool,
-    {
-        let mut eaten: usize = 0;
+    fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
         while predicate(self.first()) && !self.is_eof() {
-            eaten += 1;
             self.bump();
         }
-
-        eaten
     }
 }

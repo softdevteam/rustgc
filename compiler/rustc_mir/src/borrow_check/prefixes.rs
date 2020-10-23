@@ -33,7 +33,6 @@ pub(super) struct Prefixes<'cx, 'tcx> {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[allow(dead_code)]
 pub(super) enum PrefixSet {
     /// Doesn't stop until it returns the base case (a Local or
     /// Static prefix).
@@ -121,7 +120,7 @@ impl<'cx, 'tcx> Iterator for Prefixes<'cx, 'tcx> {
                     // reference.
 
                     let ty = Place::ty_from(cursor.local, proj_base, self.body, self.tcx).ty;
-                    match ty.kind {
+                    match ty.kind() {
                         ty::RawPtr(_) | ty::Ref(_ /*rgn*/, _ /*ty*/, hir::Mutability::Not) => {
                             // don't continue traversing over derefs of raw pointers or shared
                             // borrows.

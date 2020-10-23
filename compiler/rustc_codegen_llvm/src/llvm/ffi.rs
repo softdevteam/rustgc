@@ -96,7 +96,7 @@ pub enum DLLStorageClass {
     DllExport = 2, // Function to be accessible from DLL.
 }
 
-/// Matches LLVMRustAttribute in rustllvm.h
+/// Matches LLVMRustAttribute in LLVMWrapper.h
 /// Semantically a subset of the C++ enum llvm::Attribute::AttrKind,
 /// though it is not ABI compatible (since it's a C++ enum)
 #[repr(C)]
@@ -483,6 +483,7 @@ pub enum DiagnosticKind {
     OptimizationFailure,
     PGOProfile,
     Linker,
+    Unsupported,
 }
 
 /// LLVMRustDiagnosticLevel
@@ -948,7 +949,6 @@ extern "C" {
 
     // Operations on other types
     pub fn LLVMVoidTypeInContext(C: &Context) -> &Type;
-    pub fn LLVMX86MMXTypeInContext(C: &Context) -> &Type;
     pub fn LLVMRustMetadataTypeInContext(C: &Context) -> &Type;
 
     // Operations on all values
@@ -1705,7 +1705,7 @@ extern "C" {
         PM: &PassManager<'_>,
     );
 
-    // Stuff that's in rustllvm/ because it's not upstream yet.
+    // Stuff that's in llvm-wrapper/ because it's not upstream yet.
 
     /// Opens an object file.
     pub fn LLVMCreateObjectFile(
@@ -2362,4 +2362,10 @@ extern "C" {
         bytecode_len: usize,
     ) -> bool;
     pub fn LLVMRustLinkerFree(linker: &'a mut Linker<'a>);
+    #[allow(improper_ctypes)]
+    pub fn LLVMRustComputeLTOCacheKey(
+        key_out: &RustString,
+        mod_id: *const c_char,
+        data: &ThinLTOData,
+    );
 }

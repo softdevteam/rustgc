@@ -325,7 +325,7 @@ pub fn super_relate_tys<R: TypeRelation<'tcx>>(
 ) -> RelateResult<'tcx, Ty<'tcx>> {
     let tcx = relation.tcx();
     debug!("super_relate_tys: a={:?} b={:?}", a, b);
-    match (&a.kind, &b.kind) {
+    match (a.kind(), b.kind()) {
         (&ty::Infer(_), _) | (_, &ty::Infer(_)) => {
             // The caller should handle these cases!
             bug!("var types encountered in super_relate_tys")
@@ -516,7 +516,7 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
                 (ConstValue::Scalar(a_val), ConstValue::Scalar(b_val)) if a.ty == b.ty => {
                     if a_val == b_val {
                         Ok(ConstValue::Scalar(a_val))
-                    } else if let ty::FnPtr(_) = a.ty.kind {
+                    } else if let ty::FnPtr(_) = a.ty.kind() {
                         let a_instance = tcx.global_alloc(a_val.assert_ptr().alloc_id).unwrap_fn();
                         let b_instance = tcx.global_alloc(b_val.assert_ptr().alloc_id).unwrap_fn();
                         if a_instance == b_instance {
@@ -540,7 +540,7 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
                 }
 
                 (ConstValue::ByRef { .. }, ConstValue::ByRef { .. }) => {
-                    match a.ty.kind {
+                    match a.ty.kind() {
                         ty::Array(..) | ty::Adt(..) | ty::Tuple(..) => {
                             let a_destructured = tcx.destructure_const(relation.param_env().and(a));
                             let b_destructured = tcx.destructure_const(relation.param_env().and(b));
@@ -576,7 +576,20 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
             new_val.map(ty::ConstKind::Value)
         }
 
-        // FIXME(const_generics): this is wrong, as it is a projection
+        (
+            ty::ConstKind::Unevaluated(a_def, a_substs, None),
+            ty::ConstKind::Unevaluated(b_def, b_substs, None),
+        ) if tcx.features().const_evaluatable_checked => {
+            if tcx.try_unify_abstract_consts(((a_def, a_substs), (b_def, b_substs))) {
+                Ok(a.val)
+            } else {
+                Err(TypeError::ConstMismatch(expected_found(relation, a, b)))
+            }
+        }
+
+        // While this is slightly incorrect, it shouldn't matter for `min_const_generics`
+        // and is the better alternative to waiting until `const_evaluatable_checked` can
+        // be stabilized.
         (
             ty::ConstKind::Unevaluated(a_def, a_substs, a_promoted),
             ty::ConstKind::Unevaluated(b_def, b_substs, b_promoted),

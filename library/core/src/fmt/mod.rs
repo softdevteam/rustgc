@@ -92,18 +92,14 @@ pub type Result = result::Result<(), Error>;
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Error;
 
-/// A collection of methods that are required to format a message into a stream.
+/// A trait for writing or formatting into Unicode-accepting buffers or streams.
 ///
-/// This trait is the type which this modules requires when formatting
-/// information. This is similar to the standard library's [`io::Write`] trait,
-/// but it is only intended for use in libcore.
+/// This trait only accepts UTF-8–encoded data and is not [flushable]. If you only
+/// want to accept Unicode and you don't need flushing, you should implement this trait;
+/// otherwise you should implement [`std::io::Write`].
 ///
-/// This trait should generally not be implemented by consumers of the standard
-/// library. The [`write!`] macro accepts an instance of [`io::Write`], and the
-/// [`io::Write`] trait is favored over implementing this trait.
-///
-/// [`write!`]: ../../std/macro.write.html
-/// [`io::Write`]: ../../std/io/trait.Write.html
+/// [`std::io::Write`]: ../../std/io/trait.Write.html
+/// [flushable]: ../../std/io/trait.Write.html#tymethod.flush
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Write {
     /// Writes a string slice into this writer, returning whether the write
@@ -167,8 +163,6 @@ pub trait Write {
     ///
     /// This method should generally not be invoked manually, but rather through
     /// the [`write!`] macro itself.
-    ///
-    /// [`write!`]: ../../std/macro.write.html
     ///
     /// # Examples
     ///
@@ -1060,7 +1054,7 @@ pub trait UpperExp {
 /// assert_eq!(output, "Hello world!");
 /// ```
 ///
-/// [`write!`]: ../../std/macro.write.html
+/// [`write!`]: crate::write!
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn write(output: &mut dyn Write, args: Arguments<'_>) -> Result {
     let mut formatter = Formatter {
@@ -1888,7 +1882,7 @@ impl<'a> Formatter<'a> {
     /// assert_eq!(format!("{:?}", Foo(vec![10, 11])), "{10, 11}");
     /// ```
     ///
-    /// [`format_args!`]: ../../std/macro.format_args.html
+    /// [`format_args!`]: crate::format_args
     ///
     /// In this more complex example, we use [`format_args!`] and `.debug_set()`
     /// to build a list of match arms:
@@ -2088,7 +2082,7 @@ impl<T: ?Sized> Pointer for *const T {
             f.flags |= 1 << (FlagV1::SignAwareZeroPad as u32);
 
             if f.width.is_none() {
-                f.width = Some(((mem::size_of::<usize>() * 8) / 4) + 2);
+                f.width = Some((usize::BITS / 4) as usize + 2);
             }
         }
         f.flags |= 1 << (FlagV1::Alternate as u32);
@@ -2240,5 +2234,6 @@ impl<T: ?Sized + Debug> Debug for UnsafeCell<T> {
     }
 }
 
-// If you expected tests to be here, look instead at the ui/ifmt.rs test,
+// If you expected tests to be here, look instead at the core/tests/fmt.rs file,
 // it's a lot easier than creating all of the rt::Piece structures here.
+// There are also tests in the alloc crate, for those that need allocations.

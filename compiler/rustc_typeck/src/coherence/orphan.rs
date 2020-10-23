@@ -52,7 +52,7 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
                             // Remove the lifetimes unnecessary for this error.
                             ty = infcx.freshen(ty);
                         });
-                        ty = match ty.kind {
+                        ty = match ty.kind() {
                             // Remove the type arguments from the output, as they are not relevant.
                             // You can think of this as the reverse of `resolve_vars_if_possible`.
                             // That way if we had `Vec<MyType>`, we will properly attribute the
@@ -62,7 +62,7 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
                             _ => ty,
                         };
                         let this = "this".to_string();
-                        let (ty, postfix) = match &ty.kind {
+                        let (ty, postfix) = match &ty.kind() {
                             ty::Slice(_) => (this, " because slices are always foreign"),
                             ty::Array(..) => (this, " because arrays are always foreign"),
                             ty::Tuple(..) => (this, " because tuples are always foreign"),
@@ -110,7 +110,7 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
                             )
                             .note(
                                 "implementing a foreign trait is only possible if at \
-                                    least one of the types for which is it implemented is local, \
+                                    least one of the types for which it is implemented is local, \
                                     and no uncovered type parameters appear before that first \
                                     local type",
                             )
@@ -135,7 +135,7 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
                                 local type",
                                 param_ty,
                             )).note("implementing a foreign trait is only possible if at \
-                                    least one of the types for which is it implemented is local"
+                                    least one of the types for which it is implemented is local"
                             ).note("only traits defined in the current crate can be \
                                     implemented for a type parameter"
                             ).emit();
@@ -185,7 +185,7 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
             );
             if self.tcx.trait_is_auto(trait_def_id) && !trait_def_id.is_local() {
                 let self_ty = trait_ref.self_ty();
-                let opt_self_def_id = match self_ty.kind {
+                let opt_self_def_id = match *self_ty.kind() {
                     ty::Adt(self_def, _) => Some(self_def.did),
                     ty::Foreign(did) => Some(did),
                     _ => None,
@@ -229,6 +229,14 @@ impl ItemLikeVisitor<'v> for OrphanChecker<'tcx> {
                         .emit();
                     return;
                 }
+            }
+
+            if let ty::Opaque(def_id, _) = *trait_ref.self_ty().kind() {
+                self.tcx
+                    .sess
+                    .struct_span_err(sp, "cannot implement trait on type alias impl trait")
+                    .span_note(self.tcx.def_span(def_id), "type alias impl trait defined here")
+                    .emit();
             }
         }
     }

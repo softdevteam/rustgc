@@ -200,11 +200,7 @@ pub trait Visitor<'ast>: Sized {
         walk_generic_args(self, path_span, generic_args)
     }
     fn visit_generic_arg(&mut self, generic_arg: &'ast GenericArg) {
-        match generic_arg {
-            GenericArg::Lifetime(lt) => self.visit_lifetime(lt),
-            GenericArg::Type(ty) => self.visit_ty(ty),
-            GenericArg::Const(ct) => self.visit_anon_const(ct),
-        }
+        walk_generic_arg(self, generic_arg)
     }
     fn visit_assoc_ty_constraint(&mut self, constraint: &'ast AssocTyConstraint) {
         walk_assoc_ty_constraint(self, constraint)
@@ -486,6 +482,17 @@ where
     }
 }
 
+pub fn walk_generic_arg<'a, V>(visitor: &mut V, generic_arg: &'a GenericArg)
+where
+    V: Visitor<'a>,
+{
+    match generic_arg {
+        GenericArg::Lifetime(lt) => visitor.visit_lifetime(lt),
+        GenericArg::Type(ty) => visitor.visit_ty(ty),
+        GenericArg::Const(ct) => visitor.visit_anon_const(ct),
+    }
+}
+
 pub fn walk_assoc_ty_constraint<'a, V: Visitor<'a>>(
     visitor: &mut V,
     constraint: &'a AssocTyConstraint,
@@ -692,7 +699,7 @@ pub fn walk_stmt<'a, V: Visitor<'a>>(visitor: &mut V, statement: &'a Stmt) {
         StmtKind::Expr(ref expr) | StmtKind::Semi(ref expr) => visitor.visit_expr(expr),
         StmtKind::Empty => {}
         StmtKind::MacCall(ref mac) => {
-            let (ref mac, _, ref attrs) = **mac;
+            let MacCallStmt { ref mac, style: _, ref attrs } = **mac;
             visitor.visit_mac(mac);
             for attr in attrs.iter() {
                 visitor.visit_attribute(attr);
@@ -717,6 +724,7 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
         ExprKind::Array(ref subexpressions) => {
             walk_list!(visitor, visit_expr, subexpressions);
         }
+        ExprKind::ConstBlock(ref anon_const) => visitor.visit_anon_const(anon_const),
         ExprKind::Repeat(ref element, ref count) => {
             visitor.visit_expr(element);
             visitor.visit_anon_const(count)
@@ -879,7 +887,7 @@ pub fn walk_arm<'a, V: Visitor<'a>>(visitor: &mut V, arm: &'a Arm) {
 }
 
 pub fn walk_vis<'a, V: Visitor<'a>>(visitor: &mut V, vis: &'a Visibility) {
-    if let VisibilityKind::Restricted { ref path, id } = vis.node {
+    if let VisibilityKind::Restricted { ref path, id } = vis.kind {
         visitor.visit_path(path, id);
     }
 }

@@ -24,16 +24,16 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
             Goto { target } => self.go_to_block(target),
 
-            SwitchInt { ref discr, ref values, ref targets, switch_ty } => {
+            SwitchInt { ref discr, ref targets, switch_ty } => {
                 let discr = self.read_immediate(self.eval_operand(discr, None)?)?;
                 trace!("SwitchInt({:?})", *discr);
                 assert_eq!(discr.layout.ty, switch_ty);
 
                 // Branch to the `otherwise` case by default, if no match is found.
-                assert!(!targets.is_empty());
-                let mut target_block = targets[targets.len() - 1];
+                assert!(!targets.iter().is_empty());
+                let mut target_block = targets.otherwise();
 
-                for (index, &const_int) in values.iter().enumerate() {
+                for (const_int, target) in targets.iter() {
                     // Compare using binary_op, to also support pointer values
                     let res = self
                         .overflowing_binary_op(
@@ -43,7 +43,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         )?
                         .0;
                     if res.to_bool()? {
-                        target_block = targets[index];
+                        target_block = target;
                         break;
                     }
                 }
@@ -55,7 +55,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let old_stack = self.frame_idx();
                 let old_loc = self.frame().loc;
                 let func = self.eval_operand(func, None)?;
-                let (fn_val, abi) = match func.layout.ty.kind {
+                let (fn_val, abi) = match *func.layout.ty.kind() {
                     ty::FnPtr(sig) => {
                         let caller_abi = sig.abi();
                         let fn_ptr = self.read_scalar(func)?.check_init()?;
@@ -64,7 +64,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     }
                     ty::FnDef(def_id, substs) => {
                         let sig = func.layout.ty.fn_sig(*self.tcx);
-                        (FnVal::Instance(self.resolve(def_id, substs)?), sig.abi())
+                        (
+                            FnVal::Instance(
+                                self.resolve(ty::WithOptConstParam::unknown(def_id), substs)?,
+                            ),
+                            sig.abi(),
+                        )
                     }
                     _ => span_bug!(
                         terminator.source_info.span,
@@ -222,7 +227,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         {
             let callee_abi = {
                 let instance_ty = instance.ty(*self.tcx, self.param_env);
-                match instance_ty.kind {
+                match instance_ty.kind() {
                     ty::FnDef(..) => instance_ty.fn_sig(*self.tcx).abi(),
                     ty::Closure(..) => Abi::RustCall,
                     ty::Generator(..) => Abi::Rust,
@@ -385,9 +390,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             ty::InstanceDef::Virtual(_, idx) => {
                 let mut args = args.to_vec();
                 // We have to implement all "object safe receivers".  Currently we
-                // support built-in pointers (&, &mut, Box) as well as unsized-self.  We do
+                // support built-in pointers `(&, &mut, Box)` as well as unsized-self.  We do
                 // not yet support custom self types.
-                // Also see librustc_codegen_llvm/abi.rs and librustc_codegen_llvm/mir/block.rs.
+                // Also see `compiler/rustc_codegen_llvm/src/abi.rs` and `compiler/rustc_codegen_ssa/src/mir/block.rs`.
                 let receiver_place = match args[0].layout.ty.builtin_deref(true) {
                     Some(_) => {
                         // Built-in pointer.
@@ -431,7 +436,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // implementation fail -- a problem shared by rustc.
         let place = self.force_allocation(place)?;
 
-        let (instance, place) = match place.layout.ty.kind {
+        let (instance, place) = match place.layout.ty.kind() {
             ty::Dynamic(..) => {
                 // Dropping a trait object.
                 self.unpack_dyn_trait(place)?

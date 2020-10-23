@@ -1,10 +1,9 @@
 use crate::expand::{self, AstFragment, Invocation};
 use crate::module::DirectoryOwnership;
 
-use rustc_ast::mut_visit::{self, MutVisitor};
 use rustc_ast::ptr::P;
 use rustc_ast::token;
-use rustc_ast::tokenstream::{self, TokenStream};
+use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::visit::{AssocCtxt, Visitor};
 use rustc_ast::{self as ast, Attribute, NodeId, PatKind};
 use rustc_attr::{self as attr, Deprecation, HasAttrs, Stability};
@@ -146,17 +145,6 @@ impl Annotatable {
         match self {
             Annotatable::Item(i) => i,
             _ => panic!("expected Item"),
-        }
-    }
-
-    pub fn map_item_or<F, G>(self, mut f: F, mut or: G) -> Annotatable
-    where
-        F: FnMut(P<ast::Item>) -> P<ast::Item>,
-        G: FnMut(Annotatable) -> Annotatable,
-    {
-        match self {
-            Annotatable::Item(i) => Annotatable::Item(f(i)),
-            _ => or(self),
         }
     }
 
@@ -313,7 +301,7 @@ where
         ts: TokenStream,
     ) -> Result<TokenStream, ErrorReported> {
         // FIXME setup implicit context in TLS before calling self.
-        Ok((*self)(ts))
+        Ok(self(ts))
     }
 }
 
@@ -339,7 +327,7 @@ where
         annotated: TokenStream,
     ) -> Result<TokenStream, ErrorReported> {
         // FIXME setup implicit context in TLS before calling self.
-        Ok((*self)(annotation, annotated))
+        Ok(self(annotation, annotated))
     }
 }
 
@@ -364,31 +352,9 @@ where
         &self,
         ecx: &'cx mut ExtCtxt<'_>,
         span: Span,
-        mut input: TokenStream,
+        input: TokenStream,
     ) -> Box<dyn MacResult + 'cx> {
-        struct AvoidInterpolatedIdents;
-
-        impl MutVisitor for AvoidInterpolatedIdents {
-            fn visit_tt(&mut self, tt: &mut tokenstream::TokenTree) {
-                if let tokenstream::TokenTree::Token(token) = tt {
-                    if let token::Interpolated(nt) = &token.kind {
-                        if let token::NtIdent(ident, is_raw) = **nt {
-                            *tt = tokenstream::TokenTree::token(
-                                token::Ident(ident.name, is_raw),
-                                ident.span,
-                            );
-                        }
-                    }
-                }
-                mut_visit::noop_visit_tt(tt, self)
-            }
-
-            fn visit_mac(&mut self, mac: &mut ast::MacCall) {
-                mut_visit::noop_visit_mac(mac, self)
-            }
-        }
-        AvoidInterpolatedIdents.visit_tts(&mut input);
-        (*self)(ecx, span, input)
+        self(ecx, span, input)
     }
 }
 
@@ -400,6 +366,7 @@ macro_rules! make_stmts_default {
                 id: ast::DUMMY_NODE_ID,
                 span: e.span,
                 kind: ast::StmtKind::Expr(e),
+                tokens: None
             }]
         })
     };
@@ -607,6 +574,7 @@ impl DummyResult {
             id: ast::DUMMY_NODE_ID,
             kind: if is_error { ast::TyKind::Err } else { ast::TyKind::Tup(Vec::new()) },
             span: sp,
+            tokens: None,
         })
     }
 }
@@ -641,6 +609,7 @@ impl MacResult for DummyResult {
             id: ast::DUMMY_NODE_ID,
             kind: ast::StmtKind::Expr(DummyResult::raw_expr(self.span, self.is_error)),
             span: self.span,
+            tokens: None
         }])
     }
 
@@ -1071,9 +1040,6 @@ impl<'a> ExtCtxt<'a> {
         iter::once(Ident::new(kw::DollarCrate, def_site))
             .chain(components.iter().map(|&s| Ident::with_dummy_span(s)))
             .collect()
-    }
-    pub fn name_of(&self, st: &str) -> Symbol {
-        Symbol::intern(st)
     }
 
     pub fn check_unused_macros(&mut self) {

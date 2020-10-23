@@ -112,7 +112,7 @@ impl<'a> Resolver<'a> {
                 match outer_res {
                     Res::SelfTy(maybe_trait_defid, maybe_impl_defid) => {
                         if let Some(impl_span) =
-                            maybe_impl_defid.and_then(|def_id| self.opt_span(def_id))
+                            maybe_impl_defid.and_then(|(def_id, _)| self.opt_span(def_id))
                         {
                             err.span_label(
                                 reduce_impl_span_to_impl_keyword(sm, impl_span),
@@ -466,21 +466,22 @@ impl<'a> Resolver<'a> {
                 );
                 err
             }
-            ResolutionError::ParamInNonTrivialAnonConst(name) => {
+            ResolutionError::ParamInNonTrivialAnonConst { name, is_type } => {
                 let mut err = self.session.struct_span_err(
                     span,
-                    "generic parameters must not be used inside of non trivial constant values",
+                    "generic parameters may not be used in const operations",
                 );
-                err.span_label(
-                    span,
-                    &format!(
-                        "non-trivial anonymous constants must not depend on the parameter `{}`",
+                err.span_label(span, &format!("cannot perform const operation using `{}`", name));
+
+                if is_type {
+                    err.note("type parameters may not be used in const expressions");
+                } else {
+                    err.help(&format!(
+                        "const parameters may only be used as standalone arguments, i.e. `{}`",
                         name
-                    ),
-                );
-                err.help(
-                    &format!("it is currently only allowed to use either `{0}` or `{{ {0} }}` as generic constants", name)
-                );
+                    ));
+                }
+
                 err
             }
             ResolutionError::SelfInTyParamDefault => {
@@ -794,7 +795,7 @@ impl<'a> Resolver<'a> {
                         }
 
                         segms.push(ast::PathSegment::from_ident(ident));
-                        let path = Path { span: name_binding.span, segments: segms };
+                        let path = Path { span: name_binding.span, segments: segms, tokens: None };
                         let did = match res {
                             Res::Def(DefKind::Ctor(..), did) => this.parent(did),
                             _ => res.opt_def_id(),
@@ -920,6 +921,17 @@ impl<'a> Resolver<'a> {
             is_expected,
         );
         self.add_typo_suggestion(err, suggestion, ident.span);
+
+        let import_suggestions = self.lookup_import_candidates(
+            ident,
+            Namespace::MacroNS,
+            parent_scope,
+            |res| match res {
+                Res::Def(DefKind::Macro(MacroKind::Bang), _) => true,
+                _ => false,
+            },
+        );
+        show_candidates(err, None, &import_suggestions, false, true);
 
         if macro_kind == MacroKind::Derive && (ident.name == sym::Send || ident.name == sym::Sync) {
             let msg = format!("unsafe traits like `{}` should be implemented explicitly", ident);

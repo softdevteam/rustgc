@@ -28,7 +28,6 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::fold::{TypeFoldable, TypeVisitor};
 use rustc_middle::ty::relate::{self, Relate, RelateResult, TypeRelation};
-use rustc_middle::ty::subst::GenericArg;
 use rustc_middle::ty::{self, InferConst, Ty, TyCtxt};
 use std::fmt::Debug;
 
@@ -117,12 +116,6 @@ pub trait TypeRelatingDelegate<'tcx> {
     /// Enables some optimizations if we do not expect inference variables
     /// in the RHS of the relation.
     fn forbid_inference_vars() -> bool;
-}
-
-#[derive(Clone, Debug)]
-struct ScopesAndKind<'tcx> {
-    scopes: Vec<BoundRegionScope<'tcx>>,
-    kind: GenericArg<'tcx>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -265,7 +258,7 @@ where
         use crate::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
         use rustc_span::DUMMY_SP;
 
-        match value_ty.kind {
+        match *value_ty.kind() {
             ty::Projection(other_projection_ty) => {
                 let var = self.infcx.next_ty_var(TypeVariableOrigin {
                     kind: TypeVariableOriginKind::MiscVariable,
@@ -311,7 +304,7 @@ where
         // This only presently applies to chalk integration, as NLL
         // doesn't permit type variables to appear on both sides (and
         // doesn't use lazy norm).
-        match value_ty.kind {
+        match *value_ty.kind() {
             ty::Infer(ty::TyVar(value_vid)) => {
                 // Two type variables: just equate them.
                 self.infcx.inner.borrow_mut().type_variables().equate(vid, value_vid);
@@ -341,7 +334,7 @@ where
         // been fully instantiated and hence the set of scopes we have
         // doesn't matter -- just to be sure, put an empty vector
         // in there.
-        let old_a_scopes = ::std::mem::take(pair.vid_scopes(self));
+        let old_a_scopes = std::mem::take(pair.vid_scopes(self));
 
         // Relate the generalized kind to the original one.
         let result = pair.relate_generalized_ty(self, generalized_ty);
@@ -531,7 +524,7 @@ where
             }
         }
 
-        match (&a.kind, &b.kind) {
+        match (a.kind(), b.kind()) {
             (_, &ty::Infer(ty::TyVar(vid))) => {
                 if D::forbid_inference_vars() {
                     // Forbid inference variables in the RHS.
@@ -643,7 +636,7 @@ where
         if let (Some(a), Some(b)) = (a.no_bound_vars(), b.no_bound_vars()) {
             // Fast path for the common case.
             self.relate(a, b)?;
-            return Ok(ty::Binder::bind(a));
+            return Ok(ty::Binder::dummy(a));
         }
 
         if self.ambient_covariance() {
@@ -680,7 +673,7 @@ where
             //   itself occurs. Note that `'b` and `'c` must both
             //   include P. At the point, the call works because of
             //   subtyping (i.e., `&'b u32 <: &{P} u32`).
-            let variance = ::std::mem::replace(&mut self.ambient_variance, ty::Variance::Covariant);
+            let variance = std::mem::replace(&mut self.ambient_variance, ty::Variance::Covariant);
 
             self.relate(a.skip_binder(), b.skip_binder())?;
 
@@ -709,7 +702,7 @@ where
             // Reset ambient variance to contravariance. See the
             // covariant case above for an explanation.
             let variance =
-                ::std::mem::replace(&mut self.ambient_variance, ty::Variance::Contravariant);
+                std::mem::replace(&mut self.ambient_variance, ty::Variance::Contravariant);
 
             self.relate(a.skip_binder(), b.skip_binder())?;
 
@@ -868,7 +861,7 @@ where
 
         debug!("TypeGeneralizer::tys(a={:?})", a);
 
-        match a.kind {
+        match *a.kind() {
             ty::Infer(ty::TyVar(_)) | ty::Infer(ty::IntVar(_)) | ty::Infer(ty::FloatVar(_))
                 if D::forbid_inference_vars() =>
             {

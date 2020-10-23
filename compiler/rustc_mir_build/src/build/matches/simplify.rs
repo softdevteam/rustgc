@@ -28,8 +28,9 @@ use std::mem;
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Simplify a candidate so that all match pairs require a test.
     ///
-    /// This method will also split a candidate where the only match-pair is an
-    /// or-pattern into multiple candidates. This is so that
+    /// This method will also split a candidate, in which the only
+    /// match-pair is an or-pattern, into multiple candidates.
+    /// This is so that
     ///
     /// match x {
     ///     0 | 1 => { ... },
@@ -154,7 +155,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             PatKind::Range(PatRange { lo, hi, end }) => {
-                let (range, bias) = match lo.ty.kind {
+                let (range, bias) = match *lo.ty.kind() {
                     ty::Char => {
                         (Some(('\u{0000}' as u128, '\u{10FFFF}' as u128, Size::from_bits(32))), 0)
                     }

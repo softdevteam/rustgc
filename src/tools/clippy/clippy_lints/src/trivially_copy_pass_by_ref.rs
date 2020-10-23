@@ -9,10 +9,10 @@ use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Body, FnDecl, HirId, ItemKind, MutTy, Mutability, Node};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
-use rustc_session::config::Config as SessionConfig;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::Span;
 use rustc_target::abi::LayoutOf;
+use rustc_target::spec::Target;
 use rustc_target::spec::abi::Abi;
 
 declare_clippy_lint! {
@@ -60,9 +60,9 @@ pub struct TriviallyCopyPassByRef {
 }
 
 impl<'tcx> TriviallyCopyPassByRef {
-    pub fn new(limit: Option<u64>, target: &SessionConfig) -> Self {
+    pub fn new(limit: Option<u64>, target: &Target) -> Self {
         let limit = limit.unwrap_or_else(|| {
-            let bit_width = u64::from(target.ptr_width);
+            let bit_width = u64::from(target.pointer_width);
             // Cap the calculated bit width at 32-bits to reduce
             // portability problems between 32 and 64-bit targets
             let bit_width = cmp::min(bit_width, 32);
@@ -83,7 +83,7 @@ impl<'tcx> TriviallyCopyPassByRef {
         // Use lifetimes to determine if we're returning a reference to the
         // argument. In that case we can't switch to pass-by-value as the
         // argument will not live long enough.
-        let output_lts = match fn_sig.output().kind {
+        let output_lts = match *fn_sig.output().kind() {
             ty::Ref(output_lt, _, _) => vec![output_lt],
             ty::Adt(_, substs) => substs.regions().collect(),
             _ => vec![],
@@ -97,7 +97,7 @@ impl<'tcx> TriviallyCopyPassByRef {
             }
 
             if_chain! {
-                if let ty::Ref(input_lt, ty, Mutability::Not) = ty.kind;
+                if let ty::Ref(input_lt, ty, Mutability::Not) = ty.kind();
                 if !output_lts.contains(&input_lt);
                 if is_copy(cx, ty);
                 if let Some(size) = cx.layout_of(ty).ok().map(|l| l.size.bytes());

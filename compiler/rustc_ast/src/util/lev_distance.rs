@@ -54,7 +54,7 @@ where
     T: Iterator<Item = &'a Symbol>,
 {
     let lookup = &lookup.as_str();
-    let max_dist = dist.map_or_else(|| cmp::max(lookup.len(), 3) / 3, |d| d);
+    let max_dist = dist.unwrap_or_else(|| cmp::max(lookup.len(), 3) / 3);
     let name_vec: Vec<&Symbol> = iter_names.collect();
 
     let (case_insensitive_match, levenshtein_match) = name_vec
@@ -103,6 +103,7 @@ fn find_match_by_sorted_words<'a>(iter_names: Vec<&'a Symbol>, lookup: &str) -> 
 
 fn sort_by_words(name: &str) -> String {
     let mut split_words: Vec<&str> = name.split('_').collect();
-    split_words.sort();
+    // We are sorting primitive &strs and can use unstable sort here
+    split_words.sort_unstable();
     split_words.join("_")
 }

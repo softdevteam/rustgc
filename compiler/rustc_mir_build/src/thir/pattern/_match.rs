@@ -139,10 +139,10 @@
 //!
 //!    It is computed as follows. We look at the pattern `p_1` on top of the stack,
 //!    and we have three cases:
-//!         1.1. `p_1 = c(r_1, .., r_a)`. We discard the current stack and return nothing.
-//!         1.2. `p_1 = _`. We return the rest of the stack:
+//!         2.1. `p_1 = c(r_1, .., r_a)`. We discard the current stack and return nothing.
+//!         2.2. `p_1 = _`. We return the rest of the stack:
 //!                 p_2, .., p_n
-//!         1.3. `p_1 = r_1 | r_2`. We expand the OR-pattern and then recurse on each resulting
+//!         2.3. `p_1 = r_1 | r_2`. We expand the OR-pattern and then recurse on each resulting
 //!           stack.
 //!                 D((r_1, p_2, .., p_n))
 //!                 D((r_2, p_2, .., p_n))
@@ -276,7 +276,7 @@ use self::Usefulness::*;
 use self::WitnessPreference::*;
 
 use rustc_data_structures::captures::Captures;
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_index::vec::Idx;
 
 use super::{compare_const_vals, PatternFoldable, PatternFolder};
@@ -327,7 +327,7 @@ impl<'tcx> LiteralExpander<'tcx> {
         crty: Ty<'tcx>,
     ) -> ConstValue<'tcx> {
         debug!("fold_const_value_deref {:?} {:?} {:?}", val, rty, crty);
-        match (val, &crty.kind, &rty.kind) {
+        match (val, &crty.kind(), &rty.kind()) {
             // the easy case, deref a reference
             (ConstValue::Scalar(p), x, y) if x == y => {
                 match p {
@@ -368,41 +368,35 @@ impl<'tcx> LiteralExpander<'tcx> {
 
 impl<'tcx> PatternFolder<'tcx> for LiteralExpander<'tcx> {
     fn fold_pattern(&mut self, pat: &Pat<'tcx>) -> Pat<'tcx> {
-        debug!("fold_pattern {:?} {:?} {:?}", pat, pat.ty.kind, pat.kind);
-        match (&pat.ty.kind, &*pat.kind) {
-            (
-                &ty::Ref(_, rty, _),
-                &PatKind::Constant {
-                    value:
-                        Const {
-                            val: ty::ConstKind::Value(val),
-                            ty: ty::TyS { kind: ty::Ref(_, crty, _), .. },
-                        },
-                },
-            ) => Pat {
-                ty: pat.ty,
-                span: pat.span,
-                kind: box PatKind::Deref {
-                    subpattern: Pat {
-                        ty: rty,
+        debug!("fold_pattern {:?} {:?} {:?}", pat, pat.ty.kind(), pat.kind);
+        match (pat.ty.kind(), &*pat.kind) {
+            (&ty::Ref(_, rty, _), &PatKind::Constant { value: Const { val, ty: const_ty } })
+                if const_ty.is_ref() =>
+            {
+                let crty =
+                    if let ty::Ref(_, crty, _) = const_ty.kind() { crty } else { unreachable!() };
+                if let ty::ConstKind::Value(val) = val {
+                    Pat {
+                        ty: pat.ty,
                         span: pat.span,
-                        kind: box PatKind::Constant {
-                            value: Const::from_value(
-                                self.tcx,
-                                self.fold_const_value_deref(*val, rty, crty),
-                                rty,
-                            ),
+                        kind: box PatKind::Deref {
+                            subpattern: Pat {
+                                ty: rty,
+                                span: pat.span,
+                                kind: box PatKind::Constant {
+                                    value: Const::from_value(
+                                        self.tcx,
+                                        self.fold_const_value_deref(*val, rty, crty),
+                                        rty,
+                                    ),
+                                },
+                            },
                         },
-                    },
-                },
-            },
-
-            (
-                &ty::Ref(_, rty, _),
-                &PatKind::Constant {
-                    value: Const { val, ty: ty::TyS { kind: ty::Ref(_, crty, _), .. } },
-                },
-            ) => bug!("cannot deref {:#?}, {} -> {}", val, crty, rty),
+                    }
+                } else {
+                    bug!("cannot deref {:#?}, {} -> {}", val, crty, rty)
+                }
+            }
 
             (_, &PatKind::Binding { subpattern: Some(ref s), .. }) => s.fold_with(self),
             (_, &PatKind::AscribeUserType { subpattern: ref s, .. }) => s.fold_with(self),
@@ -422,7 +416,7 @@ impl<'tcx> Pat<'tcx> {
 
 /// A row of a matrix. Rows of len 1 are very common, which is why `SmallVec[_; 2]`
 /// works well.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 crate struct PatStack<'p, 'tcx>(SmallVec<[&'p Pat<'tcx>; 2]>);
 
 impl<'p, 'tcx> PatStack<'p, 'tcx> {
@@ -510,13 +504,36 @@ impl<'p, 'tcx> FromIterator<&'p Pat<'tcx>> for PatStack<'p, 'tcx> {
     }
 }
 
+/// Depending on the match patterns, the specialization process might be able to use a fast path.
+/// Tracks whether we can use the fast path and the lookup table needed in those cases.
+#[derive(Clone, Debug, PartialEq)]
+enum SpecializationCache {
+    /// Patterns consist of only enum variants.
+    /// Variant patterns does not intersect with each other (in contrast to range patterns),
+    /// so it is possible to precompute the result of `Matrix::specialize_constructor` at a
+    /// lower computational complexity.
+    /// `lookup` is responsible for holding the precomputed result of
+    /// `Matrix::specialize_constructor`, while `wilds` is used for two purposes: the first one is
+    /// the precomputed result of `Matrix::specialize_wildcard`, and the second is to be used as a
+    /// fallback for `Matrix::specialize_constructor` when it tries to apply a constructor that
+    /// has not been seen in the `Matrix`. See `update_cache` for further explanations.
+    Variants { lookup: FxHashMap<DefId, SmallVec<[usize; 1]>>, wilds: SmallVec<[usize; 1]> },
+    /// Does not belong to the cases above, use the slow path.
+    Incompatible,
+}
+
 /// A 2D matrix.
-#[derive(Clone)]
-crate struct Matrix<'p, 'tcx>(Vec<PatStack<'p, 'tcx>>);
+#[derive(Clone, PartialEq)]
+crate struct Matrix<'p, 'tcx> {
+    patterns: Vec<PatStack<'p, 'tcx>>,
+    cache: SpecializationCache,
+}
 
 impl<'p, 'tcx> Matrix<'p, 'tcx> {
     crate fn empty() -> Self {
-        Matrix(vec![])
+        // Use `SpecializationCache::Incompatible` as a placeholder; we will initialize it on the
+        // first call to `push`. See the first half of `update_cache`.
+        Matrix { patterns: vec![], cache: SpecializationCache::Incompatible }
     }
 
     /// Pushes a new row to the matrix. If the row starts with an or-pattern, this expands it.
@@ -528,18 +545,101 @@ impl<'p, 'tcx> Matrix<'p, 'tcx> {
                 self.push(row)
             }
         } else {
-            self.0.push(row);
+            self.patterns.push(row);
+            self.update_cache(self.patterns.len() - 1);
+        }
+    }
+
+    fn update_cache(&mut self, idx: usize) {
+        let row = &self.patterns[idx];
+        // We don't know which kind of cache could be used until we see the first row; therefore an
+        // empty `Matrix` is initialized with `SpecializationCache::Empty`, then the cache is
+        // assigned the appropriate variant below on the first call to `push`.
+        if self.patterns.is_empty() {
+            self.cache = if row.is_empty() {
+                SpecializationCache::Incompatible
+            } else {
+                match *row.head().kind {
+                    PatKind::Variant { .. } => SpecializationCache::Variants {
+                        lookup: FxHashMap::default(),
+                        wilds: SmallVec::new(),
+                    },
+                    // Note: If the first pattern is a wildcard, then all patterns after that is not
+                    // useful. The check is simple enough so we treat it as the same as unsupported
+                    // patterns.
+                    _ => SpecializationCache::Incompatible,
+                }
+            };
+        }
+        // Update the cache.
+        match &mut self.cache {
+            SpecializationCache::Variants { ref mut lookup, ref mut wilds } => {
+                let head = row.head();
+                match *head.kind {
+                    _ if head.is_wildcard() => {
+                        // Per rule 1.3 in the top-level comments, a wildcard pattern is included in
+                        // the result of `specialize_constructor` for *any* `Constructor`.
+                        // We push the wildcard pattern to the precomputed result for constructors
+                        // that we have seen before; results for constructors we have not yet seen
+                        // defaults to `wilds`, which is updated right below.
+                        for (_, v) in lookup.iter_mut() {
+                            v.push(idx);
+                        }
+                        // Per rule 2.1 and 2.2 in the top-level comments, only wildcard patterns
+                        // are included in the result of `specialize_wildcard`.
+                        // What we do here is to track the wildcards we have seen; so in addition to
+                        // acting as the precomputed result of `specialize_wildcard`, `wilds` also
+                        // serves as the default value of `specialize_constructor` for constructors
+                        // that are not in `lookup`.
+                        wilds.push(idx);
+                    }
+                    PatKind::Variant { adt_def, variant_index, .. } => {
+                        // Handle the cases of rule 1.1 and 1.2 in the top-level comments.
+                        // A variant pattern can only be included in the results of
+                        // `specialize_constructor` for a particular constructor, therefore we are
+                        // using a HashMap to track that.
+                        lookup
+                            .entry(adt_def.variants[variant_index].def_id)
+                            // Default to `wilds` for absent keys. See above for an explanation.
+                            .or_insert_with(|| wilds.clone())
+                            .push(idx);
+                    }
+                    _ => {
+                        self.cache = SpecializationCache::Incompatible;
+                    }
+                }
+            }
+            SpecializationCache::Incompatible => {}
         }
     }
 
     /// Iterate over the first component of each row
     fn heads<'a>(&'a self) -> impl Iterator<Item = &'a Pat<'tcx>> + Captures<'p> {
-        self.0.iter().map(|r| r.head())
+        self.patterns.iter().map(|r| r.head())
     }
 
     /// This computes `D(self)`. See top of the file for explanations.
     fn specialize_wildcard(&self) -> Self {
-        self.0.iter().filter_map(|r| r.specialize_wildcard()).collect()
+        match &self.cache {
+            SpecializationCache::Variants { wilds, .. } => {
+                let result =
+                    wilds.iter().filter_map(|&i| self.patterns[i].specialize_wildcard()).collect();
+                // When debug assertions are enabled, check the results against the "slow path"
+                // result.
+                debug_assert_eq!(
+                    result,
+                    Self {
+                        patterns: self.patterns.clone(),
+                        cache: SpecializationCache::Incompatible
+                    }
+                    .specialize_wildcard()
+                );
+                result
+            }
+            SpecializationCache::Incompatible => {
+                self.patterns.iter().filter_map(|r| r.specialize_wildcard()).collect()
+            }
+        }
     }
 
     /// This computes `S(constructor, self)`. See top of the file for explanations.
@@ -549,10 +649,47 @@ impl<'p, 'tcx> Matrix<'p, 'tcx> {
         constructor: &Constructor<'tcx>,
         ctor_wild_subpatterns: &Fields<'p, 'tcx>,
     ) -> Matrix<'p, 'tcx> {
-        self.0
-            .iter()
-            .filter_map(|r| r.specialize_constructor(cx, constructor, ctor_wild_subpatterns))
-            .collect()
+        match &self.cache {
+            SpecializationCache::Variants { lookup, wilds } => {
+                let result: Self = if let Constructor::Variant(id) = constructor {
+                    lookup
+                        .get(id)
+                        // Default to `wilds` for absent keys. See `update_cache` for an explanation.
+                        .unwrap_or(&wilds)
+                        .iter()
+                        .filter_map(|&i| {
+                            self.patterns[i].specialize_constructor(
+                                cx,
+                                constructor,
+                                ctor_wild_subpatterns,
+                            )
+                        })
+                        .collect()
+                } else {
+                    unreachable!()
+                };
+                // When debug assertions are enabled, check the results against the "slow path"
+                // result.
+                debug_assert_eq!(
+                    result,
+                    Matrix {
+                        patterns: self.patterns.clone(),
+                        cache: SpecializationCache::Incompatible
+                    }
+                    .specialize_constructor(
+                        cx,
+                        constructor,
+                        ctor_wild_subpatterns
+                    )
+                );
+                result
+            }
+            SpecializationCache::Incompatible => self
+                .patterns
+                .iter()
+                .filter_map(|r| r.specialize_constructor(cx, constructor, ctor_wild_subpatterns))
+                .collect(),
+        }
     }
 }
 
@@ -574,7 +711,7 @@ impl<'p, 'tcx> fmt::Debug for Matrix<'p, 'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "\n")?;
 
-        let &Matrix(ref m) = self;
+        let Matrix { patterns: m, .. } = self;
         let pretty_printed_matrix: Vec<Vec<String>> =
             m.iter().map(|row| row.iter().map(|pat| format!("{:?}", pat)).collect()).collect();
 
@@ -639,7 +776,7 @@ impl<'a, 'tcx> MatchCheckCtxt<'a, 'tcx> {
 
     /// Returns whether the given type is an enum from another crate declared `#[non_exhaustive]`.
     crate fn is_foreign_non_exhaustive_enum(&self, ty: Ty<'tcx>) -> bool {
-        match ty.kind {
+        match ty.kind() {
             ty::Adt(def, ..) => {
                 def.is_enum() && def.is_variant_list_non_exhaustive() && !def.did.is_local()
             }
@@ -920,14 +1057,14 @@ impl<'tcx> Constructor<'tcx> {
         let mut subpatterns = fields.all_patterns();
 
         let pat = match self {
-            Single | Variant(_) => match ty.kind {
+            Single | Variant(_) => match ty.kind() {
                 ty::Adt(..) | ty::Tuple(..) => {
                     let subpatterns = subpatterns
                         .enumerate()
                         .map(|(i, p)| FieldPat { field: Field::new(i), pattern: p })
                         .collect();
 
-                    if let ty::Adt(adt, substs) = ty.kind {
+                    if let ty::Adt(adt, substs) = ty.kind() {
                         if adt.is_enum() {
                             PatKind::Variant {
                                 adt_def: adt,
@@ -1074,7 +1211,7 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
         let wildcard_from_ty = |ty| &*cx.pattern_arena.alloc(Pat::wildcard_from_ty(ty));
 
         let ret = match constructor {
-            Single | Variant(_) => match ty.kind {
+            Single | Variant(_) => match ty.kind() {
                 ty::Tuple(ref fs) => {
                     Fields::wildcards_from_tys(cx, fs.into_iter().map(|ty| ty.expect_ty()))
                 }
@@ -1125,7 +1262,7 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
                 }
                 _ => Fields::empty(),
             },
-            Slice(slice) => match ty.kind {
+            Slice(slice) => match *ty.kind() {
                 ty::Slice(ty) | ty::Array(ty, _) => {
                     let arity = slice.arity();
                     Fields::wildcards_from_tys(cx, (0..arity).map(|_| ty))
@@ -1443,7 +1580,7 @@ fn all_constructors<'a, 'tcx>(
                 .unwrap(),
         )
     };
-    match pcx.ty.kind {
+    match *pcx.ty.kind() {
         ty::Bool => {
             [true, false].iter().map(|&b| ConstantValue(ty::Const::from_bool(cx.tcx, b))).collect()
         }
@@ -1558,7 +1695,7 @@ struct IntRange<'tcx> {
 impl<'tcx> IntRange<'tcx> {
     #[inline]
     fn is_integral(ty: Ty<'_>) -> bool {
-        match ty.kind {
+        match ty.kind() {
             ty::Char | ty::Int(_) | ty::Uint(_) => true,
             _ => false,
         }
@@ -1580,7 +1717,7 @@ impl<'tcx> IntRange<'tcx> {
 
     #[inline]
     fn integral_size_and_signed_bias(tcx: TyCtxt<'tcx>, ty: Ty<'_>) -> Option<(Size, u128)> {
-        match ty.kind {
+        match *ty.kind() {
             ty::Char => Some((Size::from_bytes(4), 0)),
             ty::Int(ity) => {
                 let size = Integer::from_attr(&tcx, SignedInt(ity)).size();
@@ -1650,15 +1787,38 @@ impl<'tcx> IntRange<'tcx> {
         param_env: ty::ParamEnv<'tcx>,
         pat: &Pat<'tcx>,
     ) -> Option<IntRange<'tcx>> {
-        match pat_constructor(tcx, param_env, pat)? {
-            IntRange(range) => Some(range),
-            _ => None,
+        // This MUST be kept in sync with `pat_constructor`.
+        match *pat.kind {
+            PatKind::AscribeUserType { .. } => bug!(), // Handled by `expand_pattern`
+            PatKind::Or { .. } => bug!("Or-pattern should have been expanded earlier on."),
+
+            PatKind::Binding { .. }
+            | PatKind::Wild
+            | PatKind::Leaf { .. }
+            | PatKind::Deref { .. }
+            | PatKind::Variant { .. }
+            | PatKind::Array { .. }
+            | PatKind::Slice { .. } => None,
+
+            PatKind::Constant { value } => Self::from_const(tcx, param_env, value, pat.span),
+
+            PatKind::Range(PatRange { lo, hi, end }) => {
+                let ty = lo.ty;
+                Self::from_range(
+                    tcx,
+                    lo.eval_bits(tcx, param_env, lo.ty),
+                    hi.eval_bits(tcx, param_env, hi.ty),
+                    ty,
+                    &end,
+                    pat.span,
+                )
+            }
         }
     }
 
     // The return value of `signed_bias` should be XORed with an endpoint to encode/decode it.
     fn signed_bias(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> u128 {
-        match ty.kind {
+        match *ty.kind() {
             ty::Int(ity) => {
                 let bits = Integer::from_attr(&tcx, SignedInt(ity)).size().bits() as u128;
                 1u128 << (bits - 1)
@@ -1830,7 +1990,7 @@ crate fn is_useful<'p, 'tcx>(
     is_under_guard: bool,
     is_top_level: bool,
 ) -> Usefulness<'tcx> {
-    let &Matrix(ref rows) = matrix;
+    let Matrix { patterns: rows, .. } = matrix;
     debug!("is_useful({:#?}, {:#?})", matrix, v);
 
     // The base case. We are pattern-matching on () and the return value is
@@ -2059,6 +2219,7 @@ fn pat_constructor<'tcx>(
     param_env: ty::ParamEnv<'tcx>,
     pat: &Pat<'tcx>,
 ) -> Option<Constructor<'tcx>> {
+    // This MUST be kept in sync with `IntRange::from_pat`.
     match *pat.kind {
         PatKind::AscribeUserType { .. } => bug!(), // Handled by `expand_pattern`
         PatKind::Binding { .. } | PatKind::Wild => None,
@@ -2070,7 +2231,7 @@ fn pat_constructor<'tcx>(
             if let Some(int_range) = IntRange::from_const(tcx, param_env, value, pat.span) {
                 Some(IntRange(int_range))
             } else {
-                match (value.val, &value.ty.kind) {
+                match (value.val, &value.ty.kind()) {
                     (_, ty::Array(_, n)) => {
                         let len = n.eval_usize(tcx, param_env);
                         Some(Slice(Slice { array_len: Some(len), kind: FixedLen(len) }))
@@ -2102,7 +2263,7 @@ fn pat_constructor<'tcx>(
         }
         PatKind::Array { ref prefix, ref slice, ref suffix }
         | PatKind::Slice { ref prefix, ref slice, ref suffix } => {
-            let array_len = match pat.ty.kind {
+            let array_len = match pat.ty.kind() {
                 ty::Array(_, length) => Some(length.eval_usize(tcx, param_env)),
                 ty::Slice(_) => None,
                 _ => span_bug!(pat.span, "bad ty {:?} for slice pattern", pat.ty),
@@ -2141,7 +2302,7 @@ fn slice_pat_covered_by_const<'tcx>(
         )
     };
 
-    let data: &[u8] = match (const_val_val, &const_val.ty.kind) {
+    let data: &[u8] = match (const_val_val, &const_val.ty.kind()) {
         (ConstValue::ByRef { offset, alloc, .. }, ty::Array(t, n)) => {
             assert_eq!(*t, tcx.types.u8);
             let n = n.eval_usize(tcx, param_env);
@@ -2272,7 +2433,7 @@ fn split_grouped_constructors<'p, 'tcx>(
                 // `borders` is the set of borders between equivalence classes: each equivalence
                 // class lies between 2 borders.
                 let row_borders = matrix
-                    .0
+                    .patterns
                     .iter()
                     .flat_map(|row| {
                         IntRange::from_pat(tcx, param_env, row.head()).map(|r| (r, row.len()))
@@ -2305,19 +2466,19 @@ fn split_grouped_constructors<'p, 'tcx>(
                 // interval into a constructor.
                 split_ctors.extend(
                     borders
-                        .windows(2)
-                        .filter_map(|window| match (window[0], window[1]) {
-                            (Border::JustBefore(n), Border::JustBefore(m)) => {
+                        .array_windows()
+                        .filter_map(|&pair| match pair {
+                            [Border::JustBefore(n), Border::JustBefore(m)] => {
                                 if n < m {
                                     Some(IntRange { range: n..=(m - 1), ty, span })
                                 } else {
                                     None
                                 }
                             }
-                            (Border::JustBefore(n), Border::AfterMax) => {
+                            [Border::JustBefore(n), Border::AfterMax] => {
                                 Some(IntRange { range: n..=u128::MAX, ty, span })
                             }
-                            (Border::AfterMax, _) => None,
+                            [Border::AfterMax, _] => None,
                         })
                         .map(IntRange),
                 );
@@ -2561,7 +2722,7 @@ fn specialize_one_pattern<'p, 'tcx>(
             // elements don't necessarily point to memory, they are usually
             // just integers. The only time they should be pointing to memory
             // is when they are subslices of nonzero slices.
-            let (alloc, offset, n, ty) = match value.ty.kind {
+            let (alloc, offset, n, ty) = match value.ty.kind() {
                 ty::Array(t, n) => {
                     let n = n.eval_usize(cx.tcx, cx.param_env);
                     // Shortcut for `n == 0` where no matter what `alloc` and `offset` we produce,

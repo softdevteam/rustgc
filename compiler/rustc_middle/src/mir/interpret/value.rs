@@ -12,9 +12,9 @@ use crate::ty::{ParamEnv, Ty, TyCtxt};
 
 use super::{sign_extend, truncate, AllocId, Allocation, InterpResult, Pointer, PointerArithmetic};
 
-/// Represents the result of a raw const operation, pre-validation.
-#[derive(Clone, HashStable)]
-pub struct RawConst<'tcx> {
+/// Represents the result of const evaluation via the `eval_to_allocation` query.
+#[derive(Clone, HashStable, TyEncodable, TyDecodable)]
+pub struct ConstAlloc<'tcx> {
     // the value lives here, at offset 0, and that allocation definitely is a `AllocKind::Memory`
     // (so you can use `AllocMap::unwrap_memory`).
     pub alloc_id: AllocId,
@@ -53,15 +53,6 @@ impl<'tcx> ConstValue<'tcx> {
         match *self {
             ConstValue::ByRef { .. } | ConstValue::Slice { .. } => None,
             ConstValue::Scalar(val) => Some(val),
-        }
-    }
-
-    pub fn try_to_str_slice(&self) -> Option<&'tcx str> {
-        if let ConstValue::Slice { data, start, end } = *self {
-            ::std::str::from_utf8(data.inspect_with_uninit_and_ptr_outside_interpreter(start..end))
-                .ok()
-        } else {
-            None
         }
     }
 
@@ -445,19 +436,13 @@ impl<'tcx, Tag> Scalar<Tag> {
     /// Do not call this method!  Dispatch based on the type instead.
     #[inline]
     pub fn is_bits(self) -> bool {
-        match self {
-            Scalar::Raw { .. } => true,
-            _ => false,
-        }
+        matches!(self, Scalar::Raw { .. })
     }
 
     /// Do not call this method!  Dispatch based on the type instead.
     #[inline]
     pub fn is_ptr(self) -> bool {
-        match self {
-            Scalar::Ptr(_) => true,
-            _ => false,
-        }
+        matches!(self, Scalar::Ptr(_))
     }
 
     pub fn to_bool(self) -> InterpResult<'tcx, bool> {
@@ -471,7 +456,7 @@ impl<'tcx, Tag> Scalar<Tag> {
 
     pub fn to_char(self) -> InterpResult<'tcx, char> {
         let val = self.to_u32()?;
-        match ::std::char::from_u32(val) {
+        match std::char::from_u32(val) {
             Some(c) => Ok(c),
             None => throw_ub!(InvalidChar(val)),
         }
@@ -577,6 +562,9 @@ pub enum ScalarMaybeUninit<Tag = ()> {
     Scalar(Scalar<Tag>),
     Uninit,
 }
+
+#[cfg(target_arch = "x86_64")]
+static_assert_size!(ScalarMaybeUninit, 24);
 
 impl<Tag> From<Scalar<Tag>> for ScalarMaybeUninit<Tag> {
     #[inline(always)]

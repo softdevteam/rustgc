@@ -34,7 +34,7 @@ impl<K: Ord, V> SortedMap<K, V> {
     /// and that there are no duplicates.
     #[inline]
     pub fn from_presorted_elements(elements: Vec<(K, V)>) -> SortedMap<K, V> {
-        debug_assert!(elements.windows(2).all(|w| w[0].0 < w[1].0));
+        debug_assert!(elements.array_windows().all(|[fst, snd]| fst.0 < snd.0));
 
         SortedMap { data: elements }
     }
@@ -93,7 +93,7 @@ impl<K: Ord, V> SortedMap<K, V> {
 
     /// Iterate over elements, sorted by key
     #[inline]
-    pub fn iter(&self) -> ::std::slice::Iter<'_, (K, V)> {
+    pub fn iter(&self) -> std::slice::Iter<'_, (K, V)> {
         self.data.iter()
     }
 
@@ -134,7 +134,7 @@ impl<K: Ord, V> SortedMap<K, V> {
         R: RangeBounds<K>,
     {
         let (start, end) = self.range_slice_indices(range);
-        self.data.splice(start..end, ::std::iter::empty());
+        self.data.splice(start..end, std::iter::empty());
     }
 
     /// Mutate all keys with the given function `f`. This mutation must not
@@ -159,7 +159,7 @@ impl<K: Ord, V> SortedMap<K, V> {
             return;
         }
 
-        debug_assert!(elements.windows(2).all(|w| w[0].0 < w[1].0));
+        debug_assert!(elements.array_windows().all(|[fst, snd]| fst.0 < snd.0));
 
         let start_index = self.lookup_index_for(&elements[0].0);
 
@@ -241,7 +241,7 @@ impl<K: Ord, V> SortedMap<K, V> {
 
 impl<K: Ord, V> IntoIterator for SortedMap<K, V> {
     type Item = (K, V);
-    type IntoIter = ::std::vec::IntoIter<(K, V)>;
+    type IntoIter = std::vec::IntoIter<(K, V)>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter()

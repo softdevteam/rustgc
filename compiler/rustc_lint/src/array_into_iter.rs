@@ -7,6 +7,31 @@ use rustc_session::lint::FutureIncompatibleInfo;
 use rustc_span::symbol::sym;
 
 declare_lint! {
+    /// The `array_into_iter` lint detects calling `into_iter` on arrays.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// # #![allow(unused)]
+    /// [1, 2, 3].into_iter().for_each(|n| { *n; });
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// In the future, it is planned to add an `IntoIter` implementation for
+    /// arrays such that it will iterate over *values* of the array instead of
+    /// references. Due to how method resolution works, this will change
+    /// existing code that uses `into_iter` on arrays. The solution to avoid
+    /// this warning is to use `iter()` instead of `into_iter()`.
+    ///
+    /// This is a [future-incompatible] lint to transition this to a hard error
+    /// in the future. See [issue #66145] for more details and a more thorough
+    /// description of the lint.
+    ///
+    /// [issue #66145]: https://github.com/rust-lang/rust/issues/66145
+    /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub ARRAY_INTO_ITER,
     Warn,
     "detects calling `into_iter` on arrays",
@@ -53,7 +78,7 @@ impl<'tcx> LateLintPass<'tcx> for ArrayIntoIter {
             }
 
             // Make sure we found an array after peeling the boxes.
-            if !matches!(recv_ty.kind, ty::Array(..)) {
+            if !matches!(recv_ty.kind(), ty::Array(..)) {
                 return;
             }
 
@@ -66,9 +91,9 @@ impl<'tcx> LateLintPass<'tcx> for ArrayIntoIter {
             }
 
             // Emit lint diagnostic.
-            let target = match cx.typeck_results().expr_ty_adjusted(receiver_arg).kind {
-                ty::Ref(_, ty::TyS { kind: ty::Array(..), .. }, _) => "[T; N]",
-                ty::Ref(_, ty::TyS { kind: ty::Slice(..), .. }, _) => "[T]",
+            let target = match *cx.typeck_results().expr_ty_adjusted(receiver_arg).kind() {
+                ty::Ref(_, inner_ty, _) if inner_ty.is_array() => "[T; N]",
+                ty::Ref(_, inner_ty, _) if matches!(inner_ty.kind(), ty::Slice(..)) => "[T]",
 
                 // We know the original first argument type is an array type,
                 // we know that the first adjustment was an autoref coercion

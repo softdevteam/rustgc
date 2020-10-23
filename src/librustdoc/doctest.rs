@@ -95,6 +95,7 @@ pub fn run(options: Options) -> Result<(), ErrorReported> {
         lint_caps,
         register_lints: None,
         override_queries: None,
+        make_codegen_backend: None,
         registry: rustc_driver::diagnostics_registry(),
     };
 
@@ -926,7 +927,7 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
         sp: Span,
         nested: F,
     ) {
-        let mut attrs = Attributes::from_ast(self.sess.diagnostic(), attrs);
+        let mut attrs = Attributes::from_ast(self.sess.diagnostic(), attrs, None);
         if let Some(ref cfg) = attrs.cfg {
             if !cfg.matches(&self.sess.parse_sess, Some(&self.sess.features_untracked())) {
                 return;

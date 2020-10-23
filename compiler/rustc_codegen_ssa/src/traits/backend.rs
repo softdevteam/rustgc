@@ -1,10 +1,11 @@
 use super::write::WriteBackendMethods;
 use super::CodegenObject;
-use crate::ModuleCodegen;
+use crate::{CodegenResults, ModuleCodegen};
 
 use rustc_ast::expand::allocator::AllocatorKind;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::ErrorReported;
-use rustc_middle::dep_graph::DepGraph;
+use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::middle::cstore::{EncodedMetadata, MetadataLoaderDyn};
 use rustc_middle::ty::layout::{HasTyCtxt, TyAndLayout};
 use rustc_middle::ty::query::Providers;
@@ -15,6 +16,7 @@ use rustc_session::{
 };
 use rustc_span::symbol::Symbol;
 use rustc_target::abi::LayoutOf;
+use rustc_target::spec::Target;
 
 pub use rustc_data_structures::sync::MetadataRef;
 
@@ -54,6 +56,12 @@ pub trait CodegenBackend {
     fn print_passes(&self) {}
     fn print_version(&self) {}
 
+    /// If this plugin provides additional builtin targets, provide the one enabled by the options here.
+    /// Be careful: this is called *before* init() is called.
+    fn target_override(&self, _opts: &config::Options) -> Option<Target> {
+        None
+    }
+
     fn metadata_loader(&self) -> Box<MetadataLoaderDyn>;
     fn provide(&self, _providers: &mut Providers);
     fn provide_extern(&self, _providers: &mut Providers);
@@ -73,8 +81,7 @@ pub trait CodegenBackend {
         &self,
         ongoing_codegen: Box<dyn Any>,
         sess: &Session,
-        dep_graph: &DepGraph,
-    ) -> Result<Box<dyn Any>, ErrorReported>;
+    ) -> Result<(CodegenResults, FxHashMap<WorkProductId, WorkProduct>), ErrorReported>;
 
     /// This is called on the returned `Box<dyn Any>` from `join_codegen`
     ///
@@ -84,7 +91,7 @@ pub trait CodegenBackend {
     fn link(
         &self,
         sess: &Session,
-        codegen_results: Box<dyn Any>,
+        codegen_results: CodegenResults,
         outputs: &OutputFilenames,
     ) -> Result<(), ErrorReported>;
 }
@@ -102,6 +109,7 @@ pub trait ExtraBackendMethods: CodegenBackend + WriteBackendMethods + Sized + Se
         tcx: TyCtxt<'tcx>,
         mods: &mut Self::Module,
         kind: AllocatorKind,
+        has_alloc_error_handler: bool,
     );
     /// This generates the codegen unit and returns it along with
     /// a `u64` giving an estimate of the unit's processing cost.
@@ -116,4 +124,5 @@ pub trait ExtraBackendMethods: CodegenBackend + WriteBackendMethods + Sized + Se
         opt_level: config::OptLevel,
     ) -> Arc<dyn Fn() -> Result<Self::TargetMachine, String> + Send + Sync>;
     fn target_cpu<'b>(&self, sess: &'b Session) -> &'b str;
+    fn tune_cpu<'b>(&self, sess: &'b Session) -> Option<&'b str>;
 }

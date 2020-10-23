@@ -70,7 +70,7 @@ use rustc_middle::ty::{
     subst::{Subst, SubstsRef},
     Region, Ty, TyCtxt, TypeFoldable,
 };
-use rustc_span::{DesugaringKind, Pos, Span};
+use rustc_span::{BytePos, DesugaringKind, Pos, Span};
 use rustc_target::spec::abi;
 use std::{cmp, fmt};
 
@@ -531,7 +531,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 disambiguated_data: &DisambiguatedDefPathData,
             ) -> Result<Self::Path, Self::Error> {
                 let mut path = print_prefix(self)?;
-                path.push(disambiguated_data.data.as_symbol().to_string());
+                path.push(disambiguated_data.to_string());
                 Ok(path)
             }
             fn path_generic_args(
@@ -570,7 +570,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 // if they are both "path types", there's a chance of ambiguity
                 // due to different versions of the same crate
                 if let (&ty::Adt(exp_adt, _), &ty::Adt(found_adt, _)) =
-                    (&exp_found.expected.kind, &exp_found.found.kind)
+                    (exp_found.expected.kind(), exp_found.found.kind())
                 {
                     report_path_match(err, exp_adt.did, found_adt.did);
                 }
@@ -617,11 +617,20 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 ref prior_arms,
                 last_ty,
                 scrut_hir_id,
+                opt_suggest_box_span,
+                arm_span,
                 ..
             }) => match source {
                 hir::MatchSource::IfLetDesugar { .. } => {
                     let msg = "`if let` arms have incompatible types";
                     err.span_label(cause.span, msg);
+                    if let Some(ret_sp) = opt_suggest_box_span {
+                        self.suggest_boxing_for_return_impl_trait(
+                            err,
+                            ret_sp,
+                            prior_arms.iter().chain(std::iter::once(&arm_span)).map(|s| *s),
+                        );
+                    }
                 }
                 hir::MatchSource::TryDesugar => {
                     if let Some(ty::error::ExpectedFound { expected, .. }) = exp_found {
@@ -675,9 +684,23 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                             Applicability::MachineApplicable,
                         );
                     }
+                    if let Some(ret_sp) = opt_suggest_box_span {
+                        // Get return type span and point to it.
+                        self.suggest_boxing_for_return_impl_trait(
+                            err,
+                            ret_sp,
+                            prior_arms.iter().chain(std::iter::once(&arm_span)).map(|s| *s),
+                        );
+                    }
                 }
             },
-            ObligationCauseCode::IfExpression(box IfExpressionCause { then, outer, semicolon }) => {
+            ObligationCauseCode::IfExpression(box IfExpressionCause {
+                then,
+                else_sp,
+                outer,
+                semicolon,
+                opt_suggest_box_span,
+            }) => {
                 err.span_label(then, "expected because of this");
                 if let Some(sp) = outer {
                     err.span_label(sp, "`if` and `else` have incompatible types");
@@ -690,9 +713,46 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                         Applicability::MachineApplicable,
                     );
                 }
+                if let Some(ret_sp) = opt_suggest_box_span {
+                    self.suggest_boxing_for_return_impl_trait(
+                        err,
+                        ret_sp,
+                        vec![then, else_sp].into_iter(),
+                    );
+                }
             }
             _ => (),
         }
+    }
+
+    fn suggest_boxing_for_return_impl_trait(
+        &self,
+        err: &mut DiagnosticBuilder<'tcx>,
+        return_sp: Span,
+        arm_spans: impl Iterator<Item = Span>,
+    ) {
+        err.multipart_suggestion(
+            "you could change the return type to be a boxed trait object",
+            vec![
+                (return_sp.with_hi(return_sp.lo() + BytePos(4)), "Box<dyn".to_string()),
+                (return_sp.shrink_to_hi(), ">".to_string()),
+            ],
+            Applicability::MaybeIncorrect,
+        );
+        let sugg = arm_spans
+            .flat_map(|sp| {
+                vec![
+                    (sp.shrink_to_lo(), "Box::new(".to_string()),
+                    (sp.shrink_to_hi(), ")".to_string()),
+                ]
+                .into_iter()
+            })
+            .collect::<Vec<_>>();
+        err.multipart_suggestion(
+            "if you change the return type to expect trait objects, box the returned expressions",
+            sugg,
+            Applicability::MaybeIncorrect,
+        );
     }
 
     /// Given that `other_ty` is the same as a type argument for `name` in `sub`, populate `value`
@@ -796,7 +856,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 self.highlight_outer(&mut t1_out, &mut t2_out, path, sub, i, &other_ty);
                 return Some(());
             }
-            if let &ty::Adt(def, _) = &ta.kind {
+            if let &ty::Adt(def, _) = ta.kind() {
                 let path_ = self.tcx.def_path_str(def.did);
                 if path_ == other_path {
                     self.highlight_outer(&mut t1_out, &mut t2_out, path, sub, i, &other_ty);
@@ -977,11 +1037,11 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// Compares two given types, eliding parts that are the same between them and highlighting
     /// relevant differences, and return two representation of those types for highlighted printing.
     fn cmp(&self, t1: Ty<'tcx>, t2: Ty<'tcx>) -> (DiagnosticStyledString, DiagnosticStyledString) {
-        debug!("cmp(t1={}, t1.kind={:?}, t2={}, t2.kind={:?})", t1, t1.kind, t2, t2.kind);
+        debug!("cmp(t1={}, t1.kind={:?}, t2={}, t2.kind={:?})", t1, t1.kind(), t2, t2.kind());
 
         // helper functions
         fn equals<'tcx>(a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
-            match (&a.kind, &b.kind) {
+            match (a.kind(), b.kind()) {
                 (a, b) if *a == *b => true,
                 (&ty::Int(_), &ty::Infer(ty::InferTy::IntVar(_)))
                 | (
@@ -1014,7 +1074,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         }
 
         // process starts here
-        match (&t1.kind, &t2.kind) {
+        match (t1.kind(), t2.kind()) {
             (&ty::Adt(def1, sub1), &ty::Adt(def2, sub2)) => {
                 let sub_no_defaults_1 = self.strip_generic_default_params(def1.did, sub1);
                 let sub_no_defaults_2 = self.strip_generic_default_params(def2.did, sub2);
@@ -1476,7 +1536,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             };
             match (&terr, expected == found) {
                 (TypeError::Sorts(values), extra) => {
-                    let sort_string = |ty: Ty<'tcx>| match (extra, &ty.kind) {
+                    let sort_string = |ty: Ty<'tcx>| match (extra, ty.kind()) {
                         (true, ty::Opaque(def_id, _)) => format!(
                             " (opaque type at {})",
                             self.tcx
@@ -1563,7 +1623,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             exp_span, exp_found.expected, exp_found.found
         );
 
-        if let ty::Opaque(def_id, _) = exp_found.expected.kind {
+        if let ty::Opaque(def_id, _) = *exp_found.expected.kind() {
             let future_trait = self.tcx.require_lang_item(LangItem::Future, None);
             // Future::Output
             let item_def_id = self
@@ -1616,9 +1676,9 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         diag: &mut DiagnosticBuilder<'tcx>,
     ) {
         if let (ty::Adt(exp_def, exp_substs), ty::Ref(_, found_ty, _)) =
-            (&exp_found.expected.kind, &exp_found.found.kind)
+            (exp_found.expected.kind(), exp_found.found.kind())
         {
-            if let ty::Adt(found_def, found_substs) = found_ty.kind {
+            if let ty::Adt(found_def, found_substs) = *found_ty.kind() {
                 let path_str = format!("{:?}", exp_def);
                 if exp_def == &found_def {
                     let opt_msg = "you can convert from `&Option<T>` to `Option<&T>` using \
@@ -1637,9 +1697,9 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     {
                         let mut show_suggestion = true;
                         for (exp_ty, found_ty) in exp_substs.types().zip(found_substs.types()) {
-                            match exp_ty.kind {
+                            match *exp_ty.kind() {
                                 ty::Ref(_, exp_ty, _) => {
-                                    match (&exp_ty.kind, &found_ty.kind) {
+                                    match (exp_ty.kind(), found_ty.kind()) {
                                         (_, ty::Param(_))
                                         | (_, ty::Infer(_))
                                         | (ty::Param(_), _)
@@ -1989,7 +2049,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 );
                 if let Some(infer::RelateParamBound(_, t)) = origin {
                     let t = self.resolve_vars_if_possible(&t);
-                    match t.kind {
+                    match t.kind() {
                         // We've got:
                         // fn get_later<G, T>(g: G, dest: &mut T) -> impl FnOnce() + '_
                         // suggest:
@@ -2093,7 +2153,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 _ => String::new(),
             };
             if !s.is_empty() {
-                s.push_str(" ");
+                s.push(' ');
             }
             s
         };
@@ -2231,7 +2291,7 @@ impl TyCategory {
     }
 
     pub fn from_ty(ty: Ty<'_>) -> Option<(Self, DefId)> {
-        match ty.kind {
+        match *ty.kind() {
             ty::Closure(def_id, _) => Some((Self::Closure, def_id)),
             ty::Opaque(def_id, _) => Some((Self::Opaque, def_id)),
             ty::Generator(def_id, ..) => Some((Self::Generator, def_id)),

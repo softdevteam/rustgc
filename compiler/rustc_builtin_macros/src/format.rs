@@ -161,14 +161,26 @@ fn parse_args<'a>(
     while p.token != token::Eof {
         if !p.eat(&token::Comma) {
             if first {
-                // After `format!(""` we always expect *only* a comma...
-                let mut err = ecx.struct_span_err(p.token.span, "expected token: `,`");
-                err.span_label(p.token.span, "expected `,`");
-                p.maybe_annotate_with_ascription(&mut err, false);
-                return Err(err);
-            } else {
-                // ...after that delegate to `expect` to also include the other expected tokens.
-                let _ = p.expect(&token::Comma)?;
+                p.clear_expected_tokens();
+            }
+
+            // `Parser::expect` tries to recover using the
+            // `Parser::unexpected_try_recover` function. This function is able
+            // to recover if the expected token is a closing delimiter.
+            //
+            // As `,` is not a closing delimiter, it will always return an `Err`
+            // variant.
+            let mut err = p.expect(&token::Comma).unwrap_err();
+
+            match token::TokenKind::Comma.similar_tokens() {
+                Some(tks) if tks.contains(&p.token.kind) => {
+                    // If a similar token is found, then it may be a typo. We
+                    // consider it as a comma, and continue parsing.
+                    err.emit();
+                    p.bump();
+                }
+                // Otherwise stop the parsing and return the error.
+                _ => return Err(err),
             }
         }
         first = false;
@@ -531,9 +543,12 @@ impl<'a, 'b> Context<'a, 'b> {
                             let idx = self.args.len();
                             self.arg_types.push(Vec::new());
                             self.arg_unique_types.push(Vec::new());
-                            self.args.push(
-                                self.ecx.expr_ident(self.fmtsp, Ident::new(name, self.fmtsp)),
-                            );
+                            let span = if self.is_literal {
+                                *self.arg_spans.get(self.curpiece).unwrap_or(&self.fmtsp)
+                            } else {
+                                self.fmtsp
+                            };
+                            self.args.push(self.ecx.expr_ident(span, Ident::new(name, span)));
                             self.names.insert(name, idx);
                             self.verify_arg_type(Exact(idx), ty)
                         } else {

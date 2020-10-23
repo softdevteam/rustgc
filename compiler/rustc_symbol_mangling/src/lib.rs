@@ -87,7 +87,7 @@
 //! virtually impossible. Thus, symbol hash generation exclusively relies on
 //! DefPaths which are much more robust in the face of changes to the code base.
 
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(never_type)]
 #![feature(nll)]
 #![feature(or_patterns)]
@@ -201,7 +201,7 @@ fn compute_symbol_name(
     //
     // [1]: https://bugs.llvm.org/show_bug.cgi?id=44316
     if is_foreign {
-        if tcx.sess.target.target.arch != "wasm32"
+        if tcx.sess.target.arch != "wasm32"
             || !tcx.wasm_import_module_map(def_id.krate).contains_key(&def_id)
         {
             if let Some(name) = attrs.link_name {

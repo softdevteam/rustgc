@@ -4,6 +4,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
+use rustc_middle::mir::interpret::sign_extend;
 use rustc_middle::ty::print::{Print, Printer};
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind, Subst};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypeFoldable};
@@ -132,7 +133,7 @@ impl SymbolMangler<'tcx> {
             self.push("u");
 
             // FIXME(eddyb) we should probably roll our own punycode implementation.
-            let mut punycode_bytes = match ::punycode::encode(ident) {
+            let mut punycode_bytes = match punycode::encode(ident) {
                 Ok(s) => s.into_bytes(),
                 Err(()) => bug!("symbol_names: punycode encoding failed for ident {:?}", ident),
             };
@@ -152,11 +153,8 @@ impl SymbolMangler<'tcx> {
         let _ = write!(self.out, "{}", ident.len());
 
         // Write a separating `_` if necessary (leading digit or `_`).
-        match ident.chars().next() {
-            Some('_' | '0'..='9') => {
-                self.push("_");
-            }
-            _ => {}
+        if let Some('_' | '0'..='9') = ident.chars().next() {
+            self.push("_");
         }
 
         self.push(ident);
@@ -262,7 +260,7 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
     }
 
     fn print_impl_path(
-        self,
+        mut self,
         impl_def_id: DefId,
         substs: &'tcx [GenericArg<'tcx>],
         mut self_ty: Ty<'tcx>,
@@ -287,12 +285,37 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
             }
         }
 
-        self.path_append_impl(
-            |cx| cx.print_def_path(parent_def_id, &[]),
-            &key.disambiguated_data,
-            self_ty,
-            impl_trait_ref,
-        )
+        self.push(match impl_trait_ref {
+            Some(_) => "X",
+            None => "M",
+        });
+
+        // Encode impl generic params if the substitutions contain parameters (implying
+        // polymorphization is enabled) and this isn't an inherent impl.
+        if impl_trait_ref.is_some() && substs.iter().any(|a| a.has_param_types_or_consts()) {
+            self = self.path_generic_args(
+                |this| {
+                    this.path_append_ns(
+                        |cx| cx.print_def_path(parent_def_id, &[]),
+                        'I',
+                        key.disambiguated_data.disambiguator as u64,
+                        "",
+                    )
+                },
+                substs,
+            )?;
+        } else {
+            self.push_disambiguator(key.disambiguated_data.disambiguator as u64);
+            self = self.print_def_path(parent_def_id, &[])?;
+        }
+
+        self = self_ty.print(self)?;
+
+        if let Some(trait_ref) = impl_trait_ref {
+            self = self.print_def_path(trait_ref.def_id, trait_ref.substs)?;
+        }
+
+        Ok(self)
     }
 
     fn print_region(mut self, region: ty::Region<'_>) -> Result<Self::Region, Self::Error> {
@@ -323,7 +346,7 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
 
     fn print_type(mut self, ty: Ty<'tcx>) -> Result<Self::Type, Self::Error> {
         // Basic types, never cached (single-character).
-        let basic_type = match ty.kind {
+        let basic_type = match ty.kind() {
             ty::Bool => "b",
             ty::Char => "c",
             ty::Str => "e",
@@ -359,7 +382,7 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
         }
         let start = self.out.len();
 
-        match ty.kind {
+        match *ty.kind() {
             // Basic types, handled above.
             ty::Bool | ty::Char | ty::Str | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Never => {
                 unreachable!()
@@ -505,16 +528,31 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
         }
         let start = self.out.len();
 
-        match ct.ty.kind {
-            ty::Uint(_) => {}
+        let mut neg = false;
+        let val = match ct.ty.kind() {
+            ty::Uint(_) | ty::Bool | ty::Char => {
+                ct.try_eval_bits(self.tcx, ty::ParamEnv::reveal_all(), ct.ty)
+            }
+            ty::Int(_) => {
+                let param_env = ty::ParamEnv::reveal_all();
+                ct.try_eval_bits(self.tcx, param_env, ct.ty).and_then(|b| {
+                    let sz = self.tcx.layout_of(param_env.and(ct.ty)).ok()?.size;
+                    let val = sign_extend(b, sz) as i128;
+                    if val < 0 {
+                        neg = true;
+                    }
+                    Some(val.wrapping_abs() as u128)
+                })
+            }
             _ => {
                 bug!("symbol_names: unsupported constant of type `{}` ({:?})", ct.ty, ct);
             }
-        }
-        self = ct.ty.print(self)?;
+        };
 
-        if let Some(bits) = ct.try_eval_bits(self.tcx, ty::ParamEnv::reveal_all(), ct.ty) {
-            let _ = write!(self.out, "{:x}_", bits);
+        if let Some(bits) = val {
+            // We only print the type if the const can be evaluated.
+            self = ct.ty.print(self)?;
+            let _ = write!(self.out, "{}{:x}_", if neg { "n" } else { "" }, bits);
         } else {
             // NOTE(eddyb) despite having the path, we need to
             // encode a placeholder, as the path could refer
@@ -540,6 +578,7 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
         self.push_ident(&name);
         Ok(self)
     }
+
     fn path_qualified(
         mut self,
         self_ty: Ty<'tcx>,
@@ -554,24 +593,16 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
     }
 
     fn path_append_impl(
-        mut self,
-        print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
-        disambiguated_data: &DisambiguatedDefPathData,
-        self_ty: Ty<'tcx>,
-        trait_ref: Option<ty::TraitRef<'tcx>>,
+        self,
+        _: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+        _: &DisambiguatedDefPathData,
+        _: Ty<'tcx>,
+        _: Option<ty::TraitRef<'tcx>>,
     ) -> Result<Self::Path, Self::Error> {
-        self.push(match trait_ref {
-            Some(_) => "X",
-            None => "M",
-        });
-        self.push_disambiguator(disambiguated_data.disambiguator as u64);
-        self = print_prefix(self)?;
-        self = self_ty.print(self)?;
-        if let Some(trait_ref) = trait_ref {
-            self = self.print_def_path(trait_ref.def_id, trait_ref.substs)?;
-        }
-        Ok(self)
+        // Inlined into `print_impl_path`
+        unreachable!()
     }
+
     fn path_append(
         self,
         print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
@@ -605,6 +636,7 @@ impl Printer<'tcx> for SymbolMangler<'tcx> {
             name.as_ref().map_or("", |s| &s[..]),
         )
     }
+
     fn path_generic_args(
         mut self,
         print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,

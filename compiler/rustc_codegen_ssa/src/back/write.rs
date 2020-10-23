@@ -13,7 +13,6 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::profiling::TimingGuard;
 use rustc_data_structures::profiling::VerboseTimingGuard;
-use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::emitter::Emitter;
 use rustc_errors::{DiagnosticId, FatalError, Handler, Level};
@@ -140,7 +139,7 @@ impl ModuleConfig {
 
         let emit_obj = if !should_emit_obj {
             EmitObj::None
-        } else if sess.target.target.options.obj_is_bitcode
+        } else if sess.target.options.obj_is_bitcode
             || (sess.opts.cg.linker_plugin_lto.enabled() && !no_builtins)
         {
             // This case is selected if the target uses objects as bitcode, or
@@ -222,11 +221,11 @@ impl ModuleConfig {
                 false
             ),
             emit_obj,
-            bc_cmdline: sess.target.target.options.bitcode_llvm_cmdline.clone(),
+            bc_cmdline: sess.target.options.bitcode_llvm_cmdline.clone(),
 
             verify_llvm_ir: sess.verify_llvm_ir(),
             no_prepopulate_passes: sess.opts.cg.no_prepopulate_passes,
-            no_builtins: no_builtins || sess.target.target.options.no_builtins,
+            no_builtins: no_builtins || sess.target.options.no_builtins,
 
             // Exclude metadata and allocator modules from time_passes output,
             // since they throw off the "LLVM passes" measurement.
@@ -253,7 +252,7 @@ impl ModuleConfig {
                 .opts
                 .debugging_opts
                 .merge_functions
-                .unwrap_or(sess.target.target.options.merge_functions)
+                .unwrap_or(sess.target.options.merge_functions)
             {
                 MergeFunctions::Disabled => false,
                 MergeFunctions::Trampolines | MergeFunctions::Aliases => {
@@ -308,7 +307,7 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub allocator_module_config: Arc<ModuleConfig>,
     pub tm_factory: TargetMachineFactory<B>,
     pub msvc_imps_needed: bool,
-    pub target_pointer_width: String,
+    pub target_pointer_width: u32,
     pub target_arch: String,
     pub debuginfo: config::DebugInfo,
 
@@ -389,7 +388,7 @@ fn need_bitcode_in_object(sess: &Session) -> bool {
     let requested_for_rlib = sess.opts.cg.embed_bitcode
         && sess.crate_types().contains(&CrateType::Rlib)
         && sess.opts.output_types.contains_key(&OutputType::Exe);
-    let forced_by_target = sess.target.target.options.forces_embed_bitcode;
+    let forced_by_target = sess.target.options.forces_embed_bitcode;
     requested_for_rlib || forced_by_target
 }
 
@@ -414,7 +413,6 @@ pub fn start_async_codegen<B: ExtraBackendMethods>(
     let sess = tcx.sess;
 
     let crate_name = tcx.crate_name(LOCAL_CRATE);
-    let crate_hash = tcx.crate_hash(LOCAL_CRATE);
     let no_builtins = tcx.sess.contains_name(&tcx.hir().krate().item.attrs, sym::no_builtins);
     let is_compiler_builtins =
         tcx.sess.contains_name(&tcx.hir().krate().item.attrs, sym::compiler_builtins);
@@ -463,7 +461,6 @@ pub fn start_async_codegen<B: ExtraBackendMethods>(
     OngoingCodegen {
         backend,
         crate_name,
-        crate_hash,
         metadata,
         windows_subsystem,
         linker_info,
@@ -658,15 +655,6 @@ fn produce_final_output_artifacts(
     // These are used in linking steps and will be cleaned up afterward.
 }
 
-pub fn dump_incremental_data(_codegen_results: &CodegenResults) {
-    // FIXME(mw): This does not work at the moment because the situation has
-    //            become more complicated due to incremental LTO. Now a CGU
-    //            can have more than two caching states.
-    // println!("[incremental] Re-using {} out of {} modules",
-    //           codegen_results.modules.iter().filter(|m| m.pre_existing).count(),
-    //           codegen_results.modules.len());
-}
-
 pub enum WorkItem<B: WriteBackendMethods> {
     /// Optimize a newly codegened, totally unoptimized module.
     Optimize(ModuleCodegen<B::Module>),
@@ -702,6 +690,7 @@ impl<B: WriteBackendMethods> WorkItem<B> {
 
 enum WorkItemResult<B: WriteBackendMethods> {
     Compiled(CompiledModule),
+    NeedsLink(ModuleCodegen<B::Module>),
     NeedsFatLTO(FatLTOInput<B>),
     NeedsThinLTO(String, B::ThinBuffer),
 }
@@ -801,11 +790,8 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
         None
     };
 
-    Ok(match lto_type {
-        ComputedLtoType::No => {
-            let module = unsafe { B::codegen(cgcx, &diag_handler, module, module_config)? };
-            WorkItemResult::Compiled(module)
-        }
+    match lto_type {
+        ComputedLtoType::No => finish_intra_module_work(cgcx, module, module_config),
         ComputedLtoType::Thin => {
             let (name, thin_buffer) = B::prepare_thin(module);
             if let Some(path) = bitcode {
@@ -813,7 +799,7 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
                     panic!("Error writing pre-lto-bitcode file `{}`: {}", path.display(), e);
                 });
             }
-            WorkItemResult::NeedsThinLTO(name, thin_buffer)
+            Ok(WorkItemResult::NeedsThinLTO(name, thin_buffer))
         }
         ComputedLtoType::Fat => match bitcode {
             Some(path) => {
@@ -821,11 +807,11 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
                 fs::write(&path, buffer.data()).unwrap_or_else(|e| {
                     panic!("Error writing pre-lto-bitcode file `{}`: {}", path.display(), e);
                 });
-                WorkItemResult::NeedsFatLTO(FatLTOInput::Serialized { name, buffer })
+                Ok(WorkItemResult::NeedsFatLTO(FatLTOInput::Serialized { name, buffer }))
             }
-            None => WorkItemResult::NeedsFatLTO(FatLTOInput::InMemory(module)),
+            None => Ok(WorkItemResult::NeedsFatLTO(FatLTOInput::InMemory(module))),
         },
-    })
+    }
 }
 
 fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
@@ -871,12 +857,25 @@ fn execute_lto_work_item<B: ExtraBackendMethods>(
     mut module: lto::LtoModuleCodegen<B>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
+    let module = unsafe { module.optimize(cgcx)? };
+    finish_intra_module_work(cgcx, module, module_config)
+}
+
+fn finish_intra_module_work<B: ExtraBackendMethods>(
+    cgcx: &CodegenContext<B>,
+    module: ModuleCodegen<B::Module>,
+    module_config: &ModuleConfig,
+) -> Result<WorkItemResult<B>, FatalError> {
     let diag_handler = cgcx.create_diag_handler();
 
-    unsafe {
-        let module = module.optimize(cgcx)?;
-        let module = B::codegen(cgcx, &diag_handler, module, module_config)?;
+    if !cgcx.opts.debugging_opts.combine_cgu
+        || module.kind == ModuleKind::Metadata
+        || module.kind == ModuleKind::Allocator
+    {
+        let module = unsafe { B::codegen(cgcx, &diag_handler, module, module_config)? };
         Ok(WorkItemResult::Compiled(module))
+    } else {
+        Ok(WorkItemResult::NeedsLink(module))
     }
 }
 
@@ -889,6 +888,10 @@ pub enum Message<B: WriteBackendMethods> {
     NeedsThinLTO {
         name: String,
         thin_buffer: B::ThinBuffer,
+        worker_id: usize,
+    },
+    NeedsLink {
+        module: ModuleCodegen<B::Module>,
         worker_id: usize,
     },
     Done {
@@ -1019,8 +1022,8 @@ fn start_executing_work<B: ExtraBackendMethods>(
         tm_factory: TargetMachineFactory(backend.target_machine_factory(tcx.sess, ol)),
         total_cgus,
         msvc_imps_needed: msvc_imps_needed(tcx),
-        target_pointer_width: tcx.sess.target.target.target_pointer_width.clone(),
-        target_arch: tcx.sess.target.target.arch.clone(),
+        target_pointer_width: tcx.sess.target.pointer_width,
+        target_arch: tcx.sess.target.arch.clone(),
         debuginfo: tcx.sess.opts.debuginfo,
     };
 
@@ -1160,7 +1163,7 @@ fn start_executing_work<B: ExtraBackendMethods>(
     // necessary. There's already optimizations in place to avoid sending work
     // back to the coordinator if LTO isn't requested.
     return thread::spawn(move || {
-        let max_workers = ::num_cpus::get();
+        let max_workers = num_cpus::get();
         let mut worker_id_counter = 0;
         let mut free_worker_ids = Vec::new();
         let mut get_worker_id = |free_worker_ids: &mut Vec<usize>| {
@@ -1178,6 +1181,7 @@ fn start_executing_work<B: ExtraBackendMethods>(
         let mut compiled_modules = vec![];
         let mut compiled_metadata_module = None;
         let mut compiled_allocator_module = None;
+        let mut needs_link = Vec::new();
         let mut needs_fat_lto = Vec::new();
         let mut needs_thin_lto = Vec::new();
         let mut lto_import_only_modules = Vec::new();
@@ -1434,6 +1438,10 @@ fn start_executing_work<B: ExtraBackendMethods>(
                         }
                     }
                 }
+                Message::NeedsLink { module, worker_id } => {
+                    free_worker(worker_id);
+                    needs_link.push(module);
+                }
                 Message::NeedsFatLTO { result, worker_id } => {
                     assert!(!started_lto);
                     free_worker(worker_id);
@@ -1460,6 +1468,18 @@ fn start_executing_work<B: ExtraBackendMethods>(
                 }
                 Message::CodegenItem => bug!("the coordinator should not receive codegen requests"),
             }
+        }
+
+        let needs_link = mem::take(&mut needs_link);
+        if !needs_link.is_empty() {
+            assert!(compiled_modules.is_empty());
+            let diag_handler = cgcx.create_diag_handler();
+            let module = B::run_link(&cgcx, &diag_handler, needs_link).map_err(|_| ())?;
+            let module = unsafe {
+                B::codegen(&cgcx, &diag_handler, module, cgcx.config(ModuleKind::Regular))
+                    .map_err(|_| ())?
+            };
+            compiled_modules.push(module);
         }
 
         // Drop to print timings
@@ -1499,8 +1519,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
     }
 }
 
-pub const CODEGEN_WORKER_ID: usize = usize::MAX;
-
 /// `FatalError` is explicitly not `Send`.
 #[must_use]
 pub struct WorkerFatalError;
@@ -1520,6 +1538,9 @@ fn spawn_work<B: ExtraBackendMethods>(cgcx: CodegenContext<B>, work: WorkItem<B>
                 let msg = match self.result.take() {
                     Some(Ok(WorkItemResult::Compiled(m))) => {
                         Message::Done::<B> { result: Ok(m), worker_id }
+                    }
+                    Some(Ok(WorkItemResult::NeedsLink(m))) => {
+                        Message::NeedsLink::<B> { module: m, worker_id }
                     }
                     Some(Ok(WorkItemResult::NeedsFatLTO(m))) => {
                         Message::NeedsFatLTO::<B> { result: m, worker_id }
@@ -1685,7 +1706,6 @@ impl SharedEmitterMain {
 pub struct OngoingCodegen<B: ExtraBackendMethods> {
     pub backend: B,
     pub crate_name: Symbol,
-    pub crate_hash: Svh,
     pub metadata: EncodedMetadata,
     pub windows_subsystem: Option<String>,
     pub linker_info: LinkerInfo,
@@ -1731,7 +1751,6 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
         (
             CodegenResults {
                 crate_name: self.crate_name,
-                crate_hash: self.crate_hash,
                 metadata: self.metadata,
                 windows_subsystem: self.windows_subsystem,
                 linker_info: self.linker_info,
@@ -1846,11 +1865,11 @@ fn msvc_imps_needed(tcx: TyCtxt<'_>) -> bool {
     // something is wrong with commandline arg validation.
     assert!(
         !(tcx.sess.opts.cg.linker_plugin_lto.enabled()
-            && tcx.sess.target.target.options.is_like_windows
+            && tcx.sess.target.options.is_like_windows
             && tcx.sess.opts.cg.prefer_dynamic)
     );
 
-    tcx.sess.target.target.options.is_like_windows &&
+    tcx.sess.target.options.is_like_windows &&
         tcx.sess.crate_types().iter().any(|ct| *ct == CrateType::Rlib) &&
     // ThinLTO can't handle this workaround in all cases, so we don't
     // emit the `__imp_` symbols. Instead we make them unnecessary by disallowing

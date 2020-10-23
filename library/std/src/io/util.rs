@@ -52,11 +52,14 @@ where
     W: Write,
 {
     let mut buf = MaybeUninit::<[u8; super::DEFAULT_BUF_SIZE]>::uninit();
-    // FIXME(#76092): This is calling `get_mut` and `get_ref` on an uninitialized
-    // `MaybeUninit`. Revisit this once we decided whether that is valid or not.
-    // This is still technically undefined behavior due to creating a reference
-    // to uninitialized data, but within libstd we can rely on more guarantees
-    // than if this code were in an external lib.
+    // FIXME: #42788
+    //
+    //   - This creates a (mut) reference to a slice of
+    //     _uninitialized_ integers, which is **undefined behavior**
+    //
+    //   - Only the standard library gets to soundly "ignore" this,
+    //     based on its privileged knowledge of unstable rustc
+    //     internals;
     unsafe {
         reader.initializer().initialize(buf.assume_init_mut());
     }
@@ -229,6 +232,30 @@ pub fn sink() -> Sink {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for Sink {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let total_len = bufs.iter().map(|b| b.len()).sum();
+        Ok(total_len)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[stable(feature = "write_mt", since = "1.48.0")]
+impl Write for &Sink {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         Ok(buf.len())

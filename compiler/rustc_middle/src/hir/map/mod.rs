@@ -535,15 +535,15 @@ impl<'hir> Map<'hir> {
             Some(Node::Binding(_)) => (),
             _ => return false,
         }
-        match self.find(self.get_parent_node(id)) {
+        matches!(
+            self.find(self.get_parent_node(id)),
             Some(
                 Node::Item(_)
                 | Node::TraitItem(_)
                 | Node::ImplItem(_)
                 | Node::Expr(Expr { kind: ExprKind::Closure(..), .. }),
-            ) => true,
-            _ => false,
-        }
+            )
+        )
     }
 
     /// Whether the expression pointed at by `hir_id` belongs to a `const` evaluation context.
@@ -554,10 +554,10 @@ impl<'hir> Map<'hir> {
 
     /// Whether `hir_id` corresponds to a `mod` or a crate.
     pub fn is_hir_id_module(&self, hir_id: HirId) -> bool {
-        match self.get_entry(hir_id).node {
-            Node::Item(Item { kind: ItemKind::Mod(_), .. }) | Node::Crate(..) => true,
-            _ => false,
-        }
+        matches!(
+            self.get_entry(hir_id).node,
+            Node::Item(Item { kind: ItemKind::Mod(_), .. }) | Node::Crate(..)
+        )
     }
 
     /// Retrieves the `HirId` for `id`'s enclosing method, unless there's a
@@ -1002,11 +1002,7 @@ fn hir_id_to_string(map: &Map<'_>, id: HirId) -> String {
                 let def_id = map.local_def_id(id);
                 tcx.def_path_str(def_id.to_def_id())
             } else if let Some(path) = map.def_path_from_hir_id(id) {
-                path.data
-                    .into_iter()
-                    .map(|elem| elem.data.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::")
+                path.data.into_iter().map(|elem| elem.to_string()).collect::<Vec<_>>().join("::")
             } else {
                 String::from("<missing path>")
             }

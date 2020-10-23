@@ -44,9 +44,6 @@ pub trait PpAnn {
     fn nested(&self, _state: &mut State<'_>, _nested: Nested) {}
     fn pre(&self, _state: &mut State<'_>, _node: AnnNode<'_>) {}
     fn post(&self, _state: &mut State<'_>, _node: AnnNode<'_>) {}
-    fn try_fetch_item(&self, _: hir::HirId) -> Option<&hir::Item<'_>> {
-        None
-    }
 }
 
 pub struct NoAnn;
@@ -54,9 +51,6 @@ impl PpAnn for NoAnn {}
 pub const NO_ANN: &dyn PpAnn = &NoAnn;
 
 impl PpAnn for hir::Crate<'_> {
-    fn try_fetch_item(&self, item: hir::HirId) -> Option<&hir::Item<'_>> {
-        Some(self.item(item))
-    }
     fn nested(&self, state: &mut State<'_>, nested: Nested) {
         match nested {
             Nested::Item(id) => state.print_item(self.item(id.id)),
@@ -141,6 +135,9 @@ impl std::ops::DerefMut for State<'_> {
 }
 
 impl<'a> PrintState<'a> for State<'a> {
+    fn insert_extra_parens(&self) -> bool {
+        true
+    }
     fn comments(&mut self) -> &mut Option<Comments<'a>> {
         &mut self.comments
     }
@@ -1138,6 +1135,13 @@ impl<'a> State<'a> {
         self.end()
     }
 
+    fn print_expr_anon_const(&mut self, anon_const: &hir::AnonConst) {
+        self.ibox(INDENT_UNIT);
+        self.s.word_space("const");
+        self.print_anon_const(anon_const);
+        self.end()
+    }
+
     fn print_expr_repeat(&mut self, element: &hir::Expr<'_>, count: &hir::AnonConst) {
         self.ibox(INDENT_UNIT);
         self.s.word("[");
@@ -1289,6 +1293,9 @@ impl<'a> State<'a> {
             }
             hir::ExprKind::Array(ref exprs) => {
                 self.print_expr_vec(exprs);
+            }
+            hir::ExprKind::ConstBlock(ref anon_const) => {
+                self.print_expr_anon_const(anon_const);
             }
             hir::ExprKind::Repeat(ref element, ref count) => {
                 self.print_expr_repeat(&element, count);
