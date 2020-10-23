@@ -125,6 +125,9 @@ top_level_options!(
         // try to not rely on this too much.
         actually_rustdoc: bool [TRACKED],
 
+        // Control path trimming.
+        trimmed_def_paths: TrimmedDefPaths [TRACKED],
+
         // Specifications of codegen units / ThinLTO which are forced as a
         // result of parsing command line options. These are not necessarily
         // what rustc was invoked with, but massaged a bit to agree with
@@ -255,6 +258,7 @@ macro_rules! options {
         pub const parse_strip: &str = "either `none`, `debuginfo`, or `symbols`";
         pub const parse_linker_flavor: &str = ::rustc_target::spec::LinkerFlavor::one_of();
         pub const parse_optimization_fuel: &str = "crate=integer";
+        pub const parse_mir_spanview: &str = "`statement` (default), `terminator`, or `block`";
         pub const parse_unpretty: &str = "`string` or `string=string`";
         pub const parse_treat_err_as_bug: &str = "either no value or a number bigger than 0";
         pub const parse_lto: &str =
@@ -551,6 +555,36 @@ macro_rules! options {
             }
         }
 
+        fn parse_mir_spanview(slot: &mut Option<MirSpanview>, v: Option<&str>) -> bool {
+            if v.is_some() {
+                let mut bool_arg = None;
+                if parse_opt_bool(&mut bool_arg, v) {
+                    *slot = if bool_arg.unwrap() {
+                        Some(MirSpanview::Statement)
+                    } else {
+                        None
+                    };
+                    return true
+                }
+            }
+
+            let v = match v {
+                None => {
+                    *slot = Some(MirSpanview::Statement);
+                    return true;
+                }
+                Some(v) => v,
+            };
+
+            *slot = Some(match v.trim_end_matches("s") {
+                "statement" | "stmt" => MirSpanview::Statement,
+                "terminator" | "term" => MirSpanview::Terminator,
+                "block" | "basicblock" => MirSpanview::Block,
+                _ => return false,
+            });
+            true
+        }
+
         fn parse_treat_err_as_bug(slot: &mut Option<usize>, v: Option<&str>) -> bool {
             match v {
                 Some(s) => { *slot = s.parse().ok().filter(|&x| x != 0); slot.unwrap_or(0) != 0 }
@@ -719,6 +753,9 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
         "extra arguments to append to the linker invocation (space separated)"),
     link_dead_code: Option<bool> = (None, parse_opt_bool, [UNTRACKED],
         "keep dead code at link time (useful for code coverage) (default: no)"),
+    link_self_contained: Option<bool> = (None, parse_opt_bool, [UNTRACKED],
+        "control whether to link Rust provided C objects/libraries or rely
+        on C toolchain installed in the system"),
     linker: Option<PathBuf> = (None, parse_opt_pathbuf, [UNTRACKED],
         "system linker to link outputs with"),
     linker_flavor: Option<LinkerFlavor> = (None, parse_linker_flavor, [UNTRACKED],
@@ -813,6 +850,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "enable the experimental Chalk-based trait solving engine"),
     codegen_backend: Option<String> = (None, parse_opt_string, [TRACKED],
         "the backend to use"),
+    combine_cgu: bool = (false, parse_bool, [TRACKED],
+        "combine CGUs into a single one"),
     crate_attr: Vec<String> = (Vec::new(), parse_string_push, [TRACKED],
         "inject the given attribute in the crate"),
     debug_macros: bool = (false, parse_bool, [TRACKED],
@@ -849,6 +888,11 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "exclude the pass number when dumping MIR (used in tests) (default: no)"),
     dump_mir_graphviz: bool = (false, parse_bool, [UNTRACKED],
         "in addition to `.mir` files, create graphviz `.dot` files (default: no)"),
+    dump_mir_spanview: Option<MirSpanview> = (None, parse_mir_spanview, [UNTRACKED],
+        "in addition to `.mir` files, create `.html` files to view spans for \
+        all `statement`s (including terminators), only `terminator` spans, or \
+        computed `block` spans (one span encompassing a block's terminator and \
+        all statements)."),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
         "emit a section containing stack size metadata (default: no)"),
     fewer_names: bool = (false, parse_bool, [TRACKED],
@@ -862,6 +906,11 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "set the optimization fuel quota for a crate"),
     gc_destination_propagation: bool = (false, parse_bool, [TRACKED],
         "only enable this if Boehm is the global allocator"),
+    graphviz_dark_mode: bool = (false, parse_bool, [UNTRACKED],
+        "use dark-themed colors in graphviz output (default: no)"),
+    graphviz_font: String = ("Courier, monospace".to_string(), parse_string, [UNTRACKED],
+        "use the given `fontname` in graphviz output; can be overridden by setting \
+        environment variable `RUSTC_GRAPHVIZ_FONT` (default: `Courier, monospace`)"),
     hir_stats: bool = (false, parse_bool, [UNTRACKED],
         "print some statistics about AST and HIR (default: no)"),
     human_readable_cgu_names: bool = (false, parse_bool, [TRACKED],
@@ -896,9 +945,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "keep hygiene data after analysis (default: no)"),
     link_native_libraries: bool = (true, parse_bool, [UNTRACKED],
         "link native libraries in the linker invocation (default: yes)"),
-    link_self_contained: Option<bool> = (None, parse_opt_bool, [TRACKED],
-        "control whether to link Rust provided C objects/libraries or rely
-         on C toolchain installed in the system"),
     link_only: bool = (false, parse_bool, [TRACKED],
         "link the `.rlink` file generated by `-Z no-link` (default: no)"),
     llvm_time_trace: bool = (false, parse_bool, [UNTRACKED],
@@ -959,6 +1005,10 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "a single extra argument to prepend the linker invocation (can be used several times)"),
     pre_link_args: Vec<String> = (Vec::new(), parse_list, [UNTRACKED],
         "extra arguments to prepend to the linker invocation (space separated)"),
+    precise_enum_drop_elaboration: bool = (true, parse_bool, [TRACKED],
+        "use a more precise version of drop elaboration for matches on enums (default: yes). \
+        This results in better codegen, but has caused miscompilations on some tier 2 platforms. \
+        See #77382 and #74551."),
     print_fuel: Option<String> = (None, parse_opt_string, [TRACKED],
         "make rustc print the total optimization fuel used by a crate"),
     print_link_args: bool = (false, parse_bool, [UNTRACKED],
@@ -1030,6 +1080,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "show extended diagnostic help (default: no)"),
     terminal_width: Option<usize> = (None, parse_opt_uint, [UNTRACKED],
         "set the current terminal width"),
+    tune_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
+        "select processor to schedule for (`rustc --print target-cpus` for details)"),
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable ThinLTO when possible"),
     // We default to 1 here since we want to behave like
@@ -1050,6 +1102,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "for every macro invocation, print its name and arguments (default: no)"),
     treat_err_as_bug: Option<usize> = (None, parse_treat_err_as_bug, [TRACKED],
         "treat error number `val` that occurs as bug"),
+    trim_diagnostic_paths: bool = (true, parse_bool, [UNTRACKED],
+        "in diagnostics, use heuristics to shorten paths referring to items"),
     ui_testing: bool = (false, parse_bool, [UNTRACKED],
         "emit compiler diagnostics in a form suitable for UI testing (default: no)"),
     unleash_the_miri_inside_of_you: bool = (false, parse_bool, [TRACKED],
@@ -1064,6 +1118,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         `hir,typed` (HIR with types for each node),
         `hir-tree` (dump the raw HIR),
         `mir` (the MIR), or `mir-cfg` (graphviz formatted MIR)"),
+    unsound_mir_opts: bool = (false, parse_bool, [TRACKED],
+        "enable unsound and buggy MIR optimizations (default: no)"),
     unstable_options: bool = (false, parse_bool, [UNTRACKED],
         "adds unstable command line options to rustc interface (default: no)"),
     use_ctors_section: Option<bool> = (None, parse_opt_bool, [TRACKED],

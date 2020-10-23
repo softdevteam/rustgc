@@ -291,7 +291,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) {
             let err_ty_str;
             let mut is_ptr = true;
             let err = if tcx.features().min_const_generics {
-                match ty.kind {
+                match ty.kind() {
                     ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Error(_) => None,
                     ty::FnPtr(_) => Some("function pointers"),
                     ty::RawPtr(_) => Some("raw pointers"),
@@ -302,7 +302,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) {
                     }
                 }
             } else {
-                match ty.peel_refs().kind {
+                match ty.peel_refs().kind() {
                     ty::FnPtr(_) => Some("function pointers"),
                     ty::RawPtr(_) => Some("raw pointers"),
                     _ => None,
@@ -338,7 +338,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) {
                 // We use the same error code in both branches, because this is really the same
                 // issue: we just special-case the message for type parameters to make it
                 // clearer.
-                if let ty::Param(_) = ty.peel_refs().kind {
+                if let ty::Param(_) = ty.peel_refs().kind() {
                     // Const parameters may not have type parameters as their types,
                     // because we cannot be sure that the type parameter derives `PartialEq`
                     // and `Eq` (just implementing them is not enough for `structural_match`).
@@ -420,6 +420,9 @@ fn check_associated_item(
                 check_method_receiver(fcx, hir_sig, &item, self_ty);
             }
             ty::AssocKind::Type => {
+                if let ty::AssocItemContainer::TraitContainer(_) = item.container {
+                    check_associated_type_bounds(fcx, item, span)
+                }
                 if item.defaultness.has_value() {
                     let ty = fcx.tcx.type_of(item.def_id);
                     let ty = fcx.normalize_associated_types_in(span, &ty);
@@ -571,7 +574,6 @@ fn check_trait(tcx: TyCtxt<'_>, item: &hir::Item<'_>) {
 
     for_item(tcx, item).with_fcx(|fcx, _| {
         check_where_clauses(tcx, fcx, item.span, trait_def_id.to_def_id(), None);
-        check_associated_type_defaults(fcx, trait_def_id.to_def_id());
 
         vec![]
     });
@@ -581,96 +583,26 @@ fn check_trait(tcx: TyCtxt<'_>, item: &hir::Item<'_>) {
 ///
 /// Assuming the defaults are used, check that all predicates (bounds on the
 /// assoc type and where clauses on the trait) hold.
-fn check_associated_type_defaults(fcx: &FnCtxt<'_, '_>, trait_def_id: DefId) {
+fn check_associated_type_bounds(fcx: &FnCtxt<'_, '_>, item: &ty::AssocItem, span: Span) {
     let tcx = fcx.tcx;
-    let substs = InternalSubsts::identity_for_item(tcx, trait_def_id);
 
-    // For all assoc. types with defaults, build a map from
-    // `<Self as Trait<...>>::Assoc` to the default type.
-    let map = tcx
-        .associated_items(trait_def_id)
-        .in_definition_order()
-        .filter_map(|item| {
-            if item.kind == ty::AssocKind::Type && item.defaultness.has_value() {
-                // `<Self as Trait<...>>::Assoc`
-                let proj = ty::ProjectionTy { substs, item_def_id: item.def_id };
-                let default_ty = tcx.type_of(item.def_id);
-                debug!("assoc. type default mapping: {} -> {}", proj, default_ty);
-                Some((proj, default_ty))
-            } else {
-                None
-            }
-        })
-        .collect::<FxHashMap<_, _>>();
+    let bounds = tcx.explicit_item_bounds(item.def_id);
 
-    /// Replaces projections of associated types with their default types.
-    ///
-    /// This does a "shallow substitution", meaning that defaults that refer to
-    /// other defaulted assoc. types will still refer to the projection
-    /// afterwards, not to the other default. For example:
-    ///
-    /// ```compile_fail
-    /// trait Tr {
-    ///     type A: Clone = Vec<Self::B>;
-    ///     type B = u8;
-    /// }
-    /// ```
-    ///
-    /// This will end up replacing the bound `Self::A: Clone` with
-    /// `Vec<Self::B>: Clone`, not with `Vec<u8>: Clone`. If we did a deep
-    /// substitution and ended up with the latter, the trait would be accepted.
-    /// If an `impl` then replaced `B` with something that isn't `Clone`,
-    /// suddenly the default for `A` is no longer valid. The shallow
-    /// substitution forces the trait to add a `B: Clone` bound to be accepted,
-    /// which means that an `impl` can replace any default without breaking
-    /// others.
-    ///
-    /// Note that this isn't needed for soundness: The defaults would still be
-    /// checked in any impl that doesn't override them.
-    struct DefaultNormalizer<'tcx> {
-        tcx: TyCtxt<'tcx>,
-        map: FxHashMap<ty::ProjectionTy<'tcx>, Ty<'tcx>>,
-    }
+    debug!("check_associated_type_bounds: bounds={:?}", bounds);
+    let wf_obligations = bounds.iter().flat_map(|&(bound, bound_span)| {
+        let normalized_bound = fcx.normalize_associated_types_in(span, &bound);
+        traits::wf::predicate_obligations(
+            fcx,
+            fcx.param_env,
+            fcx.body_id,
+            normalized_bound,
+            bound_span,
+        )
+    });
 
-    impl<'tcx> ty::fold::TypeFolder<'tcx> for DefaultNormalizer<'tcx> {
-        fn tcx<'a>(&'a self) -> TyCtxt<'tcx> {
-            self.tcx
-        }
-
-        fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-            match t.kind {
-                ty::Projection(proj_ty) => {
-                    if let Some(default) = self.map.get(&proj_ty) {
-                        default
-                    } else {
-                        t.super_fold_with(self)
-                    }
-                }
-                _ => t.super_fold_with(self),
-            }
-        }
-    }
-
-    // Now take all predicates defined on the trait, replace any mention of
-    // the assoc. types with their default, and prove them.
-    // We only consider predicates that directly mention the assoc. type.
-    let mut norm = DefaultNormalizer { tcx, map };
-    let predicates = fcx.tcx.predicates_of(trait_def_id);
-    for &(orig_pred, span) in predicates.predicates.iter() {
-        let pred = orig_pred.fold_with(&mut norm);
-        if pred != orig_pred {
-            // Mentions one of the defaulted assoc. types
-            debug!("default suitability check: proving predicate: {} -> {}", orig_pred, pred);
-            let pred = fcx.normalize_associated_types_in(span, &pred);
-            let cause = traits::ObligationCause::new(
-                span,
-                fcx.body_id,
-                traits::ItemObligation(trait_def_id),
-            );
-            let obligation = traits::Obligation::new(cause, fcx.param_env, pred);
-
-            fcx.register_predicate(obligation);
-        }
+    for obligation in wf_obligations {
+        debug!("next obligation cause: {:?}", obligation.cause);
+        fcx.register_predicate(obligation);
     }
 }
 
@@ -709,7 +641,7 @@ fn check_item_type(tcx: TyCtxt<'_>, item_id: hir::HirId, ty_span: Span, allow_fo
         let mut forbid_unsized = true;
         if allow_foreign_ty {
             let tail = fcx.tcx.struct_tail_erasing_lifetimes(item_ty, fcx.param_env);
-            if let ty::Foreign(_) = tail.kind {
+            if let ty::Foreign(_) = tail.kind() {
                 forbid_unsized = false;
             }
         }
@@ -867,7 +799,7 @@ fn check_where_clauses<'tcx, 'fcx>(
             }
             impl<'tcx> ty::fold::TypeVisitor<'tcx> for CountParams {
                 fn visit_ty(&mut self, t: Ty<'tcx>) -> bool {
-                    if let ty::Param(param) = t.kind {
+                    if let ty::Param(param) = t.kind() {
                         self.params.insert(param.index);
                     }
                     t.super_visit_with(self)
@@ -1001,7 +933,7 @@ fn check_opaque_types<'fcx, 'tcx>(
     ty.fold_with(&mut ty::fold::BottomUpFolder {
         tcx: fcx.tcx,
         ty_op: |ty| {
-            if let ty::Opaque(def_id, substs) = ty.kind {
+            if let ty::Opaque(def_id, substs) = *ty.kind() {
                 trace!("check_opaque_types: opaque_ty, {:?}, {:?}", def_id, substs);
                 let generics = tcx.generics_of(def_id);
 
@@ -1044,7 +976,7 @@ fn check_opaque_types<'fcx, 'tcx>(
                 let mut seen_params: FxHashMap<_, Vec<_>> = FxHashMap::default();
                 for (i, arg) in substs.iter().enumerate() {
                     let arg_is_param = match arg.unpack() {
-                        GenericArgKind::Type(ty) => matches!(ty.kind, ty::Param(_)),
+                        GenericArgKind::Type(ty) => matches!(ty.kind(), ty::Param(_)),
 
                         GenericArgKind::Lifetime(region) => {
                             if let ty::ReStatic = region {
@@ -1177,7 +1109,7 @@ fn e0307(fcx: &FnCtxt<'fcx, 'tcx>, span: Span, receiver_ty: Ty<'_>) {
         fcx.tcx.sess.diagnostic(),
         span,
         E0307,
-        "invalid `self` parameter type: {:?}",
+        "invalid `self` parameter type: {}",
         receiver_ty,
     )
     .note("type of `self` must be `Self` or a type that dereferences to it")
@@ -1493,7 +1425,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .collect()
     }
 
-    fn impl_implied_bounds(&self, impl_def_id: DefId, span: Span) -> Vec<Ty<'tcx>> {
+    pub(super) fn impl_implied_bounds(&self, impl_def_id: DefId, span: Span) -> Vec<Ty<'tcx>> {
         match self.tcx.impl_trait_ref(impl_def_id) {
             Some(ref trait_ref) => {
                 // Trait impl: take implied bounds from all types that

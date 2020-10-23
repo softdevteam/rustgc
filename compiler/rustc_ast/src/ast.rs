@@ -24,9 +24,10 @@ pub use UnsafeSource::*;
 
 use crate::ptr::P;
 use crate::token::{self, CommentKind, DelimToken};
-use crate::tokenstream::{DelimSpan, TokenStream, TokenTree};
+use crate::tokenstream::{DelimSpan, LazyTokenStream, TokenStream, TokenTree};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_macros::HashStable_Generic;
@@ -96,6 +97,7 @@ pub struct Path {
     /// The segments in the path: the things separated by `::`.
     /// Global paths begin with `kw::PathRoot`.
     pub segments: Vec<PathSegment>,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 impl PartialEq<Symbol> for Path {
@@ -117,7 +119,7 @@ impl Path {
     // Convert a span and an identifier to the corresponding
     // one-segment path.
     pub fn from_ident(ident: Ident) -> Path {
-        Path { segments: vec![PathSegment::from_ident(ident)], span: ident.span }
+        Path { segments: vec![PathSegment::from_ident(ident)], span: ident.span, tokens: None }
     }
 
     pub fn is_global(&self) -> bool {
@@ -165,13 +167,6 @@ pub enum GenericArgs {
 }
 
 impl GenericArgs {
-    pub fn is_parenthesized(&self) -> bool {
-        match *self {
-            Parenthesized(..) => true,
-            _ => false,
-        }
-    }
-
     pub fn is_angle_bracketed(&self) -> bool {
         match *self {
             AngleBracketed(..) => true,
@@ -540,6 +535,7 @@ pub struct Block {
     /// Distinguishes between `unsafe { ... }` and `{ ... }`.
     pub rules: BlockCheckMode,
     pub span: Span,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 /// A match pattern.
@@ -550,7 +546,7 @@ pub struct Pat {
     pub id: NodeId,
     pub kind: PatKind,
     pub span: Span,
-    pub tokens: Option<TokenStream>,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 impl Pat {
@@ -586,7 +582,7 @@ impl Pat {
             _ => return None,
         };
 
-        Some(P(Ty { kind, id: self.id, span: self.span }))
+        Some(P(Ty { kind, id: self.id, span: self.span, tokens: None }))
     }
 
     /// Walk top-down and call `it` in each place where a pattern occurs
@@ -854,13 +850,6 @@ impl BinOpKind {
         }
     }
 
-    pub fn is_shift(&self) -> bool {
-        match *self {
-            BinOpKind::Shl | BinOpKind::Shr => true,
-            _ => false,
-        }
-    }
-
     pub fn is_comparison(&self) -> bool {
         use BinOpKind::*;
         // Note for developers: please keep this as is;
@@ -869,11 +858,6 @@ impl BinOpKind {
             Eq | Lt | Le | Ne | Gt | Ge => true,
             And | Or | Add | Sub | Mul | Div | Rem | BitXor | BitAnd | BitOr | Shl | Shr => false,
         }
-    }
-
-    /// Returns `true` if the binary operator takes its arguments by value
-    pub fn is_by_value(&self) -> bool {
-        !self.is_comparison()
     }
 }
 
@@ -893,14 +877,6 @@ pub enum UnOp {
 }
 
 impl UnOp {
-    /// Returns `true` if the unary operator takes its argument by value
-    pub fn is_by_value(u: UnOp) -> bool {
-        match u {
-            UnOp::Neg | UnOp::Not => true,
-            _ => false,
-        }
-    }
-
     pub fn to_string(op: UnOp) -> &'static str {
         match op {
             UnOp::Deref => "*",
@@ -916,15 +892,20 @@ pub struct Stmt {
     pub id: NodeId,
     pub kind: StmtKind,
     pub span: Span,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 impl Stmt {
     pub fn add_trailing_semicolon(mut self) -> Self {
         self.kind = match self.kind {
             StmtKind::Expr(expr) => StmtKind::Semi(expr),
-            StmtKind::MacCall(mac) => StmtKind::MacCall(
-                mac.map(|(mac, _style, attrs)| (mac, MacStmtStyle::Semicolon, attrs)),
-            ),
+            StmtKind::MacCall(mac) => {
+                StmtKind::MacCall(mac.map(|MacCallStmt { mac, style: _, attrs }| MacCallStmt {
+                    mac,
+                    style: MacStmtStyle::Semicolon,
+                    attrs,
+                }))
+            }
             kind => kind,
         };
         self
@@ -958,7 +939,14 @@ pub enum StmtKind {
     /// Just a trailing semi-colon.
     Empty,
     /// Macro.
-    MacCall(P<(MacCall, MacStmtStyle, AttrVec)>),
+    MacCall(P<MacCallStmt>),
+}
+
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct MacCallStmt {
+    pub mac: MacCall,
+    pub style: MacStmtStyle,
+    pub attrs: AttrVec,
 }
 
 #[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug)]
@@ -1052,12 +1040,12 @@ pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
     pub attrs: AttrVec,
-    pub tokens: Option<TokenStream>,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 // `Expr` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(target_arch = "x86_64")]
-rustc_data_structures::static_assert_size!(Expr, 104);
+rustc_data_structures::static_assert_size!(Expr, 112);
 
 impl Expr {
     /// Returns `true` if this expression would be valid somewhere that expects a value;
@@ -1157,13 +1145,14 @@ impl Expr {
             _ => return None,
         };
 
-        Some(P(Ty { kind, id: self.id, span: self.span }))
+        Some(P(Ty { kind, id: self.id, span: self.span, tokens: None }))
     }
 
     pub fn precedence(&self) -> ExprPrecedence {
         match self.kind {
             ExprKind::Box(_) => ExprPrecedence::Box,
             ExprKind::Array(_) => ExprPrecedence::Array,
+            ExprKind::ConstBlock(_) => ExprPrecedence::ConstBlock,
             ExprKind::Call(..) => ExprPrecedence::Call,
             ExprKind::MethodCall(..) => ExprPrecedence::MethodCall,
             ExprKind::Tup(_) => ExprPrecedence::Tup,
@@ -1219,6 +1208,8 @@ pub enum ExprKind {
     Box(P<Expr>),
     /// An array (`[a, b, c, d]`)
     Array(Vec<P<Expr>>),
+    /// Allow anonymous constants from an inline `const` block
+    ConstBlock(AnonConst),
     /// A function call
     ///
     /// The first field resolves to the function itself,
@@ -1592,7 +1583,7 @@ pub enum LitKind {
     /// A string literal (`"foo"`).
     Str(Symbol, StrStyle),
     /// A byte string (`b"foo"`).
-    ByteStr(Lrc<Vec<u8>>),
+    ByteStr(Lrc<[u8]>),
     /// A byte char (`b'f'`).
     Byte(u8),
     /// A character literal (`'a'`).
@@ -1738,13 +1729,6 @@ impl IntTy {
         }
     }
 
-    pub fn val_to_string(&self, val: i128) -> String {
-        // Cast to a `u128` so we can correctly print `INT128_MIN`. All integral types
-        // are parsed as `u128`, so we wouldn't want to print an extra negative
-        // sign.
-        format!("{}{}", val as u128, self.name_str())
-    }
-
     pub fn bit_width(&self) -> Option<u64> {
         Some(match *self {
             IntTy::Isize => return None,
@@ -1803,10 +1787,6 @@ impl UintTy {
         }
     }
 
-    pub fn val_to_string(&self, val: u128) -> String {
-        format!("{}{}", val, self.name_str())
-    }
-
     pub fn bit_width(&self) -> Option<u64> {
         Some(match *self {
             UintTy::Usize => return None,
@@ -1850,11 +1830,33 @@ pub enum AssocTyConstraintKind {
     Bound { bounds: GenericBounds },
 }
 
-#[derive(Clone, Encodable, Decodable, Debug)]
+#[derive(Encodable, Decodable, Debug)]
 pub struct Ty {
     pub id: NodeId,
     pub kind: TyKind,
     pub span: Span,
+    pub tokens: Option<LazyTokenStream>,
+}
+
+impl Clone for Ty {
+    fn clone(&self) -> Self {
+        ensure_sufficient_stack(|| Self {
+            id: self.id,
+            kind: self.kind.clone(),
+            span: self.span,
+            tokens: self.tokens.clone(),
+        })
+    }
+}
+
+impl Ty {
+    pub fn peel_refs(&self) -> &Self {
+        let mut final_ty = self;
+        while let TyKind::Rptr(_, MutTy { ty, .. }) = &final_ty.kind {
+            final_ty = &ty;
+        }
+        final_ty
+    }
 }
 
 #[derive(Clone, Encodable, Decodable, Debug)]
@@ -1916,7 +1918,7 @@ pub enum TyKind {
 
 impl TyKind {
     pub fn is_implicit_self(&self) -> bool {
-        if let TyKind::ImplicitSelf = *self { true } else { false }
+        matches!(self, TyKind::ImplicitSelf)
     }
 
     pub fn is_unit(&self) -> bool {
@@ -2133,7 +2135,7 @@ impl Param {
     /// Builds a `Param` object from `ExplicitSelf`.
     pub fn from_self(attrs: AttrVec, eself: ExplicitSelf, eself_ident: Ident) -> Param {
         let span = eself.span.to(eself_ident.span);
-        let infer_ty = P(Ty { id: DUMMY_NODE_ID, kind: TyKind::ImplicitSelf, span });
+        let infer_ty = P(Ty { id: DUMMY_NODE_ID, kind: TyKind::ImplicitSelf, span, tokens: None });
         let param = |mutbl, ty| Param {
             attrs,
             pat: P(Pat {
@@ -2156,6 +2158,7 @@ impl Param {
                     id: DUMMY_NODE_ID,
                     kind: TyKind::Rptr(lt, MutTy { ty: infer_ty, mutbl }),
                     span,
+                    tokens: None,
                 }),
             ),
         }
@@ -2211,7 +2214,7 @@ pub enum Async {
 
 impl Async {
     pub fn is_async(self) -> bool {
-        if let Async::Yes { .. } = self { true } else { false }
+        matches!(self, Async::Yes { .. })
     }
 
     /// In this case this is an `async` return, the `NodeId` for the generated `impl Trait` item.
@@ -2278,12 +2281,15 @@ impl FnRetTy {
 /// Module declaration.
 ///
 /// E.g., `mod foo;` or `mod foo { .. }`.
-#[derive(Clone, Encodable, Decodable, Debug, Default)]
+#[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Mod {
     /// A span from the first token past `{` to the last token until `}`.
     /// For `mod foo;`, the inner span ranges from the first token
     /// to the last token in the external file.
     pub inner: Span,
+    /// `unsafe` keyword accepted syntactically for macro DSLs, but not
+    /// semantically by Rust.
+    pub unsafety: Unsafe,
     pub items: Vec<P<Item>>,
     /// `true` for `mod foo { .. }`; `false` for `mod foo;`.
     pub inline: bool,
@@ -2291,9 +2297,12 @@ pub struct Mod {
 
 /// Foreign module declaration.
 ///
-/// E.g., `extern { .. }` or `extern C { .. }`.
+/// E.g., `extern { .. }` or `extern "C" { .. }`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct ForeignMod {
+    /// `unsafe` keyword accepted syntactically for macro DSLs, but not
+    /// semantically by Rust.
+    pub unsafety: Unsafe,
     pub abi: Option<StrLit>,
     pub items: Vec<P<ForeignItem>>,
 }
@@ -2399,6 +2408,7 @@ impl<D: Decoder> rustc_serialize::Decodable<D> for AttrId {
 pub struct AttrItem {
     pub path: Path,
     pub args: MacArgs,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 /// A list of attributes.
@@ -2468,7 +2478,12 @@ pub enum CrateSugar {
     JustCrate,
 }
 
-pub type Visibility = Spanned<VisibilityKind>;
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct Visibility {
+    pub kind: VisibilityKind,
+    pub span: Span,
+    pub tokens: Option<LazyTokenStream>,
+}
 
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum VisibilityKind {
@@ -2480,7 +2495,7 @@ pub enum VisibilityKind {
 
 impl VisibilityKind {
     pub fn is_pub(&self) -> bool {
-        if let VisibilityKind::Public = *self { true } else { false }
+        matches!(self, VisibilityKind::Public)
     }
 }
 
@@ -2554,7 +2569,7 @@ pub struct Item<K = ItemKind> {
     ///
     /// Note that the tokens here do not include the outer attributes, but will
     /// include inner attributes.
-    pub tokens: Option<TokenStream>,
+    pub tokens: Option<LazyTokenStream>,
 }
 
 impl Item {

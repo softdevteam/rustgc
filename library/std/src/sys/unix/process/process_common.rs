@@ -7,11 +7,12 @@ use crate::collections::BTreeMap;
 use crate::ffi::{CStr, CString, OsStr, OsString};
 use crate::fmt;
 use crate::io;
+use crate::path::Path;
 use crate::ptr;
 use crate::sys::fd::FileDesc;
 use crate::sys::fs::File;
 use crate::sys::pipe::{self, AnonPipe};
-use crate::sys_common::process::CommandEnv;
+use crate::sys_common::process::{CommandEnv, CommandEnvs};
 
 #[cfg(not(target_os = "fuchsia"))]
 use crate::sys::fs::OpenOptions;
@@ -23,6 +24,8 @@ cfg_if::cfg_if! {
         // fuchsia doesn't have /dev/null
     } else if #[cfg(target_os = "redox")] {
         const DEV_NULL: &str = "null:\0";
+    } else if #[cfg(target_os = "vxworks")] {
+        const DEV_NULL: &str = "/null\0";
     } else {
         const DEV_NULL: &str = "/dev/null\0";
     }
@@ -47,7 +50,7 @@ cfg_if::cfg_if! {
             raw[bit / 8] |= 1 << (bit % 8);
             return 0;
         }
-    } else {
+    } else if #[cfg(not(target_os = "vxworks"))] {
         pub use libc::{sigemptyset, sigaddset};
     }
 }
@@ -184,11 +187,30 @@ impl Command {
     pub fn saw_nul(&self) -> bool {
         self.saw_nul
     }
+
+    pub fn get_program(&self) -> &OsStr {
+        OsStr::from_bytes(self.program.as_bytes())
+    }
+
+    pub fn get_args(&self) -> CommandArgs<'_> {
+        let mut iter = self.args.iter();
+        iter.next();
+        CommandArgs { iter }
+    }
+
+    pub fn get_envs(&self) -> CommandEnvs<'_> {
+        self.env.iter()
+    }
+
+    pub fn get_current_dir(&self) -> Option<&Path> {
+        self.cwd.as_ref().map(|cs| Path::new(OsStr::from_bytes(cs.as_bytes())))
+    }
+
     pub fn get_argv(&self) -> &Vec<*const c_char> {
         &self.argv.0
     }
 
-    pub fn get_program(&self) -> &CStr {
+    pub fn get_program_cstr(&self) -> &CStr {
         &*self.program
     }
 
@@ -233,9 +255,15 @@ impl Command {
         let maybe_env = self.env.capture_if_changed();
         maybe_env.map(|env| construct_envp(env, &mut self.saw_nul))
     }
+
     #[allow(dead_code)]
     pub fn env_saw_path(&self) -> bool {
         self.env.have_changed_path()
+    }
+
+    #[allow(dead_code)]
+    pub fn program_is_path(&self) -> bool {
+        self.program.to_bytes().contains(&b'/')
     }
 
     pub fn setup_io(
@@ -400,5 +428,34 @@ impl ExitCode {
     #[inline]
     pub fn as_i32(&self) -> i32 {
         self.0 as i32
+    }
+}
+
+pub struct CommandArgs<'a> {
+    iter: crate::slice::Iter<'a, CString>,
+}
+
+impl<'a> Iterator for CommandArgs<'a> {
+    type Item = &'a OsStr;
+    fn next(&mut self) -> Option<&'a OsStr> {
+        self.iter.next().map(|cs| OsStr::from_bytes(cs.as_bytes()))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<'a> ExactSizeIterator for CommandArgs<'a> {
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.iter.is_empty()
+    }
+}
+
+impl<'a> fmt::Debug for CommandArgs<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter.clone()).finish()
     }
 }

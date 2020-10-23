@@ -117,7 +117,7 @@ impl<Tag: Copy> std::fmt::Display for ImmTy<'tcx, Tag> {
         ty::tls::with(|tcx| {
             match self.imm {
                 Immediate::Scalar(s) => {
-                    if let Some(ty) = tcx.lift(&self.layout.ty) {
+                    if let Some(ty) = tcx.lift(self.layout.ty) {
                         let cx = FmtPrinter::new(tcx, f, Namespace::ValueNS);
                         p(cx, s, ty)?;
                         return Ok(());
@@ -133,7 +133,7 @@ impl<Tag: Copy> std::fmt::Display for ImmTy<'tcx, Tag> {
     }
 }
 
-impl<'tcx, Tag> ::std::ops::Deref for ImmTy<'tcx, Tag> {
+impl<'tcx, Tag> std::ops::Deref for ImmTy<'tcx, Tag> {
     type Target = Immediate<Tag>;
     #[inline(always)]
     fn deref(&self) -> &Immediate<Tag> {
@@ -156,7 +156,7 @@ pub struct OpTy<'tcx, Tag = ()> {
     pub layout: TyAndLayout<'tcx>,
 }
 
-impl<'tcx, Tag> ::std::ops::Deref for OpTy<'tcx, Tag> {
+impl<'tcx, Tag> std::ops::Deref for OpTy<'tcx, Tag> {
     type Target = Operand<Tag>;
     #[inline(always)]
     fn deref(&self) -> &Operand<Tag> {
@@ -340,7 +340,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     pub fn read_str(&self, mplace: MPlaceTy<'tcx, M::PointerTag>) -> InterpResult<'tcx, &str> {
         let len = mplace.len(self)?;
         let bytes = self.memory.read_bytes(mplace.ptr, Size::from_bytes(len))?;
-        let str = ::std::str::from_utf8(bytes).map_err(|err| err_ub!(InvalidStr(err)))?;
+        let str = std::str::from_utf8(bytes).map_err(|err| err_ub!(InvalidStr(err)))?;
         Ok(str)
     }
 
@@ -549,21 +549,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         };
         // Early-return cases.
         let val_val = match val.val {
-            ty::ConstKind::Param(_) => throw_inval!(TooGeneric),
+            ty::ConstKind::Param(_) | ty::ConstKind::Bound(..) => throw_inval!(TooGeneric),
             ty::ConstKind::Error(_) => throw_inval!(TypeckError(ErrorReported)),
             ty::ConstKind::Unevaluated(def, substs, promoted) => {
-                let instance = self.resolve(def.did, substs)?;
-                // We use `const_eval` here and `const_eval_raw` elsewhere in mir interpretation.
-                // The reason we use `const_eval_raw` everywhere else is to prevent cycles during
-                // validation, because validation automatically reads through any references, thus
-                // potentially requiring the current static to be evaluated again. This is not a
-                // problem here, because we are building an operand which means an actual read is
-                // happening.
-                return Ok(self.const_eval(GlobalId { instance, promoted }, val.ty)?);
+                let instance = self.resolve(def, substs)?;
+                return Ok(self.eval_to_allocation(GlobalId { instance, promoted })?.into());
             }
-            ty::ConstKind::Infer(..)
-            | ty::ConstKind::Bound(..)
-            | ty::ConstKind::Placeholder(..) => {
+            ty::ConstKind::Infer(..) | ty::ConstKind::Placeholder(..) => {
                 span_bug!(self.cur_span(), "const_to_op: Unexpected ConstKind {:?}", val)
             }
             ty::ConstKind::Value(val_val) => val_val,
@@ -662,7 +654,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let discr_val = self.cast_from_scalar(tag_bits, tag_layout, discr_layout.ty);
                 let discr_bits = discr_val.assert_bits(discr_layout.size);
                 // Convert discriminant to variant index, and catch invalid discriminants.
-                let index = match op.layout.ty.kind {
+                let index = match *op.layout.ty.kind() {
                     ty::Adt(adt, _) => {
                         adt.discriminants(*self.tcx).find(|(_, var)| var.val == discr_bits)
                     }

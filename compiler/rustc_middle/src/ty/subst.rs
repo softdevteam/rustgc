@@ -1,6 +1,5 @@
 // Type substitutions.
 
-use crate::infer::canonical::Canonical;
 use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
 use crate::ty::sty::{ClosureSubsts, GeneratorSubsts};
@@ -142,11 +141,11 @@ impl<'tcx> GenericArg<'tcx> {
 impl<'a, 'tcx> Lift<'tcx> for GenericArg<'a> {
     type Lifted = GenericArg<'tcx>;
 
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         match self.unpack() {
-            GenericArgKind::Lifetime(lt) => tcx.lift(&lt).map(|lt| lt.into()),
-            GenericArgKind::Type(ty) => tcx.lift(&ty).map(|ty| ty.into()),
-            GenericArgKind::Const(ct) => tcx.lift(&ct).map(|ct| ct.into()),
+            GenericArgKind::Lifetime(lt) => tcx.lift(lt).map(|lt| lt.into()),
+            GenericArgKind::Type(ty) => tcx.lift(ty).map(|ty| ty.into()),
+            GenericArgKind::Const(ct) => tcx.lift(ct).map(|ct| ct.into()),
         }
     }
 }
@@ -486,7 +485,7 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
             return t;
         }
 
-        match t.kind {
+        match *t.kind() {
             ty::Param(p) => self.ty_for_param(p, t),
             _ => t.super_fold_with(self),
         }
@@ -647,8 +646,6 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
         ty::fold::shift_region(self.tcx, region, self.binders_passed)
     }
 }
-
-pub type CanonicalUserSubsts<'tcx> = Canonical<'tcx, UserSubsts<'tcx>>;
 
 /// Stores the user-given substs to reach some fully qualified path
 /// (e.g., `<T>::Item` or `<T as Trait>::Item`).

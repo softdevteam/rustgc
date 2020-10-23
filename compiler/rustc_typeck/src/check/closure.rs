@@ -81,19 +81,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.tcx.closure_base_def_id(expr_def_id.to_def_id()),
         );
 
-        let tupled_upvars_ty =
-            self.tcx.mk_tup(self.tcx.upvars_mentioned(expr_def_id).iter().flat_map(|upvars| {
-                upvars.iter().map(|(&var_hir_id, _)| {
-                    // Create type variables (for now) to represent the transformed
-                    // types of upvars. These will be unified during the upvar
-                    // inference phase (`upvar.rs`).
-                    self.infcx.next_ty_var(TypeVariableOrigin {
-                        // FIXME(eddyb) distinguish upvar inference variables from the rest.
-                        kind: TypeVariableOriginKind::ClosureSynthetic,
-                        span: self.tcx.hir().span(var_hir_id),
-                    })
-                })
-            }));
+        let tupled_upvars_ty = self.infcx.next_ty_var(TypeVariableOrigin {
+            kind: TypeVariableOriginKind::ClosureSynthetic,
+            span: self.tcx.hir().span(expr.hir_id),
+        });
 
         if let Some(GeneratorTypes { resume_ty, yield_ty, interior, movability }) = generator_types
         {
@@ -170,7 +161,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) -> (Option<ExpectedSig<'tcx>>, Option<ty::ClosureKind>) {
         debug!("deduce_expectations_from_expected_type(expected_ty={:?})", expected_ty);
 
-        match expected_ty.kind {
+        match *expected_ty.kind() {
             ty::Dynamic(ref object_type, ..) => {
                 let sig = object_type.projection_bounds().find_map(|pb| {
                     let pb = pb.with_self_ty(self.tcx, self.tcx.types.trait_object_dummy_self);
@@ -201,6 +192,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     obligation.predicate
                 );
 
+                let bound_predicate = obligation.predicate.bound_atom();
                 if let ty::PredicateAtom::Projection(proj_predicate) =
                     obligation.predicate.skip_binders()
                 {
@@ -208,7 +200,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // the complete signature.
                     self.deduce_sig_from_projection(
                         Some(obligation.cause.span),
-                        ty::Binder::bind(proj_predicate),
+                        bound_predicate.rebind(proj_predicate),
                     )
                 } else {
                     None
@@ -268,7 +260,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let arg_param_ty = self.resolve_vars_if_possible(&arg_param_ty);
             debug!("deduce_sig_from_projection: arg_param_ty={:?}", arg_param_ty);
 
-            match arg_param_ty.kind {
+            match arg_param_ty.kind() {
                 ty::Tuple(tys) => tys.into_iter().map(|k| k.expect_ty()).collect::<Vec<_>>(),
                 _ => return None,
             }
@@ -611,7 +603,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // be inferring.
         let ret_ty = ret_coercion.borrow().expected_ty();
         let ret_ty = self.inh.infcx.shallow_resolve(ret_ty);
-        let ret_vid = match ret_ty.kind {
+        let ret_vid = match *ret_ty.kind() {
             ty::Infer(ty::TyVar(ret_vid)) => ret_vid,
             _ => span_bug!(
                 self.tcx.def_span(expr_def_id),

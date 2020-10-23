@@ -49,7 +49,7 @@ impl<'a> Sugg<'a> {
     /// Convenience function around `hir_opt` for suggestions with a default
     /// text.
     pub fn hir(cx: &LateContext<'_>, expr: &hir::Expr<'_>, default: &'a str) -> Self {
-        Self::hir_opt(cx, expr).unwrap_or_else(|| Sugg::NonParen(Cow::Borrowed(default)))
+        Self::hir_opt(cx, expr).unwrap_or(Sugg::NonParen(Cow::Borrowed(default)))
     }
 
     /// Same as `hir`, but it adapts the applicability level by following rules:
@@ -110,6 +110,7 @@ impl<'a> Sugg<'a> {
             | hir::ExprKind::Index(..)
             | hir::ExprKind::InlineAsm(..)
             | hir::ExprKind::LlvmInlineAsm(..)
+            | hir::ExprKind::ConstBlock(..)
             | hir::ExprKind::Lit(..)
             | hir::ExprKind::Loop(..)
             | hir::ExprKind::MethodCall(..)
@@ -132,7 +133,11 @@ impl<'a> Sugg<'a> {
     pub fn ast(cx: &EarlyContext<'_>, expr: &ast::Expr, default: &'a str) -> Self {
         use rustc_ast::ast::RangeLimits;
 
-        let snippet = snippet(cx, expr.span, default);
+        let snippet = if expr.span.from_expansion() {
+            snippet_with_macro_callsite(cx, expr.span, default)
+        } else {
+            snippet(cx, expr.span, default)
+        };
 
         match expr.kind {
             ast::ExprKind::AddrOf(..)
@@ -153,6 +158,7 @@ impl<'a> Sugg<'a> {
             | ast::ExprKind::Index(..)
             | ast::ExprKind::InlineAsm(..)
             | ast::ExprKind::LlvmInlineAsm(..)
+            | ast::ExprKind::ConstBlock(..)
             | ast::ExprKind::Lit(..)
             | ast::ExprKind::Loop(..)
             | ast::ExprKind::MacCall(..)

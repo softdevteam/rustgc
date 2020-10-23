@@ -126,7 +126,7 @@ impl Qualif for CustomEq {
         // because that component may be part of an enum variant (e.g.,
         // `Option::<NonStructuralMatchTy>::Some`), in which case some values of this type may be
         // structural-match (`Option::None`).
-        let id = cx.tcx.hir().local_def_id_to_hir_id(cx.def_id);
+        let id = cx.tcx.hir().local_def_id_to_hir_id(cx.def_id());
         traits::search_for_structural_match_violation(id, cx.body.span, cx.tcx, ty).is_some()
     }
 
@@ -170,7 +170,7 @@ where
             // Special-case reborrows to be more like a copy of the reference.
             if let &[ref proj_base @ .., ProjectionElem::Deref] = place.projection.as_ref() {
                 let base_ty = Place::ty_from(place.local, proj_base, cx.body, cx.tcx).ty;
-                if let ty::Ref(..) = base_ty.kind {
+                if let ty::Ref(..) = base_ty.kind() {
                     return in_place::<Q, _>(
                         cx,
                         in_local,

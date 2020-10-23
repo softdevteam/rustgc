@@ -1,7 +1,6 @@
 #[doc(primitive = "bool")]
 #[doc(alias = "true")]
 #[doc(alias = "false")]
-//
 /// The boolean type.
 ///
 /// The `bool` represents a value, which could only be either `true` or `false`. If you cast
@@ -12,8 +11,8 @@
 /// `bool` implements various traits, such as [`BitAnd`], [`BitOr`], [`Not`], etc.,
 /// which allow us to perform boolean operations using `&`, `|` and `!`.
 ///
-/// `if` always demands a `bool` value. [`assert!`], being an important macro in testing,
-/// checks whether an expression returns `true`.
+/// `if` always demands a `bool` value. [`assert!`], which is an important macro in testing,
+/// checks whether an expression returns `true` and panics if it isn't.
 ///
 /// ```
 /// let bool_val = true & false | false;
@@ -194,14 +193,48 @@ mod prim_bool {}
 /// # `!` and traits
 ///
 /// When writing your own traits, `!` should have an `impl` whenever there is an obvious `impl`
-/// which doesn't `panic!`. As it turns out, most traits can have an `impl` for `!`. Take [`Debug`]
+/// which doesn't `panic!`. The reason is that functions returning an `impl Trait` where `!`
+/// does not have an `impl` of `Trait` cannot diverge as their only possible code path. In other
+/// words, they can't return `!` from every code path. As an example, this code doesn't compile:
+///
+/// ```compile_fail
+/// use core::ops::Add;
+///
+/// fn foo() -> impl Add<u32> {
+///     unimplemented!()
+/// }
+/// ```
+///
+/// But this code does:
+///
+/// ```
+/// use core::ops::Add;
+///
+/// fn foo() -> impl Add<u32> {
+///     if true {
+///         unimplemented!()
+///     } else {
+///         0
+///     }
+/// }
+/// ```
+///
+/// The reason is that, in the first example, there are many possible types that `!` could coerce
+/// to, because many types implement `Add<u32>`. However, in the second example,
+/// the `else` branch returns a `0`, which the compiler infers from the return type to be of type
+/// `u32`. Since `u32` is a concrete type, `!` can and will be coerced to it. See issue [#36375]
+/// for more information on this quirk of `!`.
+///
+/// [#36375]: https://github.com/rust-lang/rust/issues/36375
+///
+/// As it turns out, though, most traits can have an `impl` for `!`. Take [`Debug`]
 /// for example:
 ///
 /// ```
 /// #![feature(never_type)]
 /// # use std::fmt;
 /// # trait Debug {
-/// # fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+/// #     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 /// # }
 /// impl Debug for ! {
 ///     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -351,6 +384,7 @@ mod prim_char {}
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_unit {}
 
+#[doc(alias = "ptr")]
 #[doc(primitive = "pointer")]
 //
 /// Raw, unsafe pointers, `*const T`, and `*mut T`.
@@ -477,7 +511,7 @@ mod prim_pointer {}
 /// an array. Indeed, this provides most of the API for working with arrays.
 /// Slices have a dynamic size and do not coerce to arrays.
 ///
-/// You can move elements out of an array with a slice pattern. If you want
+/// You can move elements out of an array with a [slice pattern]. If you want
 /// one element, see [`mem::replace`].
 ///
 /// # Examples
@@ -519,7 +553,7 @@ mod prim_pointer {}
 /// for x in &array { }
 /// ```
 ///
-/// You can use a slice pattern to move elements out of an array:
+/// You can use a [slice pattern] to move elements out of an array:
 ///
 /// ```
 /// fn move_away(_: String) { /* Do interesting things. */ }
@@ -534,7 +568,7 @@ mod prim_pointer {}
 /// [`Hash`]: hash::Hash
 /// [`Borrow`]: borrow::Borrow
 /// [`BorrowMut`]: borrow::BorrowMut
-///
+/// [slice pattern]: ../reference/patterns.html#slice-patterns
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_array {}
 
@@ -1083,6 +1117,8 @@ mod prim_ref {}
 ///
 /// For more information and a list of supported ABIs, see [the nomicon's
 /// section on foreign calling conventions][nomicon-abi].
+///
+/// [nomicon-abi]: ../nomicon/ffi.html#foreign-calling-conventions
 ///
 /// ### Variadic functions
 ///

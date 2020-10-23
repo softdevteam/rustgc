@@ -53,6 +53,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "assign_ops",
     },
     Lint {
+        name: "async_yields_async",
+        group: "correctness",
+        desc: "async blocks that return a type that can be awaited",
+        deprecation: None,
+        module: "async_yields_async",
+    },
+    Lint {
         name: "await_holding_lock",
         group: "pedantic",
         desc: "Inside an async function, holding a MutexGuard while calling await",
@@ -103,7 +110,7 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
     },
     Lint {
         name: "borrow_interior_mutable_const",
-        group: "correctness",
+        group: "style",
         desc: "referencing `const` with interior mutability",
         deprecation: None,
         module: "non_copy_const",
@@ -291,6 +298,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "copy_iterator",
     },
     Lint {
+        name: "create_dir",
+        group: "restriction",
+        desc: "calling `std::fs::create_dir` instead of `std::fs::create_dir_all`",
+        deprecation: None,
+        module: "create_dir",
+    },
+    Lint {
         name: "crosspointer_transmute",
         group: "complexity",
         desc: "transmutes that have to or from types that are a pointer to the other",
@@ -320,7 +334,7 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
     },
     Lint {
         name: "declare_interior_mutable_const",
-        group: "correctness",
+        group: "style",
         desc: "declaring `const` with interior mutability",
         deprecation: None,
         module: "non_copy_const",
@@ -368,6 +382,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "derive",
     },
     Lint {
+        name: "disallowed_method",
+        group: "nursery",
+        desc: "use of a disallowed method call",
+        deprecation: None,
+        module: "disallowed_method",
+    },
+    Lint {
         name: "diverging_sub_expression",
         group: "complexity",
         desc: "whether an expression contains a diverging sub expression",
@@ -408,13 +429,6 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         desc: "Warn on unnecessary double parentheses",
         deprecation: None,
         module: "double_parens",
-    },
-    Lint {
-        name: "drop_bounds",
-        group: "correctness",
-        desc: "bounds of the form `T: Drop` are useless",
-        deprecation: None,
-        module: "drop_bounds",
     },
     Lint {
         name: "drop_copy",
@@ -879,6 +893,20 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "attrs",
     },
     Lint {
+        name: "inline_asm_x86_att_syntax",
+        group: "restriction",
+        desc: "prefer Intel x86 assembly syntax",
+        deprecation: None,
+        module: "asm_syntax",
+    },
+    Lint {
+        name: "inline_asm_x86_intel_syntax",
+        group: "restriction",
+        desc: "prefer AT&T x86 assembly syntax",
+        deprecation: None,
+        module: "asm_syntax",
+    },
+    Lint {
         name: "inline_fn_without_body",
         group: "correctness",
         desc: "use of `#[inline]` on trait methods without bodies",
@@ -916,7 +944,7 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
     Lint {
         name: "invalid_atomic_ordering",
         group: "correctness",
-        desc: "usage of invalid atomic ordering in atomic loads/stores and memory fences",
+        desc: "usage of invalid atomic ordering in atomic operations and memory fences",
         deprecation: None,
         module: "atomic_ordering",
     },
@@ -933,6 +961,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         desc: "a comparison involving an upcast which is always true or false",
         deprecation: None,
         module: "types",
+    },
+    Lint {
+        name: "invisible_characters",
+        group: "correctness",
+        desc: "using an invisible character in a string literal, which is confusing",
+        deprecation: None,
+        module: "unicode",
     },
     Lint {
         name: "items_after_statements",
@@ -1131,6 +1166,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "methods",
     },
     Lint {
+        name: "manual_strip",
+        group: "complexity",
+        desc: "suggests using `strip_{prefix,suffix}` over `str::{starts,ends}_with` and slicing",
+        deprecation: None,
+        module: "manual_strip",
+    },
+    Lint {
         name: "manual_swap",
         group: "complexity",
         desc: "manual swap of two variables",
@@ -1157,6 +1199,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         desc: "use of `contains_key` followed by `insert` on a `HashMap` or `BTreeMap`",
         deprecation: None,
         module: "entry",
+    },
+    Lint {
+        name: "map_err_ignore",
+        group: "pedantic",
+        desc: "`map_err` should not ignore the original error",
+        deprecation: None,
+        module: "map_err_ignore",
     },
     Lint {
         name: "map_flatten",
@@ -1705,6 +1754,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         module: "panic_unimplemented",
     },
     Lint {
+        name: "panic_in_result_fn",
+        group: "restriction",
+        desc: "functions of type `Result<..>` that contain `panic!()`, `todo!()` or `unreachable()` or `unimplemented()` ",
+        deprecation: None,
+        module: "panic_in_result_fn",
+    },
+    Lint {
         name: "panic_params",
         group: "style",
         desc: "missing parameters in `panic!` calls",
@@ -1829,6 +1885,13 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         desc: "zipping iterator with a range when `enumerate()` would do",
         deprecation: None,
         module: "ranges",
+    },
+    Lint {
+        name: "rc_buffer",
+        group: "restriction",
+        desc: "shared ownership of a buffer type",
+        deprecation: None,
+        module: "types",
     },
     Lint {
         name: "redundant_allocation",
@@ -2098,7 +2161,7 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
     },
     Lint {
         name: "string_lit_as_bytes",
-        group: "style",
+        group: "nursery",
         desc: "calling `as_bytes` on a string literal instead of using a byte string literal",
         deprecation: None,
         module: "strings",
@@ -2616,7 +2679,7 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
     },
     Lint {
         name: "verbose_bit_mask",
-        group: "style",
+        group: "pedantic",
         desc: "expressions where a bit mask is less readable than the corresponding method call",
         deprecation: None,
         module: "bit_mask",
@@ -2746,13 +2809,6 @@ pub static ref ALL_LINTS: Vec<Lint> = vec![
         desc: "using `0 as *{const, mut} T`",
         deprecation: None,
         module: "misc",
-    },
-    Lint {
-        name: "zero_width_space",
-        group: "correctness",
-        desc: "using a zero-width space in a string literal, which is confusing",
-        deprecation: None,
-        module: "unicode",
     },
     Lint {
         name: "zst_offset",

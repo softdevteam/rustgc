@@ -197,6 +197,8 @@ use rustc_session::config::EntryFnType;
 use rustc_span::source_map::{dummy_spanned, respan, Span, Spanned, DUMMY_SP};
 use smallvec::SmallVec;
 use std::iter;
+use std::ops::Range;
+use std::path::PathBuf;
 
 #[derive(PartialEq)]
 pub enum MonoItemCollectionMode {
@@ -209,9 +211,8 @@ pub enum MonoItemCollectionMode {
 pub struct InliningMap<'tcx> {
     // Maps a source mono item to the range of mono items
     // accessed by it.
-    // The two numbers in the tuple are the start (inclusive) and
-    // end index (exclusive) within the `targets` vecs.
-    index: FxHashMap<MonoItem<'tcx>, (usize, usize)>,
+    // The range selects elements within the `targets` vecs.
+    index: FxHashMap<MonoItem<'tcx>, Range<usize>>,
     targets: Vec<MonoItem<'tcx>>,
 
     // Contains one bit per mono item in the `targets` field. That bit
@@ -244,7 +245,7 @@ impl<'tcx> InliningMap<'tcx> {
         }
 
         let end_index = self.targets.len();
-        assert!(self.index.insert(source, (start_index, end_index)).is_none());
+        assert!(self.index.insert(source, start_index..end_index).is_none());
     }
 
     // Internally iterate over all items referenced by `source` which will be
@@ -253,9 +254,9 @@ impl<'tcx> InliningMap<'tcx> {
     where
         F: FnMut(MonoItem<'tcx>),
     {
-        if let Some(&(start_index, end_index)) = self.index.get(&source) {
-            for (i, candidate) in self.targets[start_index..end_index].iter().enumerate() {
-                if self.inlines.contains(start_index + i) {
+        if let Some(range) = self.index.get(&source) {
+            for (i, candidate) in self.targets[range.clone()].iter().enumerate() {
+                if self.inlines.contains(range.start + i) {
                     f(*candidate);
                 }
             }
@@ -267,8 +268,8 @@ impl<'tcx> InliningMap<'tcx> {
     where
         F: FnMut(MonoItem<'tcx>, &[MonoItem<'tcx>]),
     {
-        for (&accessor, &(start_index, end_index)) in &self.index {
-            f(accessor, &self.targets[start_index..end_index])
+        for (&accessor, range) in &self.index {
+            f(accessor, &self.targets[range.clone()])
         }
     }
 }
@@ -364,8 +365,10 @@ fn collect_items_rec<'tcx>(
 
             recursion_depth_reset = None;
 
-            if let Ok(val) = tcx.const_eval_poly(def_id) {
-                collect_const_value(tcx, val, &mut neighbors);
+            if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
+                for &((), id) in alloc.relocations().values() {
+                    collect_miri(tcx, id, &mut neighbors);
+                }
             }
         }
         MonoItem::Fn(instance) => {
@@ -418,6 +421,40 @@ fn record_accesses<'a, 'tcx: 'a>(
     inlining_map.lock_mut().record_accesses(caller, &accesses);
 }
 
+/// Format instance name that is already known to be too long for rustc.
+/// Show only the first and last 32 characters to avoid blasting
+/// the user's terminal with thousands of lines of type-name.
+///
+/// If the type name is longer than before+after, it will be written to a file.
+fn shrunk_instance_name(
+    tcx: TyCtxt<'tcx>,
+    instance: &Instance<'tcx>,
+    before: usize,
+    after: usize,
+) -> (String, Option<PathBuf>) {
+    let s = instance.to_string();
+
+    // Only use the shrunk version if it's really shorter.
+    // This also avoids the case where before and after slices overlap.
+    if s.chars().nth(before + after + 1).is_some() {
+        // An iterator of all byte positions including the end of the string.
+        let positions = || s.char_indices().map(|(i, _)| i).chain(iter::once(s.len()));
+
+        let shrunk = format!(
+            "{before}...{after}",
+            before = &s[..positions().nth(before).unwrap_or(s.len())],
+            after = &s[positions().rev().nth(after).unwrap_or(0)..],
+        );
+
+        let path = tcx.output_filenames(LOCAL_CRATE).temp_path_ext("long-type.txt", None);
+        let written_to_path = std::fs::write(&path, s).ok().map(|_| path);
+
+        (shrunk, written_to_path)
+    } else {
+        (s, None)
+    }
+}
+
 fn check_recursion_limit<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
@@ -440,12 +477,16 @@ fn check_recursion_limit<'tcx>(
     // more than the recursion limit is assumed to be causing an
     // infinite expansion.
     if !tcx.sess.recursion_limit().value_within_limit(adjusted_recursion_depth) {
-        let error = format!("reached the recursion limit while instantiating `{}`", instance);
+        let (shrunk, written_to_path) = shrunk_instance_name(tcx, &instance, 32, 32);
+        let error = format!("reached the recursion limit while instantiating `{}`", shrunk);
         let mut err = tcx.sess.struct_span_fatal(span, &error);
         err.span_note(
             tcx.def_span(def_id),
             &format!("`{}` defined here", tcx.def_path_str(def_id)),
         );
+        if let Some(path) = written_to_path {
+            err.note(&format!("the full type name has been written to '{}'", path.display()));
+        }
         err.emit();
         FatalError.raise();
     }
@@ -474,29 +515,13 @@ fn check_type_length_limit<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
     //
     // Bail out in these cases to avoid that bad user experience.
     if !tcx.sess.type_length_limit().value_within_limit(type_length) {
-        // The instance name is already known to be too long for rustc.
-        // Show only the first and last 32 characters to avoid blasting
-        // the user's terminal with thousands of lines of type-name.
-        let shrink = |s: String, before: usize, after: usize| {
-            // An iterator of all byte positions including the end of the string.
-            let positions = || s.char_indices().map(|(i, _)| i).chain(iter::once(s.len()));
-
-            let shrunk = format!(
-                "{before}...{after}",
-                before = &s[..positions().nth(before).unwrap_or(s.len())],
-                after = &s[positions().rev().nth(after).unwrap_or(0)..],
-            );
-
-            // Only use the shrunk version if it's really shorter.
-            // This also avoids the case where before and after slices overlap.
-            if shrunk.len() < s.len() { shrunk } else { s }
-        };
-        let msg = format!(
-            "reached the type-length limit while instantiating `{}`",
-            shrink(instance.to_string(), 32, 32)
-        );
+        let (shrunk, written_to_path) = shrunk_instance_name(tcx, &instance, 32, 32);
+        let msg = format!("reached the type-length limit while instantiating `{}`", shrunk);
         let mut diag = tcx.sess.struct_span_fatal(tcx.def_span(instance.def_id()), &msg);
-        diag.note(&format!(
+        if let Some(path) = written_to_path {
+            diag.note(&format!("the full type name has been written to '{}'", path.display()));
+        }
+        diag.help(&format!(
             "consider adding a `#![type_length_limit=\"{}\"]` attribute to your crate",
             type_length
         ));
@@ -575,7 +600,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
             ) => {
                 let source_ty = operand.ty(self.body, self.tcx);
                 let source_ty = self.monomorphize(source_ty);
-                match source_ty.kind {
+                match *source_ty.kind() {
                     ty::Closure(def_id, substs) => {
                         let instance = Instance::resolve_closure(
                             self.tcx,
@@ -716,7 +741,7 @@ fn visit_fn_use<'tcx>(
     source: Span,
     output: &mut Vec<Spanned<MonoItem<'tcx>>>,
 ) {
-    if let ty::FnDef(def_id, substs) = ty.kind {
+    if let ty::FnDef(def_id, substs) = *ty.kind() {
         let instance = if is_direct_call {
             ty::Instance::resolve(tcx, ty::ParamEnv::reveal_all(), def_id, substs).unwrap().unwrap()
         } else {
@@ -853,7 +878,7 @@ fn find_vtable_types_for_unsizing<'tcx>(
                 return false;
             }
             let tail = tcx.struct_tail_erasing_lifetimes(ty, param_env);
-            match tail.kind {
+            match tail.kind() {
                 ty::Foreign(..) => false,
                 ty::Str | ty::Slice(..) | ty::Dynamic(..) => true,
                 _ => bug!("unexpected unsized tail: {:?}", tail),
@@ -866,7 +891,7 @@ fn find_vtable_types_for_unsizing<'tcx>(
         }
     };
 
-    match (&source_ty.kind, &target_ty.kind) {
+    match (&source_ty.kind(), &target_ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
         | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
             ptr_vtable(a, b)
@@ -922,7 +947,7 @@ fn create_mono_items_for_vtable_methods<'tcx>(
 ) {
     assert!(!trait_ty.has_escaping_bound_vars() && !impl_ty.has_escaping_bound_vars());
 
-    if let ty::Dynamic(ref trait_ty, ..) = trait_ty.kind {
+    if let ty::Dynamic(ref trait_ty, ..) = trait_ty.kind() {
         if let Some(principal) = trait_ty.principal() {
             let poly_trait_ref = principal.with_self_ty(tcx, impl_ty);
             assert!(!poly_trait_ref.has_escaping_bound_vars());

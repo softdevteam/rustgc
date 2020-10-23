@@ -26,18 +26,22 @@ use super::{
 
 macro_rules! throw_validation_failure {
     ($where:expr, { $( $what_fmt:expr ),+ } $( expected { $( $expected_fmt:expr ),+ } )?) => {{
-        let mut msg = String::new();
-        msg.push_str("encountered ");
-        write!(&mut msg, $($what_fmt),+).unwrap();
-        let where_ = &$where;
-        if !where_.is_empty() {
-            msg.push_str(" at ");
-            write_path(&mut msg, where_);
-        }
-        $(
-            msg.push_str(", but expected ");
-            write!(&mut msg, $($expected_fmt),+).unwrap();
-        )?
+        let msg = rustc_middle::ty::print::with_no_trimmed_paths(|| {
+            let mut msg = String::new();
+            msg.push_str("encountered ");
+            write!(&mut msg, $($what_fmt),+).unwrap();
+            let where_ = &$where;
+            if !where_.is_empty() {
+                msg.push_str(" at ");
+                write_path(&mut msg, where_);
+            }
+            $(
+                msg.push_str(", but expected ");
+                write!(&mut msg, $($expected_fmt),+).unwrap();
+            )?
+
+            msg
+        });
         throw_ub!(ValidationFailure(msg))
     }};
 }
@@ -210,7 +214,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         match layout.variants {
             Variants::Multiple { tag_field, .. } => {
                 if tag_field == field {
-                    return match layout.ty.kind {
+                    return match layout.ty.kind() {
                         ty::Adt(def, ..) if def.is_enum() => PathElem::EnumTag,
                         ty::Generator(..) => PathElem::GeneratorTag,
                         _ => bug!("non-variant type {:?}", layout.ty),
@@ -221,7 +225,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         }
 
         // Now we know we are projecting to a field, so figure out which one.
-        match layout.ty.kind {
+        match layout.ty.kind() {
             // generators and closures.
             ty::Closure(def_id, _) | ty::Generator(def_id, _, _) => {
                 let mut name = None;
@@ -299,7 +303,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         pointee: TyAndLayout<'tcx>,
     ) -> InterpResult<'tcx> {
         let tail = self.ecx.tcx.struct_tail_erasing_lifetimes(pointee.ty, self.ecx.param_env);
-        match tail.kind {
+        match tail.kind() {
             ty::Dynamic(..) => {
                 let vtable = meta.unwrap_meta();
                 // Direct call to `check_ptr_access_align` checks alignment even on CTFE machines.
@@ -421,25 +425,27 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 let alloc_kind = self.ecx.tcx.get_global_alloc(ptr.alloc_id);
                 if let Some(GlobalAlloc::Static(did)) = alloc_kind {
                     assert!(!self.ecx.tcx.is_thread_local_static(did));
-                    // See const_eval::machine::MemoryExtra::can_access_statics for why
-                    // this check is so important.
-                    // This check is reachable when the const just referenced the static,
-                    // but never read it (so we never entered `before_access_global`).
-                    // We also need to do it here instead of going on to avoid running
-                    // into the `before_access_global` check during validation.
-                    if !self.may_ref_to_static && self.ecx.tcx.is_static(did) {
+                    assert!(self.ecx.tcx.is_static(did));
+                    if self.may_ref_to_static {
+                        // We skip checking other statics. These statics must be sound by
+                        // themselves, and the only way to get broken statics here is by using
+                        // unsafe code.
+                        // The reasons we don't check other statics is twofold. For one, in all
+                        // sound cases, the static was already validated on its own, and second, we
+                        // trigger cycle errors if we try to compute the value of the other static
+                        // and that static refers back to us.
+                        // We might miss const-invalid data,
+                        // but things are still sound otherwise (in particular re: consts
+                        // referring to statics).
+                        return Ok(());
+                    } else {
+                        // See const_eval::machine::MemoryExtra::can_access_statics for why
+                        // this check is so important.
+                        // This check is reachable when the const just referenced the static,
+                        // but never read it (so we never entered `before_access_global`).
                         throw_validation_failure!(self.path,
                             { "a {} pointing to a static variable", kind }
                         );
-                    }
-                    // `extern static` cannot be validated as they have no body.
-                    // FIXME: Statics from other crates are also skipped.
-                    // They might be checked at a different type, but for now we
-                    // want to avoid recursing too deeply.  We might miss const-invalid data,
-                    // but things are still sound otherwise (in particular re: consts
-                    // referring to statics).
-                    if !did.is_local() || self.ecx.tcx.is_foreign_item(did) {
-                        return Ok(());
                     }
                 }
             }
@@ -473,7 +479,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
     ) -> InterpResult<'tcx, bool> {
         // Go over all the primitive types
         let ty = value.layout.ty;
-        match ty.kind {
+        match ty.kind() {
             ty::Bool => {
                 let value = self.ecx.read_scalar(value)?;
                 try_validation!(
@@ -688,7 +694,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
         variant_id: VariantIdx,
         new_op: OpTy<'tcx, M::PointerTag>,
     ) -> InterpResult<'tcx> {
-        let name = match old_op.layout.ty.kind {
+        let name = match old_op.layout.ty.kind() {
             ty::Adt(adt, _) => PathElem::Variant(adt.variants[variant_id].ident.name),
             // Generators also have variants
             ty::Generator(..) => PathElem::GeneratorState(variant_id),
@@ -758,7 +764,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
         op: OpTy<'tcx, M::PointerTag>,
         fields: impl Iterator<Item = InterpResult<'tcx, Self::V>>,
     ) -> InterpResult<'tcx> {
-        match op.layout.ty.kind {
+        match op.layout.ty.kind() {
             ty::Str => {
                 let mplace = op.assert_mem_place(self.ecx); // strings are never immediate
                 let len = mplace.len(self.ecx)?;
@@ -775,7 +781,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
                     // FIXME(wesleywiser) This logic could be extended further to arbitrary structs
                     // or tuples made up of integer/floating point types or inhabited ZSTs with no
                     // padding.
-                    match tys.kind {
+                    match tys.kind() {
                         ty::Int(..) | ty::Uint(..) | ty::Float(..) => true,
                         _ => false,
                     }

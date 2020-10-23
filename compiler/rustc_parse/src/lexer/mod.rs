@@ -1,21 +1,19 @@
 use rustc_ast::ast::AttrStyle;
 use rustc_ast::token::{self, CommentKind, Token, TokenKind};
-use rustc_data_structures::sync::Lrc;
-use rustc_errors::{error_code, Applicability, DiagnosticBuilder, FatalError};
-use rustc_lexer::Base;
-use rustc_lexer::{unescape, RawStrError};
+use rustc_ast::tokenstream::{Spacing, TokenStream};
+use rustc_errors::{error_code, Applicability, DiagnosticBuilder, FatalError, PResult};
+use rustc_lexer::unescape::{self, Mode};
+use rustc_lexer::{Base, DocStyle, RawStrError};
 use rustc_session::parse::ParseSess;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{BytePos, Pos, Span};
 
-use std::char;
 use tracing::debug;
 
 mod tokentrees;
 mod unescape_error_reporting;
 mod unicode_chars;
 
-use rustc_lexer::{unescape::Mode, DocStyle};
 use unescape_error_reporting::{emit_unescape_error, push_escaped_char};
 
 #[derive(Clone, Debug)]
@@ -27,7 +25,17 @@ pub struct UnmatchedBrace {
     pub candidate_span: Option<Span>,
 }
 
-crate struct StringReader<'a> {
+crate fn parse_token_trees<'a>(
+    sess: &'a ParseSess,
+    src: &'a str,
+    start_pos: BytePos,
+    override_span: Option<Span>,
+) -> (PResult<'a, TokenStream>, Vec<UnmatchedBrace>) {
+    StringReader { sess, start_pos, pos: start_pos, end_src_index: src.len(), src, override_span }
+        .into_token_trees()
+}
+
+struct StringReader<'a> {
     sess: &'a ParseSess,
     /// Initial position, read-only.
     start_pos: BytePos,
@@ -36,71 +44,55 @@ crate struct StringReader<'a> {
     /// Stop reading src at this index.
     end_src_index: usize,
     /// Source text to tokenize.
-    src: Lrc<String>,
+    src: &'a str,
     override_span: Option<Span>,
 }
 
 impl<'a> StringReader<'a> {
-    crate fn new(
-        sess: &'a ParseSess,
-        source_file: Lrc<rustc_span::SourceFile>,
-        override_span: Option<Span>,
-    ) -> Self {
-        let src = source_file.src.clone().unwrap_or_else(|| {
-            sess.span_diagnostic
-                .bug(&format!("cannot lex `source_file` without source: {}", source_file.name));
-        });
-
-        StringReader {
-            sess,
-            start_pos: source_file.start_pos,
-            pos: source_file.start_pos,
-            end_src_index: src.len(),
-            src,
-            override_span,
-        }
-    }
-
     fn mk_sp(&self, lo: BytePos, hi: BytePos) -> Span {
         self.override_span.unwrap_or_else(|| Span::with_root_ctxt(lo, hi))
     }
 
-    /// Returns the next token, including trivia like whitespace or comments.
-    fn next_token(&mut self) -> Token {
+    /// Returns the next token, and info about preceding whitespace, if any.
+    fn next_token(&mut self) -> (Spacing, Token) {
+        let mut spacing = Spacing::Joint;
+
+        // Skip `#!` at the start of the file
         let start_src_index = self.src_index(self.pos);
         let text: &str = &self.src[start_src_index..self.end_src_index];
-
-        if text.is_empty() {
-            let span = self.mk_sp(self.pos, self.pos);
-            return Token::new(token::Eof, span);
-        }
-
-        {
-            let is_beginning_of_file = self.pos == self.start_pos;
-            if is_beginning_of_file {
-                if let Some(shebang_len) = rustc_lexer::strip_shebang(text) {
-                    let start = self.pos;
-                    self.pos = self.pos + BytePos::from_usize(shebang_len);
-
-                    let sym = self.symbol_from(start + BytePos::from_usize("#!".len()));
-                    let kind = token::Shebang(sym);
-
-                    let span = self.mk_sp(start, self.pos);
-                    return Token::new(kind, span);
-                }
+        let is_beginning_of_file = self.pos == self.start_pos;
+        if is_beginning_of_file {
+            if let Some(shebang_len) = rustc_lexer::strip_shebang(text) {
+                self.pos = self.pos + BytePos::from_usize(shebang_len);
+                spacing = Spacing::Alone;
             }
         }
 
-        let token = rustc_lexer::first_token(text);
+        // Skip trivial (whitespace & comments) tokens
+        loop {
+            let start_src_index = self.src_index(self.pos);
+            let text: &str = &self.src[start_src_index..self.end_src_index];
 
-        let start = self.pos;
-        self.pos = self.pos + BytePos::from_usize(token.len);
+            if text.is_empty() {
+                let span = self.mk_sp(self.pos, self.pos);
+                return (spacing, Token::new(token::Eof, span));
+            }
 
-        debug!("try_next_token: {:?}({:?})", token.kind, self.str_from(start));
+            let token = rustc_lexer::first_token(text);
 
-        let kind = self.cook_lexer_token(token.kind, start);
-        let span = self.mk_sp(start, self.pos);
-        Token::new(kind, span)
+            let start = self.pos;
+            self.pos = self.pos + BytePos::from_usize(token.len);
+
+            debug!("next_token: {:?}({:?})", token.kind, self.str_from(start));
+
+            match self.cook_lexer_token(token.kind, start) {
+                Some(kind) => {
+                    let span = self.mk_sp(start, self.pos);
+                    return (spacing, Token::new(kind, span));
+                }
+                None => spacing = Spacing::Alone,
+            }
+        }
     }
 
     /// Report a fatal lexical error with a given span.
@@ -140,19 +132,16 @@ impl<'a> StringReader<'a> {
     /// Turns simple `rustc_lexer::TokenKind` enum into a rich
     /// `librustc_ast::TokenKind`. This turns strings into interned
     /// symbols and runs additional validation.
-    fn cook_lexer_token(&self, token: rustc_lexer::TokenKind, start: BytePos) -> TokenKind {
-        match token {
+    fn cook_lexer_token(&self, token: rustc_lexer::TokenKind, start: BytePos) -> Option<TokenKind> {
+        Some(match token {
             rustc_lexer::TokenKind::LineComment { doc_style } => {
-                match doc_style {
-                    Some(doc_style) => {
-                        // Opening delimiter of the length 3 is not included into the symbol.
-                        let content_start = start + BytePos(3);
-                        let content = self.str_from(content_start);
+                // Skip non-doc comments
+                let doc_style = doc_style?;
 
-                        self.cook_doc_comment(content_start, content, CommentKind::Line, doc_style)
-                    }
-                    None => token::Comment,
-                }
+                // Opening delimiter of the length 3 is not included into the symbol.
+                let content_start = start + BytePos(3);
+                let content = self.str_from(content_start);
+                self.cook_doc_comment(content_start, content, CommentKind::Line, doc_style)
             }
             rustc_lexer::TokenKind::BlockComment { doc_style, terminated } => {
                 if !terminated {
@@ -171,20 +160,18 @@ impl<'a> StringReader<'a> {
                         .emit();
                     FatalError.raise();
                 }
-                match doc_style {
-                    Some(doc_style) => {
-                        // Opening delimiter of the length 3 and closing delimiter of the length 2
-                        // are not included into the symbol.
-                        let content_start = start + BytePos(3);
-                        let content_end = self.pos - BytePos(if terminated { 2 } else { 0 });
-                        let content = self.str_from_to(content_start, content_end);
 
-                        self.cook_doc_comment(content_start, content, CommentKind::Block, doc_style)
-                    }
-                    None => token::Comment,
-                }
+                // Skip non-doc comments
+                let doc_style = doc_style?;
+
+                // Opening delimiter of the length 3 and closing delimiter of the length 2
+                // are not included into the symbol.
+                let content_start = start + BytePos(3);
+                let content_end = self.pos - BytePos(if terminated { 2 } else { 0 });
+                let content = self.str_from_to(content_start, content_end);
+                self.cook_doc_comment(content_start, content, CommentKind::Block, doc_style)
             }
-            rustc_lexer::TokenKind::Whitespace => token::Whitespace,
+            rustc_lexer::TokenKind::Whitespace => return None,
             rustc_lexer::TokenKind::Ident | rustc_lexer::TokenKind::RawIdent => {
                 let is_raw_ident = token == rustc_lexer::TokenKind::RawIdent;
                 let mut ident_start = start;
@@ -282,12 +269,11 @@ impl<'a> StringReader<'a> {
                 // this should be inside `rustc_lexer`. However, we should first remove compound
                 // tokens like `<<` from `rustc_lexer`, and then add fancier error recovery to it,
                 // as there will be less overall work to do this way.
-                let token = unicode_chars::check_for_substitution(self, start, c, &mut err)
-                    .unwrap_or_else(|| token::Unknown(self.symbol_from(start)));
+                let token = unicode_chars::check_for_substitution(self, start, c, &mut err);
                 err.emit();
-                token
+                token?
             }
-        }
+        })
     }
 
     fn cook_doc_comment(
@@ -448,12 +434,6 @@ impl<'a> StringReader<'a> {
     /// meaning the slice does not include the character `self.ch`.
     fn str_from(&self, start: BytePos) -> &str {
         self.str_from_to(start, self.pos)
-    }
-
-    /// Creates a Symbol from a given offset to the current offset.
-    fn symbol_from(&self, start: BytePos) -> Symbol {
-        debug!("taking an ident from {:?} to {:?}", start, self.pos);
-        Symbol::intern(self.str_from(start))
     }
 
     /// As symbol_from, with an explicit endpoint.

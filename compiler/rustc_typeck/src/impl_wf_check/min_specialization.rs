@@ -337,6 +337,7 @@ fn check_predicates<'tcx>(
             infcx,
             tcx.param_env(impl1_def_id),
             tcx.hir().local_def_id_to_hir_id(impl1_def_id),
+            0,
             arg,
             span,
         ) {
@@ -405,6 +406,7 @@ fn trait_predicate_kind<'tcx>(
         | ty::PredicateAtom::ObjectSafe(_)
         | ty::PredicateAtom::ClosureKind(..)
         | ty::PredicateAtom::ConstEvaluatable(..)
-        | ty::PredicateAtom::ConstEquate(..) => None,
+        | ty::PredicateAtom::ConstEquate(..)
+        | ty::PredicateAtom::TypeWellFormedFromEnv(..) => None,
     }
 }

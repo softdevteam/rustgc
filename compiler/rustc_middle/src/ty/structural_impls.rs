@@ -5,7 +5,7 @@
 use crate::mir::interpret;
 use crate::mir::ProjectionKind;
 use crate::ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
-use crate::ty::print::{FmtPrinter, Printer};
+use crate::ty::print::{with_no_trimmed_paths, FmtPrinter, Printer};
 use crate::ty::{self, InferConst, Lift, Ty, TyCtxt};
 use rustc_hir as hir;
 use rustc_hir::def::Namespace;
@@ -20,7 +20,9 @@ use std::sync::Arc;
 impl fmt::Debug for ty::TraitDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         ty::tls::with(|tcx| {
-            FmtPrinter::new(tcx, f, Namespace::TypeNS).print_def_path(self.def_id, &[])?;
+            with_no_trimmed_paths(|| {
+                FmtPrinter::new(tcx, f, Namespace::TypeNS).print_def_path(self.def_id, &[])
+            })?;
             Ok(())
         })
     }
@@ -29,7 +31,9 @@ impl fmt::Debug for ty::TraitDef {
 impl fmt::Debug for ty::AdtDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         ty::tls::with(|tcx| {
-            FmtPrinter::new(tcx, f, Namespace::TypeNS).print_def_path(self.did, &[])?;
+            with_no_trimmed_paths(|| {
+                FmtPrinter::new(tcx, f, Namespace::TypeNS).print_def_path(self.did, &[])
+            })?;
             Ok(())
         })
     }
@@ -50,7 +54,7 @@ impl fmt::Debug for ty::UpvarBorrow<'tcx> {
 
 impl fmt::Debug for ty::ExistentialTraitRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        with_no_trimmed_paths(|| fmt::Display::fmt(self, f))
     }
 }
 
@@ -183,13 +187,13 @@ impl fmt::Debug for ty::FloatVarValue {
 
 impl fmt::Debug for ty::TraitRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        with_no_trimmed_paths(|| fmt::Display::fmt(self, f))
     }
 }
 
 impl fmt::Debug for Ty<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        with_no_trimmed_paths(|| fmt::Display::fmt(self, f))
     }
 }
 
@@ -256,6 +260,9 @@ impl fmt::Debug for ty::PredicateAtom<'tcx> {
                 write!(f, "ConstEvaluatable({:?}, {:?})", def_id, substs)
             }
             ty::PredicateAtom::ConstEquate(c1, c2) => write!(f, "ConstEquate({:?}, {:?})", c1, c2),
+            ty::PredicateAtom::TypeWellFormedFromEnv(ty) => {
+                write!(f, "TypeWellFormedFromEnv({:?})", ty)
+            }
         }
     }
 }
@@ -325,24 +332,23 @@ CloneTypeFoldableAndLiftImpls! {
 // FIXME(eddyb) replace all the uses of `Option::map` with `?`.
 impl<'tcx, A: Lift<'tcx>, B: Lift<'tcx>> Lift<'tcx> for (A, B) {
     type Lifted = (A::Lifted, B::Lifted);
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.0).and_then(|a| tcx.lift(&self.1).map(|b| (a, b)))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        Some((tcx.lift(self.0)?, tcx.lift(self.1)?))
     }
 }
 
 impl<'tcx, A: Lift<'tcx>, B: Lift<'tcx>, C: Lift<'tcx>> Lift<'tcx> for (A, B, C) {
     type Lifted = (A::Lifted, B::Lifted, C::Lifted);
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.0)
-            .and_then(|a| tcx.lift(&self.1).and_then(|b| tcx.lift(&self.2).map(|c| (a, b, c))))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        Some((tcx.lift(self.0)?, tcx.lift(self.1)?, tcx.lift(self.2)?))
     }
 }
 
 impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Option<T> {
     type Lifted = Option<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
-            Some(ref x) => tcx.lift(x).map(Some),
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
+            Some(x) => tcx.lift(x).map(Some),
             None => Some(None),
         }
     }
@@ -350,89 +356,72 @@ impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Option<T> {
 
 impl<'tcx, T: Lift<'tcx>, E: Lift<'tcx>> Lift<'tcx> for Result<T, E> {
     type Lifted = Result<T::Lifted, E::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
-            Ok(ref x) => tcx.lift(x).map(Ok),
-            Err(ref e) => tcx.lift(e).map(Err),
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
+            Ok(x) => tcx.lift(x).map(Ok),
+            Err(e) => tcx.lift(e).map(Err),
         }
     }
 }
 
 impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Box<T> {
     type Lifted = Box<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&**self).map(Box::new)
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(*self).map(Box::new)
     }
 }
 
-impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Rc<T> {
+impl<'tcx, T: Lift<'tcx> + Clone> Lift<'tcx> for Rc<T> {
     type Lifted = Rc<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&**self).map(Rc::new)
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.as_ref().clone()).map(Rc::new)
     }
 }
 
-impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Arc<T> {
+impl<'tcx, T: Lift<'tcx> + Clone> Lift<'tcx> for Arc<T> {
     type Lifted = Arc<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&**self).map(Arc::new)
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.as_ref().clone()).map(Arc::new)
     }
 }
-
-impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for [T] {
-    type Lifted = Vec<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        // type annotation needed to inform `projection_must_outlive`
-        let mut result: Vec<<T as Lift<'tcx>>::Lifted> = Vec::with_capacity(self.len());
-        for x in self {
-            if let Some(value) = tcx.lift(x) {
-                result.push(value);
-            } else {
-                return None;
-            }
-        }
-        Some(result)
-    }
-}
-
 impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for Vec<T> {
     type Lifted = Vec<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self[..])
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        self.into_iter().map(|v| tcx.lift(v)).collect()
     }
 }
 
 impl<'tcx, I: Idx, T: Lift<'tcx>> Lift<'tcx> for IndexVec<I, T> {
     type Lifted = IndexVec<I, T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        self.iter().map(|e| tcx.lift(e)).collect()
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        self.into_iter().map(|e| tcx.lift(e)).collect()
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::TraitRef<'a> {
     type Lifted = ty::TraitRef<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.substs).map(|substs| ty::TraitRef { def_id: self.def_id, substs })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.substs).map(|substs| ty::TraitRef { def_id: self.def_id, substs })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ExistentialTraitRef<'a> {
     type Lifted = ty::ExistentialTraitRef<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.substs).map(|substs| ty::ExistentialTraitRef { def_id: self.def_id, substs })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.substs).map(|substs| ty::ExistentialTraitRef { def_id: self.def_id, substs })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ExistentialPredicate<'a> {
     type Lifted = ty::ExistentialPredicate<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         match self {
             ty::ExistentialPredicate::Trait(x) => tcx.lift(x).map(ty::ExistentialPredicate::Trait),
             ty::ExistentialPredicate::Projection(x) => {
                 tcx.lift(x).map(ty::ExistentialPredicate::Projection)
             }
             ty::ExistentialPredicate::AutoTrait(def_id) => {
-                Some(ty::ExistentialPredicate::AutoTrait(*def_id))
+                Some(ty::ExistentialPredicate::AutoTrait(def_id))
             }
         }
     }
@@ -440,15 +429,15 @@ impl<'a, 'tcx> Lift<'tcx> for ty::ExistentialPredicate<'a> {
 
 impl<'a, 'tcx> Lift<'tcx> for ty::TraitPredicate<'a> {
     type Lifted = ty::TraitPredicate<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<ty::TraitPredicate<'tcx>> {
-        tcx.lift(&self.trait_ref).map(|trait_ref| ty::TraitPredicate { trait_ref })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<ty::TraitPredicate<'tcx>> {
+        tcx.lift(self.trait_ref).map(|trait_ref| ty::TraitPredicate { trait_ref })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::SubtypePredicate<'a> {
     type Lifted = ty::SubtypePredicate<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<ty::SubtypePredicate<'tcx>> {
-        tcx.lift(&(self.a, self.b)).map(|(a, b)| ty::SubtypePredicate {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<ty::SubtypePredicate<'tcx>> {
+        tcx.lift((self.a, self.b)).map(|(a, b)| ty::SubtypePredicate {
             a_is_expected: self.a_is_expected,
             a,
             b,
@@ -458,33 +447,33 @@ impl<'a, 'tcx> Lift<'tcx> for ty::SubtypePredicate<'a> {
 
 impl<'tcx, A: Copy + Lift<'tcx>, B: Copy + Lift<'tcx>> Lift<'tcx> for ty::OutlivesPredicate<A, B> {
     type Lifted = ty::OutlivesPredicate<A::Lifted, B::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&(self.0, self.1)).map(|(a, b)| ty::OutlivesPredicate(a, b))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift((self.0, self.1)).map(|(a, b)| ty::OutlivesPredicate(a, b))
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ProjectionTy<'a> {
     type Lifted = ty::ProjectionTy<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<ty::ProjectionTy<'tcx>> {
-        tcx.lift(&self.substs)
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<ty::ProjectionTy<'tcx>> {
+        tcx.lift(self.substs)
             .map(|substs| ty::ProjectionTy { item_def_id: self.item_def_id, substs })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ProjectionPredicate<'a> {
     type Lifted = ty::ProjectionPredicate<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<ty::ProjectionPredicate<'tcx>> {
-        tcx.lift(&(self.projection_ty, self.ty))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<ty::ProjectionPredicate<'tcx>> {
+        tcx.lift((self.projection_ty, self.ty))
             .map(|(projection_ty, ty)| ty::ProjectionPredicate { projection_ty, ty })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ExistentialProjection<'a> {
     type Lifted = ty::ExistentialProjection<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.substs).map(|substs| ty::ExistentialProjection {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.substs).map(|substs| ty::ExistentialProjection {
             substs,
-            ty: tcx.lift(&self.ty).expect("type must lift when substs do"),
+            ty: tcx.lift(self.ty).expect("type must lift when substs do"),
             item_def_id: self.item_def_id,
         })
     }
@@ -492,7 +481,7 @@ impl<'a, 'tcx> Lift<'tcx> for ty::ExistentialProjection<'a> {
 
 impl<'a, 'tcx> Lift<'tcx> for ty::PredicateKind<'a> {
     type Lifted = ty::PredicateKind<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         match self {
             ty::PredicateKind::ForAll(binder) => tcx.lift(binder).map(ty::PredicateKind::ForAll),
             ty::PredicateKind::Atom(atom) => tcx.lift(atom).map(ty::PredicateKind::Atom),
@@ -502,24 +491,24 @@ impl<'a, 'tcx> Lift<'tcx> for ty::PredicateKind<'a> {
 
 impl<'a, 'tcx> Lift<'tcx> for ty::PredicateAtom<'a> {
     type Lifted = ty::PredicateAtom<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
-            ty::PredicateAtom::Trait(ref data, constness) => {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
+            ty::PredicateAtom::Trait(data, constness) => {
                 tcx.lift(data).map(|data| ty::PredicateAtom::Trait(data, constness))
             }
-            ty::PredicateAtom::Subtype(ref data) => tcx.lift(data).map(ty::PredicateAtom::Subtype),
-            ty::PredicateAtom::RegionOutlives(ref data) => {
+            ty::PredicateAtom::Subtype(data) => tcx.lift(data).map(ty::PredicateAtom::Subtype),
+            ty::PredicateAtom::RegionOutlives(data) => {
                 tcx.lift(data).map(ty::PredicateAtom::RegionOutlives)
             }
-            ty::PredicateAtom::TypeOutlives(ref data) => {
+            ty::PredicateAtom::TypeOutlives(data) => {
                 tcx.lift(data).map(ty::PredicateAtom::TypeOutlives)
             }
-            ty::PredicateAtom::Projection(ref data) => {
+            ty::PredicateAtom::Projection(data) => {
                 tcx.lift(data).map(ty::PredicateAtom::Projection)
             }
-            ty::PredicateAtom::WellFormed(ty) => tcx.lift(&ty).map(ty::PredicateAtom::WellFormed),
+            ty::PredicateAtom::WellFormed(ty) => tcx.lift(ty).map(ty::PredicateAtom::WellFormed),
             ty::PredicateAtom::ClosureKind(closure_def_id, closure_substs, kind) => {
-                tcx.lift(&closure_substs).map(|closure_substs| {
+                tcx.lift(closure_substs).map(|closure_substs| {
                     ty::PredicateAtom::ClosureKind(closure_def_id, closure_substs, kind)
                 })
             }
@@ -527,10 +516,13 @@ impl<'a, 'tcx> Lift<'tcx> for ty::PredicateAtom<'a> {
                 Some(ty::PredicateAtom::ObjectSafe(trait_def_id))
             }
             ty::PredicateAtom::ConstEvaluatable(def_id, substs) => {
-                tcx.lift(&substs).map(|substs| ty::PredicateAtom::ConstEvaluatable(def_id, substs))
+                tcx.lift(substs).map(|substs| ty::PredicateAtom::ConstEvaluatable(def_id, substs))
             }
             ty::PredicateAtom::ConstEquate(c1, c2) => {
-                tcx.lift(&(c1, c2)).map(|(c1, c2)| ty::PredicateAtom::ConstEquate(c1, c2))
+                tcx.lift((c1, c2)).map(|(c1, c2)| ty::PredicateAtom::ConstEquate(c1, c2))
+            }
+            ty::PredicateAtom::TypeWellFormedFromEnv(ty) => {
+                tcx.lift(ty).map(ty::PredicateAtom::TypeWellFormedFromEnv)
             }
         }
     }
@@ -538,61 +530,62 @@ impl<'a, 'tcx> Lift<'tcx> for ty::PredicateAtom<'a> {
 
 impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for ty::Binder<T> {
     type Lifted = ty::Binder<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(self.as_ref().skip_binder()).map(ty::Binder::bind)
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        self.map_bound(|v| tcx.lift(v)).transpose()
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ParamEnv<'a> {
     type Lifted = ty::ParamEnv<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.caller_bounds())
-            .map(|caller_bounds| ty::ParamEnv::new(caller_bounds, self.reveal(), self.def_id))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.caller_bounds())
+            .map(|caller_bounds| ty::ParamEnv::new(caller_bounds, self.reveal()))
     }
 }
 
 impl<'a, 'tcx, T: Lift<'tcx>> Lift<'tcx> for ty::ParamEnvAnd<'a, T> {
     type Lifted = ty::ParamEnvAnd<'tcx, T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.param_env).and_then(|param_env| {
-            tcx.lift(&self.value).map(|value| ty::ParamEnvAnd { param_env, value })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.param_env).and_then(|param_env| {
+            tcx.lift(self.value).map(|value| ty::ParamEnvAnd { param_env, value })
         })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::ClosureSubsts<'a> {
     type Lifted = ty::ClosureSubsts<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.substs).map(|substs| ty::ClosureSubsts { substs })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.substs).map(|substs| ty::ClosureSubsts { substs })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::GeneratorSubsts<'a> {
     type Lifted = ty::GeneratorSubsts<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.substs).map(|substs| ty::GeneratorSubsts { substs })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.substs).map(|substs| ty::GeneratorSubsts { substs })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::Adjustment<'a> {
     type Lifted = ty::adjustment::Adjustment<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.kind).and_then(|kind| {
-            tcx.lift(&self.target).map(|target| ty::adjustment::Adjustment { kind, target })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        let ty::adjustment::Adjustment { kind, target } = self;
+        tcx.lift(kind).and_then(|kind| {
+            tcx.lift(target).map(|target| ty::adjustment::Adjustment { kind, target })
         })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::Adjust<'a> {
     type Lifted = ty::adjustment::Adjust<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
             ty::adjustment::Adjust::NeverToAny => Some(ty::adjustment::Adjust::NeverToAny),
             ty::adjustment::Adjust::Pointer(ptr) => Some(ty::adjustment::Adjust::Pointer(ptr)),
-            ty::adjustment::Adjust::Deref(ref overloaded) => {
+            ty::adjustment::Adjust::Deref(overloaded) => {
                 tcx.lift(overloaded).map(ty::adjustment::Adjust::Deref)
             }
-            ty::adjustment::Adjust::Borrow(ref autoref) => {
+            ty::adjustment::Adjust::Borrow(autoref) => {
                 tcx.lift(autoref).map(ty::adjustment::Adjust::Borrow)
             }
         }
@@ -601,18 +594,21 @@ impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::Adjust<'a> {
 
 impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::OverloadedDeref<'a> {
     type Lifted = ty::adjustment::OverloadedDeref<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.region)
-            .map(|region| ty::adjustment::OverloadedDeref { region, mutbl: self.mutbl })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.region).map(|region| ty::adjustment::OverloadedDeref {
+            region,
+            mutbl: self.mutbl,
+            span: self.span,
+        })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::AutoBorrow<'a> {
     type Lifted = ty::adjustment::AutoBorrow<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
             ty::adjustment::AutoBorrow::Ref(r, m) => {
-                tcx.lift(&r).map(|r| ty::adjustment::AutoBorrow::Ref(r, m))
+                tcx.lift(r).map(|r| ty::adjustment::AutoBorrow::Ref(r, m))
             }
             ty::adjustment::AutoBorrow::RawPtr(m) => Some(ty::adjustment::AutoBorrow::RawPtr(m)),
         }
@@ -621,16 +617,16 @@ impl<'a, 'tcx> Lift<'tcx> for ty::adjustment::AutoBorrow<'a> {
 
 impl<'a, 'tcx> Lift<'tcx> for ty::GenSig<'a> {
     type Lifted = ty::GenSig<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&(self.resume_ty, self.yield_ty, self.return_ty))
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift((self.resume_ty, self.yield_ty, self.return_ty))
             .map(|(resume_ty, yield_ty, return_ty)| ty::GenSig { resume_ty, yield_ty, return_ty })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::FnSig<'a> {
     type Lifted = ty::FnSig<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.inputs_and_output).map(|x| ty::FnSig {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(self.inputs_and_output).map(|x| ty::FnSig {
             inputs_and_output: x,
             c_variadic: self.c_variadic,
             unsafety: self.unsafety,
@@ -641,19 +637,20 @@ impl<'a, 'tcx> Lift<'tcx> for ty::FnSig<'a> {
 
 impl<'tcx, T: Lift<'tcx>> Lift<'tcx> for ty::error::ExpectedFound<T> {
     type Lifted = ty::error::ExpectedFound<T::Lifted>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        tcx.lift(&self.expected).and_then(|expected| {
-            tcx.lift(&self.found).map(|found| ty::error::ExpectedFound { expected, found })
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        let ty::error::ExpectedFound { expected, found } = self;
+        tcx.lift(expected).and_then(|expected| {
+            tcx.lift(found).map(|found| ty::error::ExpectedFound { expected, found })
         })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::error::TypeError<'a> {
     type Lifted = ty::error::TypeError<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         use crate::ty::error::TypeError::*;
 
-        Some(match *self {
+        Some(match self {
             Mismatch => Mismatch,
             UnsafetyMismatch(x) => UnsafetyMismatch(x),
             AbiMismatch(x) => AbiMismatch(x),
@@ -662,50 +659,51 @@ impl<'a, 'tcx> Lift<'tcx> for ty::error::TypeError<'a> {
             FixedArraySize(x) => FixedArraySize(x),
             ArgCount => ArgCount,
             RegionsDoesNotOutlive(a, b) => {
-                return tcx.lift(&(a, b)).map(|(a, b)| RegionsDoesNotOutlive(a, b));
+                return tcx.lift((a, b)).map(|(a, b)| RegionsDoesNotOutlive(a, b));
             }
             RegionsInsufficientlyPolymorphic(a, b) => {
-                return tcx.lift(&b).map(|b| RegionsInsufficientlyPolymorphic(a, b));
+                return tcx.lift(b).map(|b| RegionsInsufficientlyPolymorphic(a, b));
             }
             RegionsOverlyPolymorphic(a, b) => {
-                return tcx.lift(&b).map(|b| RegionsOverlyPolymorphic(a, b));
+                return tcx.lift(b).map(|b| RegionsOverlyPolymorphic(a, b));
             }
             RegionsPlaceholderMismatch => RegionsPlaceholderMismatch,
             IntMismatch(x) => IntMismatch(x),
             FloatMismatch(x) => FloatMismatch(x),
             Traits(x) => Traits(x),
             VariadicMismatch(x) => VariadicMismatch(x),
-            CyclicTy(t) => return tcx.lift(&t).map(|t| CyclicTy(t)),
+            CyclicTy(t) => return tcx.lift(t).map(|t| CyclicTy(t)),
+            CyclicConst(ct) => return tcx.lift(ct).map(|ct| CyclicConst(ct)),
             ProjectionMismatched(x) => ProjectionMismatched(x),
-            Sorts(ref x) => return tcx.lift(x).map(Sorts),
-            ExistentialMismatch(ref x) => return tcx.lift(x).map(ExistentialMismatch),
-            ConstMismatch(ref x) => return tcx.lift(x).map(ConstMismatch),
+            Sorts(x) => return tcx.lift(x).map(Sorts),
+            ExistentialMismatch(x) => return tcx.lift(x).map(ExistentialMismatch),
+            ConstMismatch(x) => return tcx.lift(x).map(ConstMismatch),
             IntrinsicCast => IntrinsicCast,
-            TargetFeatureCast(ref x) => TargetFeatureCast(*x),
-            ObjectUnsafeCoercion(ref x) => return tcx.lift(x).map(ObjectUnsafeCoercion),
+            TargetFeatureCast(x) => TargetFeatureCast(x),
+            ObjectUnsafeCoercion(x) => return tcx.lift(x).map(ObjectUnsafeCoercion),
         })
     }
 }
 
 impl<'a, 'tcx> Lift<'tcx> for ty::InstanceDef<'a> {
     type Lifted = ty::InstanceDef<'tcx>;
-    fn lift_to_tcx(&self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match *self {
+    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self {
             ty::InstanceDef::Item(def_id) => Some(ty::InstanceDef::Item(def_id)),
             ty::InstanceDef::VtableShim(def_id) => Some(ty::InstanceDef::VtableShim(def_id)),
             ty::InstanceDef::ReifyShim(def_id) => Some(ty::InstanceDef::ReifyShim(def_id)),
             ty::InstanceDef::Intrinsic(def_id) => Some(ty::InstanceDef::Intrinsic(def_id)),
-            ty::InstanceDef::FnPtrShim(def_id, ref ty) => {
+            ty::InstanceDef::FnPtrShim(def_id, ty) => {
                 Some(ty::InstanceDef::FnPtrShim(def_id, tcx.lift(ty)?))
             }
             ty::InstanceDef::Virtual(def_id, n) => Some(ty::InstanceDef::Virtual(def_id, n)),
             ty::InstanceDef::ClosureOnceShim { call_once } => {
                 Some(ty::InstanceDef::ClosureOnceShim { call_once })
             }
-            ty::InstanceDef::DropGlue(def_id, ref ty) => {
+            ty::InstanceDef::DropGlue(def_id, ty) => {
                 Some(ty::InstanceDef::DropGlue(def_id, tcx.lift(ty)?))
             }
-            ty::InstanceDef::CloneShim(def_id, ref ty) => {
+            ty::InstanceDef::CloneShim(def_id, ty) => {
                 Some(ty::InstanceDef::CloneShim(def_id, tcx.lift(ty)?))
             }
         }
@@ -919,25 +917,25 @@ impl<'tcx> TypeFoldable<'tcx> for interpret::GlobalId<'tcx> {
 
 impl<'tcx> TypeFoldable<'tcx> for Ty<'tcx> {
     fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
-        let kind = match self.kind {
+        let kind = match self.kind() {
             ty::RawPtr(tm) => ty::RawPtr(tm.fold_with(folder)),
             ty::Array(typ, sz) => ty::Array(typ.fold_with(folder), sz.fold_with(folder)),
             ty::Slice(typ) => ty::Slice(typ.fold_with(folder)),
-            ty::Adt(tid, substs) => ty::Adt(tid, substs.fold_with(folder)),
+            ty::Adt(tid, substs) => ty::Adt(*tid, substs.fold_with(folder)),
             ty::Dynamic(ref trait_ty, ref region) => {
                 ty::Dynamic(trait_ty.fold_with(folder), region.fold_with(folder))
             }
             ty::Tuple(ts) => ty::Tuple(ts.fold_with(folder)),
-            ty::FnDef(def_id, substs) => ty::FnDef(def_id, substs.fold_with(folder)),
+            ty::FnDef(def_id, substs) => ty::FnDef(*def_id, substs.fold_with(folder)),
             ty::FnPtr(f) => ty::FnPtr(f.fold_with(folder)),
-            ty::Ref(ref r, ty, mutbl) => ty::Ref(r.fold_with(folder), ty.fold_with(folder), mutbl),
+            ty::Ref(ref r, ty, mutbl) => ty::Ref(r.fold_with(folder), ty.fold_with(folder), *mutbl),
             ty::Generator(did, substs, movability) => {
-                ty::Generator(did, substs.fold_with(folder), movability)
+                ty::Generator(*did, substs.fold_with(folder), *movability)
             }
             ty::GeneratorWitness(types) => ty::GeneratorWitness(types.fold_with(folder)),
-            ty::Closure(did, substs) => ty::Closure(did, substs.fold_with(folder)),
+            ty::Closure(did, substs) => ty::Closure(*did, substs.fold_with(folder)),
             ty::Projection(ref data) => ty::Projection(data.fold_with(folder)),
-            ty::Opaque(did, substs) => ty::Opaque(did, substs.fold_with(folder)),
+            ty::Opaque(did, substs) => ty::Opaque(*did, substs.fold_with(folder)),
 
             ty::Bool
             | ty::Char
@@ -954,7 +952,7 @@ impl<'tcx> TypeFoldable<'tcx> for Ty<'tcx> {
             | ty::Foreign(..) => return self,
         };
 
-        if self.kind == kind { self } else { folder.tcx().mk_ty(kind) }
+        if *self.kind() == kind { self } else { folder.tcx().mk_ty(kind) }
     }
 
     fn fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
@@ -962,7 +960,7 @@ impl<'tcx> TypeFoldable<'tcx> for Ty<'tcx> {
     }
 
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> bool {
-        match self.kind {
+        match self.kind() {
             ty::RawPtr(ref tm) => tm.visit_with(visitor),
             ty::Array(typ, sz) => typ.visit_with(visitor) || sz.visit_with(visitor),
             ty::Slice(typ) => typ.visit_with(visitor),

@@ -42,48 +42,48 @@ rustc_queries! {
     }
 
     Other {
-        // Represents crate as a whole (as distinct from the top-level crate module).
-        // If you call `hir_crate` (e.g., indirectly by calling `tcx.hir().krate()`),
-        // we will have to assume that any change means that you need to be recompiled.
-        // This is because the `hir_crate` query gives you access to all other items.
-        // To avoid this fate, do not call `tcx.hir().krate()`; instead,
-        // prefer wrappers like `tcx.visit_all_items_in_krate()`.
+        /// Represents crate as a whole (as distinct from the top-level crate module).
+        /// If you call `hir_crate` (e.g., indirectly by calling `tcx.hir().krate()`),
+        /// we will have to assume that any change means that you need to be recompiled.
+        /// This is because the `hir_crate` query gives you access to all other items.
+        /// To avoid this fate, do not call `tcx.hir().krate()`; instead,
+        /// prefer wrappers like `tcx.visit_all_items_in_krate()`.
         query hir_crate(key: CrateNum) -> &'tcx Crate<'tcx> {
             eval_always
             no_hash
             desc { "get the crate HIR" }
         }
 
-        // The indexed HIR. This can be conveniently accessed by `tcx.hir()`.
-        // Avoid calling this query directly.
+        /// The indexed HIR. This can be conveniently accessed by `tcx.hir()`.
+        /// Avoid calling this query directly.
         query index_hir(_: CrateNum) -> &'tcx map::IndexedHir<'tcx> {
             eval_always
             no_hash
             desc { "index HIR" }
         }
 
-        // The items in a module.
-        //
-        // This can be conveniently accessed by `tcx.hir().visit_item_likes_in_module`.
-        // Avoid calling this query directly.
+        /// The items in a module.
+        ///
+        /// This can be conveniently accessed by `tcx.hir().visit_item_likes_in_module`.
+        /// Avoid calling this query directly.
         query hir_module_items(key: LocalDefId) -> &'tcx hir::ModuleItems {
             eval_always
             desc { |tcx| "HIR module items in `{}`", tcx.def_path_str(key.to_def_id()) }
         }
 
-        // Gives access to the HIR node for the HIR owner `key`.
-        //
-        // This can be conveniently accessed by methods on `tcx.hir()`.
-        // Avoid calling this query directly.
+        /// Gives access to the HIR node for the HIR owner `key`.
+        ///
+        /// This can be conveniently accessed by methods on `tcx.hir()`.
+        /// Avoid calling this query directly.
         query hir_owner(key: LocalDefId) -> Option<&'tcx crate::hir::Owner<'tcx>> {
             eval_always
             desc { |tcx| "HIR owner of `{}`", tcx.def_path_str(key.to_def_id()) }
         }
 
-        // Gives access to the HIR nodes and bodies inside the HIR owner `key`.
-        //
-        // This can be conveniently accessed by methods on `tcx.hir()`.
-        // Avoid calling this query directly.
+        /// Gives access to the HIR nodes and bodies inside the HIR owner `key`.
+        ///
+        /// This can be conveniently accessed by methods on `tcx.hir()`.
+        /// Avoid calling this query directly.
         query hir_owner_nodes(key: LocalDefId) -> Option<&'tcx crate::hir::OwnerNodes<'tcx>> {
             eval_always
             desc { |tcx| "HIR owner items in `{}`", tcx.def_path_str(key.to_def_id()) }
@@ -92,7 +92,7 @@ rustc_queries! {
         /// Computes the `DefId` of the corresponding const parameter in case the `key` is a
         /// const argument and returns `None` otherwise.
         ///
-        /// ```rust
+        /// ```ignore (incomplete)
         /// let a = foo::<7>();
         /// //            ^ Calling `opt_const_param_of` for this argument,
         ///
@@ -156,21 +156,48 @@ rustc_queries! {
             cache_on_disk_if { key.is_local() }
         }
 
-        /// Returns the list of predicates that can be used for
-        /// `SelectionCandidate::ProjectionCandidate` and
+        /// Returns the list of bounds that can be used for
+        /// `SelectionCandidate::ProjectionCandidate(_)` and
         /// `ProjectionTyCandidate::TraitDef`.
-        /// Specifically this is the bounds (equivalent to) those
-        /// written on the trait's type definition, or those
-        /// after the `impl` keyword
+        /// Specifically this is the bounds written on the trait's type
+        /// definition, or those after the `impl` keyword
         ///
+        /// ```ignore (incomplete)
         /// type X: Bound + 'lt
-        ///         ^^^^^^^^^^^
+        /// //      ^^^^^^^^^^^
         /// impl Debug + Display
-        ///      ^^^^^^^^^^^^^^^
+        /// //   ^^^^^^^^^^^^^^^
+        /// ```
         ///
         /// `key` is the `DefId` of the associated type or opaque type.
-        query projection_predicates(key: DefId) -> &'tcx ty::List<ty::Predicate<'tcx>> {
-            desc { |tcx| "finding projection predicates for `{}`", tcx.def_path_str(key) }
+        ///
+        /// Bounds from the parent (e.g. with nested impl trait) are not included.
+        query explicit_item_bounds(key: DefId) -> &'tcx [(ty::Predicate<'tcx>, Span)] {
+            desc { |tcx| "finding item bounds for `{}`", tcx.def_path_str(key) }
+        }
+
+        /// Elaborated version of the predicates from `explicit_item_bounds`.
+        ///
+        /// For example:
+        ///
+        /// ```
+        /// trait MyTrait {
+        ///     type MyAType: Eq + ?Sized;
+        /// }
+        /// ```
+        ///
+        /// `explicit_item_bounds` returns `[<Self as MyTrait>::MyAType: Eq]`,
+        /// and `item_bounds` returns
+        /// ```text
+        /// [
+        ///     <Self as Trait>::MyAType: Eq,
+        ///     <Self as Trait>::MyAType: PartialEq<<Self as Trait>::MyAType>
+        /// ]
+        /// ```
+        ///
+        /// Bounds from the parent (e.g. with nested impl trait) are not included.
+        query item_bounds(key: DefId) -> &'tcx ty::List<ty::Predicate<'tcx>> {
+            desc { |tcx| "elaborating item bounds for `{}`", tcx.def_path_str(key) }
         }
 
         query projection_ty_from_predicates(key: (DefId, DefId)) -> Option<ty::ProjectionTy<'tcx>> {
@@ -190,6 +217,11 @@ rustc_queries! {
         query parent_module_from_def_id(key: LocalDefId) -> LocalDefId {
             eval_always
             desc { |tcx| "parent module of `{}`", tcx.def_path_str(key.to_def_id()) }
+        }
+
+        /// Internal helper query. Use `tcx.expansion_that_defined` instead
+        query expn_that_defined(key: DefId) -> rustc_span::ExpnId {
+            desc { |tcx| "expansion that defined `{}`", tcx.def_path_str(key) }
         }
     }
 
@@ -242,6 +274,35 @@ rustc_queries! {
                 tcx.def_path_str(key.did.to_def_id()),
             }
             no_hash
+        }
+
+        /// Try to build an abstract representation of the given constant.
+        query mir_abstract_const(
+            key: DefId
+        ) -> Result<Option<&'tcx [mir::abstract_const::Node<'tcx>]>, ErrorReported> {
+            desc {
+                |tcx| "building an abstract representation for {}", tcx.def_path_str(key),
+            }
+        }
+        /// Try to build an abstract representation of the given constant.
+        query mir_abstract_const_of_const_arg(
+            key: (LocalDefId, DefId)
+        ) -> Result<Option<&'tcx [mir::abstract_const::Node<'tcx>]>, ErrorReported> {
+            desc {
+                |tcx|
+                "building an abstract representation for the const argument {}",
+                tcx.def_path_str(key.0.to_def_id()),
+            }
+        }
+
+        query try_unify_abstract_consts(key: (
+            (ty::WithOptConstParam<DefId>, SubstsRef<'tcx>),
+            (ty::WithOptConstParam<DefId>, SubstsRef<'tcx>)
+        )) -> bool {
+            desc {
+                |tcx| "trying to unify the generic constants {} and {}",
+                tcx.def_path_str(key.0.0.did), tcx.def_path_str(key.1.0.did)
+            }
         }
 
         query mir_drops_elaborated_and_const_checked(
@@ -305,9 +366,9 @@ rustc_queries! {
     }
 
     TypeChecking {
-        // Erases regions from `ty` to yield a new type.
-        // Normally you would just use `tcx.erase_regions(&value)`,
-        // however, which uses this query as a kind of cache.
+        /// Erases regions from `ty` to yield a new type.
+        /// Normally you would just use `tcx.erase_regions(&value)`,
+        /// however, which uses this query as a kind of cache.
         query erase_regions_ty(ty: Ty<'tcx>) -> Ty<'tcx> {
             // This query is not expected to have input -- as a result, it
             // is not a good candidates for "replay" because it is essentially a
@@ -334,6 +395,24 @@ rustc_queries! {
         /// `inferred_outlives_of` predicates.
         query predicates_defined_on(key: DefId) -> ty::GenericPredicates<'tcx> {
             desc { |tcx| "computing predicates of `{}`", tcx.def_path_str(key) }
+        }
+
+        /// Returns everything that looks like a predicate written explicitly
+        /// by the user on a trait item.
+        ///
+        /// Traits are unusual, because predicates on associated types are
+        /// converted into bounds on that type for backwards compatibility:
+        ///
+        /// trait X where Self::U: Copy { type U; }
+        ///
+        /// becomes
+        ///
+        /// trait X { type U: Copy; }
+        ///
+        /// `explicit_predicates_of` and `explicit_item_bounds` will then take
+        /// the appropriate subsets of the predicates here.
+        query trait_explicit_predicates_and_bounds(key: LocalDefId) -> ty::GenericPredicates<'tcx> {
+            desc { |tcx| "computing explicit predicates of trait `{}`", tcx.def_path_str(key.to_def_id()) }
         }
 
         /// Returns the predicates written explicitly by the user.
@@ -426,10 +505,6 @@ rustc_queries! {
         /// constructor function).
         query is_promotable_const_fn(key: DefId) -> bool {
             desc { |tcx| "checking if item is promotable: `{}`", tcx.def_path_str(key) }
-        }
-
-        query const_fn_is_allowed_fn_ptr(key: DefId) -> bool {
-            desc { |tcx| "checking if const fn allows `fn()` types: `{}`", tcx.def_path_str(key) }
         }
 
         /// Returns `true` if this is a foreign item (i.e., linked via `extern { ... }`).
@@ -678,38 +753,31 @@ rustc_queries! {
     }
 
     Other {
-        /// Evaluates a constant without running sanity checks.
+        /// Evaluates a constant and returns the computed allocation.
         ///
-        /// **Do not use this** outside const eval. Const eval uses this to break query cycles
-        /// during validation. Please add a comment to every use site explaining why using
-        /// `const_eval_validated` isn't sufficient. The returned constant also isn't in a suitable
-        /// form to be used outside of const eval.
-        query const_eval_raw(key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
-            -> ConstEvalRawResult<'tcx> {
-            desc { |tcx|
-                "const-evaluating `{}`",
-                key.value.display(tcx)
-            }
-        }
-
-        /// Results of evaluating const items or constants embedded in
-        /// other items (such as enum variant explicit discriminants).
-        ///
-        /// In contrast to `const_eval_raw` this performs some validation on the constant, and
-        /// returns a proper constant that is usable by the rest of the compiler.
-        ///
-        /// **Do not use this** directly, use one of the following wrappers: `tcx.const_eval_poly`,
-        /// `tcx.const_eval_resolve`, `tcx.const_eval_instance`, or `tcx.const_eval_global_id`.
-        query const_eval_validated(key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
-            -> ConstEvalResult<'tcx> {
+        /// **Do not use this** directly, use the `tcx.eval_static_initializer` wrapper.
+        query eval_to_allocation_raw(key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
+            -> EvalToAllocationRawResult<'tcx> {
             desc { |tcx|
                 "const-evaluating + checking `{}`",
                 key.value.display(tcx)
             }
-            cache_on_disk_if(_, opt_result) {
-                // Only store results without errors
-                opt_result.map_or(true, |r| r.is_ok())
+            cache_on_disk_if { true }
+        }
+
+        /// Evaluates const items or anonymous constants
+        /// (such as enum variant explicit discriminants or array lengths)
+        /// into a representation suitable for the type system and const generics.
+        ///
+        /// **Do not use this** directly, use one of the following wrappers: `tcx.const_eval_poly`,
+        /// `tcx.const_eval_resolve`, `tcx.const_eval_instance`, or `tcx.const_eval_global_id`.
+        query eval_to_const_value_raw(key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
+            -> EvalToConstValueResult<'tcx> {
+            desc { |tcx|
+                "simplifying constant for the type system `{}`",
+                key.value.display(tcx)
             }
+            cache_on_disk_if { true }
         }
 
         /// Destructure a constant ADT or array into its variant index and its
@@ -718,6 +786,14 @@ rustc_queries! {
             key: ty::ParamEnvAnd<'tcx, &'tcx ty::Const<'tcx>>
         ) -> mir::DestructuredConst<'tcx> {
             desc { "destructure constant" }
+        }
+
+        /// Dereference a constant reference or raw pointer and turn the result into a constant
+        /// again.
+        query deref_const(
+            key: ty::ParamEnvAnd<'tcx, &'tcx ty::Const<'tcx>>
+        ) -> &'tcx ty::Const<'tcx> {
+            desc { "deref constant" }
         }
 
         query const_caller_location(key: (rustc_span::Symbol, u32, u32)) -> ConstValue<'tcx> {
@@ -1208,6 +1284,7 @@ rustc_queries! {
 
     TypeChecking {
         query visibility(def_id: DefId) -> ty::Visibility {
+            eval_always
             desc { |tcx| "computing visibility of `{}`", tcx.def_path_str(def_id) }
         }
     }
@@ -1271,6 +1348,11 @@ rustc_queries! {
             -> DefIdMap<DefId> {
             storage(ArenaCacheSelector<'tcx>)
             desc { "calculating the visible parent map" }
+        }
+        query trimmed_def_paths(_: CrateNum)
+            -> FxHashMap<DefId, Symbol> {
+            storage(ArenaCacheSelector<'tcx>)
+            desc { "calculating trimmed def paths" }
         }
         query missing_extern_crate_item(_: CrateNum) -> bool {
             eval_always
@@ -1411,7 +1493,7 @@ rustc_queries! {
         }
 
         query evaluate_goal(
-            goal: traits::ChalkCanonicalGoal<'tcx>
+            goal: traits::CanonicalChalkEnvironmentAndGoal<'tcx>
         ) -> Result<
             &'tcx Canonical<'tcx, canonical::QueryResponse<'tcx, ()>>,
             NoSolution
@@ -1526,7 +1608,7 @@ rustc_queries! {
             desc { "looking up supported target features" }
         }
 
-        // Get an estimate of the size of an InstanceDef based on its MIR for CGU partitioning.
+        /// Get an estimate of the size of an InstanceDef based on its MIR for CGU partitioning.
         query instance_def_size_estimate(def: ty::InstanceDef<'tcx>)
             -> usize {
             desc { |tcx| "estimating size for `{}`", tcx.def_path_str(def.def_id()) }

@@ -70,10 +70,23 @@
 //! }
 //! ```
 //!
-//! This usage of [`Option`] to create safe nullable pointers is so
-//! common that Rust does special optimizations to make the
-//! representation of [`Option`]`<`[`Box<T>`]`>` a single pointer. Optional pointers
-//! in Rust are stored as efficiently as any other pointer type.
+//! # Representation
+//!
+//! Rust guarantees to optimize the following types `T` such that
+//! [`Option<T>`] has the same size as `T`:
+//!
+//! * [`Box<U>`]
+//! * `&U`
+//! * `&mut U`
+//! * `fn`, `extern "C" fn`
+//! * [`num::NonZero*`]
+//! * [`ptr::NonNull<U>`]
+//! * `#[repr(transparent)]` struct around one of the types in this list.
+//!
+//! It is further guaranteed that, for the cases above, one can
+//! [`mem::transmute`] from all valid values of `T` to `Option<T>` and
+//! from `Some::<T>(_)` to `T` (but transmuting `None::<T>` to `T`
+//! is undefined behaviour).
 //!
 //! # Examples
 //!
@@ -128,6 +141,9 @@
 //! ```
 //!
 //! [`Box<T>`]: ../../std/boxed/struct.Box.html
+//! [`Box<U>`]: ../../std/boxed/struct.Box.html
+//! [`num::NonZero*`]: crate::num
+//! [`ptr::NonNull<U>`]: crate::ptr::NonNull
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -175,7 +191,7 @@ impl<T> Option<T> {
     /// ```
     #[must_use = "if you intended to assert that this has a value, consider `.unwrap()` instead"]
     #[inline]
-    #[rustc_const_unstable(feature = "const_option", issue = "67441")]
+    #[rustc_const_stable(feature = "const_option", since = "1.48.0")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const fn is_some(&self) -> bool {
         matches!(*self, Some(_))
@@ -195,7 +211,7 @@ impl<T> Option<T> {
     #[must_use = "if you intended to assert that this doesn't have a value, consider \
                   `.and_then(|| panic!(\"`Option` had a value when expected `None`\"))` instead"]
     #[inline]
-    #[rustc_const_unstable(feature = "const_option", issue = "67441")]
+    #[rustc_const_stable(feature = "const_option", since = "1.48.0")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const fn is_none(&self) -> bool {
         !self.is_some()
@@ -254,7 +270,7 @@ impl<T> Option<T> {
     /// println!("still can print text: {:?}", text);
     /// ```
     #[inline]
-    #[rustc_const_unstable(feature = "const_option", issue = "67441")]
+    #[rustc_const_stable(feature = "const_option", since = "1.48.0")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const fn as_ref(&self) -> Option<&T> {
         match *self {
@@ -671,6 +687,7 @@ impl<T> Option<T> {
     /// assert_eq!(Some(4).filter(is_even), Some(4));
     /// ```
     ///
+    /// [`Some(t)`]: Some
     #[inline]
     #[stable(feature = "option_filter", since = "1.27.0")]
     pub fn filter<P: FnOnce(&T) -> bool>(self, predicate: P) -> Self {
@@ -1502,8 +1519,6 @@ unsafe impl<A> TrustedLen for IterMut<'_, A> {}
 /// The iterator yields one value if the [`Option`] is a [`Some`], otherwise none.
 ///
 /// This `struct` is created by the [`Option::into_iter`] function.
-///
-/// [`Option::into_iter`]: enum.Option.html#method.into_iter
 #[derive(Clone, Debug)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<A> {

@@ -47,7 +47,7 @@ enum GroupedMoveError<'tcx> {
     // Everything that isn't from pattern matching.
     OtherIllegalMove {
         original_path: Place<'tcx>,
-        use_spans: UseSpans,
+        use_spans: UseSpans<'tcx>,
         kind: IllegalMoveOriginKind<'tcx>,
     },
 }
@@ -222,7 +222,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let (mut err, err_span) = {
             let (span, use_spans, original_path, kind): (
                 Span,
-                Option<UseSpans>,
+                Option<UseSpans<'tcx>>,
                 Place<'tcx>,
                 &IllegalMoveOriginKind<'_>,
             ) = match error {
@@ -291,7 +291,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         move_place: Place<'tcx>,
         deref_target_place: Place<'tcx>,
         span: Span,
-        use_spans: Option<UseSpans>,
+        use_spans: Option<UseSpans<'tcx>>,
     ) -> DiagnosticBuilder<'a> {
         // Inspect the type of the content behind the
         // borrow to provide feedback about why this
@@ -326,12 +326,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         }
 
         debug!("report: ty={:?}", ty);
-        let mut err = match ty.kind {
+        let mut err = match ty.kind() {
             ty::Array(..) | ty::Slice(..) => {
                 self.cannot_move_out_of_interior_noncopy(span, ty, None)
             }
             ty::Closure(def_id, closure_substs)
-                if def_id.as_local() == Some(self.mir_def_id) && upvar_field.is_some() =>
+                if def_id.as_local() == Some(self.mir_def_id()) && upvar_field.is_some() =>
             {
                 let closure_kind_ty = closure_substs.as_closure().kind_ty();
                 let closure_kind = closure_kind_ty.to_opt_closure_kind();
@@ -385,7 +385,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
         };
         if let Ok(snippet) = self.infcx.tcx.sess.source_map().span_to_snippet(span) {
-            let def_id = match move_place.ty(self.body, self.infcx.tcx).ty.kind {
+            let def_id = match *move_place.ty(self.body, self.infcx.tcx).ty.kind() {
                 ty::Adt(self_def, _) => self_def.did,
                 ty::Foreign(def_id)
                 | ty::FnDef(def_id, _)
@@ -492,8 +492,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             {
                 if let Ok(pat_snippet) = self.infcx.tcx.sess.source_map().span_to_snippet(pat_span)
                 {
-                    if pat_snippet.starts_with('&') {
-                        let pat_snippet = pat_snippet[1..].trim_start();
+                    if let Some(stripped) = pat_snippet.strip_prefix('&') {
+                        let pat_snippet = stripped.trim_start();
                         let (suggestion, to_remove) = if pat_snippet.starts_with("mut")
                             && pat_snippet["mut".len()..].starts_with(rustc_lexer::is_whitespace)
                         {

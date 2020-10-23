@@ -6,6 +6,7 @@ use rustc_infer::infer::{
     error_reporting::unexpected_hidden_region_diagnostic, NLLRegionVariableOrigin,
 };
 use rustc_middle::mir::{ConstraintCategory, ReturnConstraint};
+use rustc_middle::ty::subst::Subst;
 use rustc_middle::ty::{self, RegionVid, Ty};
 use rustc_span::symbol::{kw, sym};
 use rustc_span::Span;
@@ -364,13 +365,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             .struct_span_err(*span, "captured variable cannot escape `FnMut` closure body");
 
         let mut output_ty = self.regioncx.universal_regions().unnormalized_output_ty;
-        if let ty::Opaque(def_id, _) = output_ty.kind {
+        if let ty::Opaque(def_id, _) = *output_ty.kind() {
             output_ty = self.infcx.tcx.type_of(def_id)
         };
 
         debug!("report_fnmut_error: output_ty={:?}", output_ty);
 
-        let message = match output_ty.kind {
+        let message = match output_ty.kind() {
             ty::Closure(_, _) => {
                 "returns a closure that contains a reference to a captured variable, which then \
                  escapes the closure body"
@@ -387,7 +388,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         if let ReturnConstraint::ClosureUpvar(upvar) = kind {
             let def_id = match self.regioncx.universal_regions().defining_ty {
                 DefiningTy::Closure(def_id, _) => def_id,
-                ty @ _ => bug!("unexpected DefiningTy {:?}", ty),
+                ty => bug!("unexpected DefiningTy {:?}", ty),
             };
 
             let upvar_def_span = self.infcx.tcx.hir().span(upvar);
@@ -515,7 +516,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let mut diag =
             self.infcx.tcx.sess.struct_span_err(*span, "lifetime may not live long enough");
 
-        let (_, mir_def_name) = self.infcx.tcx.article_and_description(self.mir_def_id.to_def_id());
+        let (_, mir_def_name) =
+            self.infcx.tcx.article_and_description(self.mir_def_id().to_def_id());
 
         let fr_name = self.give_region_a_name(*fr).unwrap();
         fr_name.highlight_region_name(&mut diag);
@@ -571,27 +573,27 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         if let (Some(f), Some(ty::RegionKind::ReStatic)) =
             (self.to_error_region(fr), self.to_error_region(outlived_fr))
         {
-            if let Some((&ty::TyS { kind: ty::Opaque(did, substs), .. }, _)) = self
+            if let Some(&ty::Opaque(did, substs)) = self
                 .infcx
                 .tcx
                 .is_suitable_region(f)
                 .map(|r| r.def_id)
-                .map(|id| self.infcx.tcx.return_type_impl_trait(id))
-                .unwrap_or(None)
+                .and_then(|id| self.infcx.tcx.return_type_impl_trait(id))
+                .map(|(ty, _)| ty.kind())
             {
                 // Check whether or not the impl trait return type is intended to capture
                 // data with the static lifetime.
                 //
                 // eg. check for `impl Trait + 'static` instead of `impl Trait`.
                 let has_static_predicate = {
-                    let predicates_of = self.infcx.tcx.predicates_of(did);
-                    let bounds = predicates_of.instantiate(self.infcx.tcx, substs);
+                    let bounds = self.infcx.tcx.explicit_item_bounds(did);
 
                     let mut found = false;
-                    for predicate in bounds.predicates {
+                    for (bound, _) in bounds {
                         if let ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(_, r)) =
-                            predicate.skip_binders()
+                            bound.skip_binders()
                         {
+                            let r = r.subst(self.infcx.tcx, substs);
                             if let ty::RegionKind::ReStatic = r {
                                 found = true;
                                 break;

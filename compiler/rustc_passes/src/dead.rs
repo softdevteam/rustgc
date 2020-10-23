@@ -104,7 +104,7 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
                 if let Some(t) = t {
                     self.check_def_id(t);
                 }
-                if let Some(i) = i {
+                if let Some((i, _)) = i {
                     self.check_def_id(i);
                 }
             }
@@ -124,7 +124,7 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
     }
 
     fn handle_field_access(&mut self, lhs: &hir::Expr<'_>, hir_id: hir::HirId) {
-        match self.typeck_results().expr_ty_adjusted(lhs).kind {
+        match self.typeck_results().expr_ty_adjusted(lhs).kind() {
             ty::Adt(def, _) => {
                 let index = self.tcx.field_index(hir_id, self.typeck_results());
                 self.insert_def_id(def.non_enum_variant().fields[index].did);
@@ -140,7 +140,7 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
         res: Res,
         pats: &[hir::FieldPat<'_>],
     ) {
-        let variant = match self.typeck_results().node_type(lhs.hir_id).kind {
+        let variant = match self.typeck_results().node_type(lhs.hir_id).kind() {
             ty::Adt(adt, _) => adt.variant_of_res(res),
             _ => span_bug!(lhs.span, "non-ADT in struct pattern"),
         };
@@ -269,7 +269,7 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
             hir::ExprKind::Struct(ref qpath, ref fields, _) => {
                 let res = self.typeck_results().qpath_res(qpath, expr.hir_id);
                 self.handle_res(res);
-                if let ty::Adt(ref adt, _) = self.typeck_results().expr_ty(expr).kind {
+                if let ty::Adt(ref adt, _) = self.typeck_results().expr_ty(expr).kind() {
                     self.mark_as_used_if_union(adt, fields);
                 }
             }
@@ -369,7 +369,7 @@ fn has_allow_dead_code_or_lang_attr(
 //         - This is because lang items are always callable from elsewhere.
 //   or
 //   2) We are not sure to be live or not
-//     * Implementation of a trait method
+//     * Implementations of traits and trait methods
 struct LifeSeeder<'k, 'tcx> {
     worklist: Vec<hir::HirId>,
     krate: &'k hir::Crate<'k>,
@@ -415,6 +415,9 @@ impl<'v, 'k, 'tcx> ItemLikeVisitor<'v> for LifeSeeder<'k, 'tcx> {
                 }
             }
             hir::ItemKind::Impl { ref of_trait, items, .. } => {
+                if of_trait.is_some() {
+                    self.worklist.push(item.hir_id);
+                }
                 for impl_item_ref in items {
                     let impl_item = self.krate.impl_item(impl_item_ref.id);
                     if of_trait.is_some()
@@ -455,8 +458,8 @@ fn create_and_seed_worklist<'tcx>(
         .map
         .iter()
         .filter_map(
-            |(&id, level)| {
-                if level >= &privacy::AccessLevel::Reachable { Some(id) } else { None }
+            |(&id, &level)| {
+                if level >= privacy::AccessLevel::Reachable { Some(id) } else { None }
             },
         )
         .chain(
@@ -544,7 +547,7 @@ impl DeadVisitor<'tcx> {
         let def_id = self.tcx.hir().local_def_id(id);
         let inherent_impls = self.tcx.inherent_impls(def_id);
         for &impl_did in inherent_impls.iter() {
-            for &item_did in &self.tcx.associated_item_def_ids(impl_did)[..] {
+            for item_did in self.tcx.associated_item_def_ids(impl_did) {
                 if let Some(did) = item_did.as_local() {
                     let item_hir_id = self.tcx.hir().local_def_id_to_hir_id(did);
                     if self.live_symbols.contains(&item_hir_id) {

@@ -34,7 +34,7 @@ use rustc_trait_selection::traits::{ObligationCause, TraitEngine, TraitEngineExt
 pub fn check_drop_impl(tcx: TyCtxt<'_>, drop_impl_did: DefId) -> Result<(), ErrorReported> {
     let dtor_self_type = tcx.type_of(drop_impl_did);
     let dtor_predicates = tcx.predicates_of(drop_impl_did);
-    match dtor_self_type.kind {
+    match dtor_self_type.kind() {
         ty::Adt(adt_def, self_to_impl_substs) => {
             ensure_drop_params_and_item_params_correspond(
                 tcx,
@@ -226,12 +226,14 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
         // could be extended easily also to the other `Predicate`.
         let predicate_matches_closure = |p: Predicate<'tcx>| {
             let mut relator: SimpleEqRelation<'tcx> = SimpleEqRelation::new(tcx, self_param_env);
-            match (predicate.skip_binders(), p.skip_binders()) {
+            let predicate = predicate.bound_atom();
+            let p = p.bound_atom();
+            match (predicate.skip_binder(), p.skip_binder()) {
                 (ty::PredicateAtom::Trait(a, _), ty::PredicateAtom::Trait(b, _)) => {
-                    relator.relate(ty::Binder::bind(a), ty::Binder::bind(b)).is_ok()
+                    relator.relate(predicate.rebind(a), p.rebind(b)).is_ok()
                 }
                 (ty::PredicateAtom::Projection(a), ty::PredicateAtom::Projection(b)) => {
-                    relator.relate(ty::Binder::bind(a), ty::Binder::bind(b)).is_ok()
+                    relator.relate(predicate.rebind(a), p.rebind(b)).is_ok()
                 }
                 _ => predicate == p,
             }

@@ -16,8 +16,9 @@
 use crate::token::{self, DelimToken, Token, TokenKind};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::sync::{self, Lrc};
 use rustc_macros::HashStable_Generic;
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::{Span, DUMMY_SP};
 use smallvec::{smallvec, SmallVec};
 
@@ -83,7 +84,7 @@ impl TokenTree {
     }
 
     pub fn joint(self) -> TokenStream {
-        TokenStream::new(vec![(self, Joint)])
+        TokenStream::new(vec![(self, Spacing::Joint)])
     }
 
     pub fn token(kind: TokenKind, span: Span) -> TokenTree {
@@ -119,27 +120,96 @@ where
     }
 }
 
+// A cloneable callback which produces a `TokenStream`. Each clone
+// of this should produce the same `TokenStream`
+pub trait CreateTokenStream: sync::Send + sync::Sync + FnOnce() -> TokenStream {
+    // Workaround for the fact that `Clone` is not object-safe
+    fn clone_it(&self) -> Box<dyn CreateTokenStream>;
+}
+
+impl<F: 'static + Clone + sync::Send + sync::Sync + FnOnce() -> TokenStream> CreateTokenStream
+    for F
+{
+    fn clone_it(&self) -> Box<dyn CreateTokenStream> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn CreateTokenStream> {
+    fn clone(&self) -> Self {
+        let val: &(dyn CreateTokenStream) = &**self;
+        val.clone_it()
+    }
+}
+
+/// A lazy version of `TokenStream`, which may defer creation
+/// of an actual `TokenStream` until it is needed.
+pub type LazyTokenStream = Lrc<LazyTokenStreamInner>;
+
+#[derive(Clone)]
+pub enum LazyTokenStreamInner {
+    Lazy(Box<dyn CreateTokenStream>),
+    Ready(TokenStream),
+}
+
+impl std::fmt::Debug for LazyTokenStreamInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LazyTokenStreamInner::Lazy(..) => f.debug_struct("LazyTokenStream::Lazy").finish(),
+            LazyTokenStreamInner::Ready(..) => f.debug_struct("LazyTokenStream::Ready").finish(),
+        }
+    }
+}
+
+impl LazyTokenStreamInner {
+    pub fn into_token_stream(&self) -> TokenStream {
+        match self {
+            // Note that we do not cache this. If this ever becomes a performance
+            // problem, we should investigate wrapping `LazyTokenStreamInner`
+            // in a lock
+            LazyTokenStreamInner::Lazy(cb) => (cb.clone())(),
+            LazyTokenStreamInner::Ready(stream) => stream.clone(),
+        }
+    }
+}
+
+impl<S: Encoder> Encodable<S> for LazyTokenStreamInner {
+    fn encode(&self, _s: &mut S) -> Result<(), S::Error> {
+        panic!("Attempted to encode LazyTokenStream");
+    }
+}
+
+impl<D: Decoder> Decodable<D> for LazyTokenStreamInner {
+    fn decode(_d: &mut D) -> Result<Self, D::Error> {
+        panic!("Attempted to decode LazyTokenStream");
+    }
+}
+
+impl<CTX> HashStable<CTX> for LazyTokenStreamInner {
+    fn hash_stable(&self, _hcx: &mut CTX, _hasher: &mut StableHasher) {
+        panic!("Attempted to compute stable hash for LazyTokenStream");
+    }
+}
+
 /// A `TokenStream` is an abstract sequence of tokens, organized into `TokenTree`s.
 ///
 /// The goal is for procedural macros to work with `TokenStream`s and `TokenTree`s
 /// instead of a representation of the abstract syntax tree.
 /// Today's `TokenTree`s can still contain AST via `token::Interpolated` for back-compat.
 #[derive(Clone, Debug, Default, Encodable, Decodable)]
-pub struct TokenStream(pub Lrc<Vec<TreeAndJoint>>);
+pub struct TokenStream(pub(crate) Lrc<Vec<TreeAndSpacing>>);
 
-pub type TreeAndJoint = (TokenTree, IsJoint);
+pub type TreeAndSpacing = (TokenTree, Spacing);
 
 // `TokenStream` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(target_arch = "x86_64")]
 rustc_data_structures::static_assert_size!(TokenStream, 8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Encodable, Decodable)]
-pub enum IsJoint {
+pub enum Spacing {
+    Alone,
     Joint,
-    NonJoint,
 }
-
-use IsJoint::*;
 
 impl TokenStream {
     /// Given a `TokenStream` with a `Stream` of only two arguments, return a new `TokenStream`
@@ -153,7 +223,7 @@ impl TokenStream {
                 let sp = match (&ts, &next) {
                     (_, (TokenTree::Token(Token { kind: token::Comma, .. }), _)) => continue,
                     (
-                        (TokenTree::Token(token_left), NonJoint),
+                        (TokenTree::Token(token_left), Spacing::Alone),
                         (TokenTree::Token(token_right), _),
                     ) if ((token_left.is_ident() && !token_left.is_reserved_ident())
                         || token_left.is_lit())
@@ -162,11 +232,11 @@ impl TokenStream {
                     {
                         token_left.span
                     }
-                    ((TokenTree::Delimited(sp, ..), NonJoint), _) => sp.entire(),
+                    ((TokenTree::Delimited(sp, ..), Spacing::Alone), _) => sp.entire(),
                     _ => continue,
                 };
                 let sp = sp.shrink_to_hi();
-                let comma = (TokenTree::token(token::Comma, sp), NonJoint);
+                let comma = (TokenTree::token(token::Comma, sp), Spacing::Alone);
                 suggestion = Some((pos, comma, sp));
             }
         }
@@ -184,19 +254,19 @@ impl TokenStream {
 
 impl From<TokenTree> for TokenStream {
     fn from(tree: TokenTree) -> TokenStream {
-        TokenStream::new(vec![(tree, NonJoint)])
+        TokenStream::new(vec![(tree, Spacing::Alone)])
     }
 }
 
-impl From<TokenTree> for TreeAndJoint {
-    fn from(tree: TokenTree) -> TreeAndJoint {
-        (tree, NonJoint)
+impl From<TokenTree> for TreeAndSpacing {
+    fn from(tree: TokenTree) -> TreeAndSpacing {
+        (tree, Spacing::Alone)
     }
 }
 
 impl iter::FromIterator<TokenTree> for TokenStream {
     fn from_iter<I: IntoIterator<Item = TokenTree>>(iter: I) -> Self {
-        TokenStream::new(iter.into_iter().map(Into::into).collect::<Vec<TreeAndJoint>>())
+        TokenStream::new(iter.into_iter().map(Into::into).collect::<Vec<TreeAndSpacing>>())
     }
 }
 
@@ -209,7 +279,7 @@ impl PartialEq<TokenStream> for TokenStream {
 }
 
 impl TokenStream {
-    pub fn new(streams: Vec<TreeAndJoint>) -> TokenStream {
+    pub fn new(streams: Vec<TreeAndSpacing>) -> TokenStream {
         TokenStream(Lrc::new(streams))
     }
 
@@ -288,19 +358,13 @@ impl TokenStream {
         t1.next().is_none() && t2.next().is_none()
     }
 
-    pub fn map_enumerated<F: FnMut(usize, TokenTree) -> TokenTree>(self, mut f: F) -> TokenStream {
+    pub fn map_enumerated<F: FnMut(usize, &TokenTree) -> TokenTree>(self, mut f: F) -> TokenStream {
         TokenStream(Lrc::new(
             self.0
                 .iter()
                 .enumerate()
-                .map(|(i, (tree, is_joint))| (f(i, tree.clone()), *is_joint))
+                .map(|(i, (tree, is_joint))| (f(i, tree), *is_joint))
                 .collect(),
-        ))
-    }
-
-    pub fn map<F: FnMut(TokenTree) -> TokenTree>(self, mut f: F) -> TokenStream {
-        TokenStream(Lrc::new(
-            self.0.iter().map(|(tree, is_joint)| (f(tree.clone()), *is_joint)).collect(),
         ))
     }
 }
@@ -320,11 +384,11 @@ impl TokenStreamBuilder {
         // If `self` is not empty and the last tree within the last stream is a
         // token tree marked with `Joint`...
         if let Some(TokenStream(ref mut last_stream_lrc)) = self.0.last_mut() {
-            if let Some((TokenTree::Token(last_token), Joint)) = last_stream_lrc.last() {
+            if let Some((TokenTree::Token(last_token), Spacing::Joint)) = last_stream_lrc.last() {
                 // ...and `stream` is not empty and the first tree within it is
                 // a token tree...
                 let TokenStream(ref mut stream_lrc) = stream;
-                if let Some((TokenTree::Token(token), is_joint)) = stream_lrc.first() {
+                if let Some((TokenTree::Token(token), spacing)) = stream_lrc.first() {
                     // ...and the two tokens can be glued together...
                     if let Some(glued_tok) = last_token.glue(&token) {
                         // ...then do so, by overwriting the last token
@@ -337,8 +401,7 @@ impl TokenStreamBuilder {
                         // Overwrite the last token tree with the merged
                         // token.
                         let last_vec_mut = Lrc::make_mut(last_stream_lrc);
-                        *last_vec_mut.last_mut().unwrap() =
-                            (TokenTree::Token(glued_tok), *is_joint);
+                        *last_vec_mut.last_mut().unwrap() = (TokenTree::Token(glued_tok), *spacing);
 
                         // Remove the first token tree from `stream`. (This
                         // is almost always the only tree in `stream`.)
@@ -375,7 +438,7 @@ impl Iterator for Cursor {
     type Item = TokenTree;
 
     fn next(&mut self) -> Option<TokenTree> {
-        self.next_with_joint().map(|(tree, _)| tree)
+        self.next_with_spacing().map(|(tree, _)| tree)
     }
 }
 
@@ -384,7 +447,7 @@ impl Cursor {
         Cursor { stream, index: 0 }
     }
 
-    pub fn next_with_joint(&mut self) -> Option<TreeAndJoint> {
+    pub fn next_with_spacing(&mut self) -> Option<TreeAndSpacing> {
         if self.index < self.stream.len() {
             self.index += 1;
             Some(self.stream.0[self.index - 1].clone())
@@ -403,8 +466,8 @@ impl Cursor {
         self.index = index;
     }
 
-    pub fn look_ahead(&self, n: usize) -> Option<TokenTree> {
-        self.stream.0[self.index..].get(n).map(|(tree, _)| tree.clone())
+    pub fn look_ahead(&self, n: usize) -> Option<&TokenTree> {
+        self.stream.0[self.index..].get(n).map(|(tree, _)| tree)
     }
 }
 

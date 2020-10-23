@@ -15,10 +15,10 @@ use crate::MemFlags;
 
 use rustc_middle::ty::layout::{HasParamEnv, TyAndLayout};
 use rustc_middle::ty::Ty;
+use rustc_span::Span;
 use rustc_target::abi::{Abi, Align, Scalar, Size};
 use rustc_target::spec::HasTargetSpec;
 
-use std::iter::TrustedLen;
 use std::ops::Range;
 
 #[derive(Copy, Clone)]
@@ -45,6 +45,7 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn build_sibling_block(&self, name: &str) -> Self;
     fn cx(&self) -> &Self::CodegenCx;
     fn llbb(&self) -> Self::BasicBlock;
+    fn set_span(&mut self, span: Span);
 
     fn position_at_end(&mut self, llbb: Self::BasicBlock);
     fn ret_void(&mut self);
@@ -60,7 +61,7 @@ pub trait BuilderMethods<'a, 'tcx>:
         &mut self,
         v: Self::Value,
         else_llbb: Self::BasicBlock,
-        cases: impl ExactSizeIterator<Item = (u128, Self::BasicBlock)> + TrustedLen,
+        cases: impl ExactSizeIterator<Item = (u128, Self::BasicBlock)>,
     );
     fn invoke(
         &mut self,

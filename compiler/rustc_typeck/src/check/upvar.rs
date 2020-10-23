@@ -88,7 +88,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // Extract the type of the closure.
         let ty = self.node_ty(closure_hir_id);
-        let (closure_def_id, substs) = match ty.kind {
+        let (closure_def_id, substs) = match *ty.kind() {
             ty::Closure(def_id, substs) => (def_id, UpvarSubsts::Closure(substs)),
             ty::Generator(def_id, substs, _) => (def_id, UpvarSubsts::Generator(substs)),
             ty::Error(_) => {
@@ -202,9 +202,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             "analyze_closure: id={:?} substs={:?} final_upvar_tys={:?}",
             closure_hir_id, substs, final_upvar_tys
         );
-        for (upvar_ty, final_upvar_ty) in substs.upvar_tys().zip(final_upvar_tys) {
-            self.demand_suptype(span, upvar_ty, final_upvar_ty);
-        }
+
+        // Build a tuple (U0..Un) of the final upvar types U0..Un
+        // and unify the upvar tupe type in the closure with it:
+        let final_tupled_upvars_type = self.tcx.mk_tup(final_upvar_tys.iter());
+        self.demand_suptype(span, substs.tupled_upvars_ty(), final_tupled_upvars_type);
 
         // If we are also inferred the closure kind here,
         // process any deferred resolutions.
@@ -349,7 +351,7 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
         if let PlaceBase::Upvar(upvar_id) = place_with_id.place.base {
             let mut borrow_kind = ty::MutBorrow;
             for pointer_ty in place_with_id.place.deref_tys() {
-                match pointer_ty.kind {
+                match pointer_ty.kind() {
                     // Raw pointers don't inherit mutability.
                     ty::RawPtr(_) => return,
                     // assignment to deref of an `&mut`

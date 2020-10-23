@@ -104,14 +104,6 @@ impl<'tcx> TyCtxt<'tcx> {
         // ```
         ty.uninhabited_from(self, param_env).contains(self, module)
     }
-
-    pub fn is_ty_uninhabited_from_any_module(
-        self,
-        ty: Ty<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
-    ) -> bool {
-        !ty.uninhabited_from(self, param_env).is_empty()
-    }
 }
 
 impl<'tcx> AdtDef {
@@ -196,7 +188,7 @@ impl<'tcx> FieldDef {
 impl<'tcx> TyS<'tcx> {
     /// Calculates the forest of `DefId`s from which this type is visibly uninhabited.
     fn uninhabited_from(&self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> DefIdForest {
-        match self.kind {
+        match *self.kind() {
             Adt(def, substs) => {
                 ensure_sufficient_stack(|| def.uninhabited_from(tcx, substs, param_env))
             }

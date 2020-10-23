@@ -54,16 +54,6 @@ pub enum DelimToken {
     NoDelim,
 }
 
-impl DelimToken {
-    pub fn len(self) -> usize {
-        if self == NoDelim { 0 } else { 1 }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self == NoDelim
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
 pub enum LitKind {
     Bool, // AST only, must never appear in a `Token`
@@ -163,6 +153,7 @@ pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: bool) -> bool {
             kw::Do,
             kw::Box,
             kw::Break,
+            kw::Const,
             kw::Continue,
             kw::False,
             kw::For,
@@ -173,6 +164,7 @@ pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: bool) -> bool {
             kw::Move,
             kw::Return,
             kw::True,
+            kw::Try,
             kw::Unsafe,
             kw::While,
             kw::Yield,
@@ -251,17 +243,6 @@ pub enum TokenKind {
     /// similarly to symbols in string literal tokens.
     DocComment(CommentKind, ast::AttrStyle, Symbol),
 
-    // Junk. These carry no data because we don't really care about the data
-    // they *would* carry, and don't really want to allocate a new ident for
-    // them. Instead, users could extract that from the associated span.
-    /// Whitespace.
-    Whitespace,
-    /// A comment.
-    Comment,
-    Shebang(Symbol),
-    /// A completely invalid token which should be skipped.
-    Unknown(Symbol),
-
     Eof,
 }
 
@@ -331,7 +312,7 @@ impl Token {
 
     /// Some token that will be thrown away later.
     pub fn dummy() -> Self {
-        Token::new(TokenKind::Whitespace, DUMMY_SP)
+        Token::new(TokenKind::Question, DUMMY_SP)
     }
 
     /// Recovers a `Token` from an `Ident`. This creates a raw identifier if necessary.
@@ -360,7 +341,7 @@ impl Token {
     pub fn is_op(&self) -> bool {
         match self.kind {
             OpenDelim(..) | CloseDelim(..) | Literal(..) | DocComment(..) | Ident(..)
-            | Lifetime(..) | Interpolated(..) | Whitespace | Comment | Shebang(..) | Eof => false,
+            | Lifetime(..) | Interpolated(..) | Eof => false,
             _ => true,
         }
     }
@@ -676,8 +657,7 @@ impl Token {
             Le | EqEq | Ne | Ge | AndAnd | OrOr | Tilde | BinOpEq(..) | At | DotDotDot
             | DotDotEq | Comma | Semi | ModSep | RArrow | LArrow | FatArrow | Pound | Dollar
             | Question | OpenDelim(..) | CloseDelim(..) | Literal(..) | Ident(..)
-            | Lifetime(..) | Interpolated(..) | DocComment(..) | Whitespace | Comment
-            | Shebang(..) | Unknown(..) | Eof => return None,
+            | Lifetime(..) | Interpolated(..) | DocComment(..) | Eof => return None,
         };
 
         Some(Token::new(kind, self.span.to(joint.span)))
@@ -711,7 +691,7 @@ pub enum Nonterminal {
 
 // `Nonterminal` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(target_arch = "x86_64")]
-rustc_data_structures::static_assert_size!(Nonterminal, 40);
+rustc_data_structures::static_assert_size!(Nonterminal, 48);
 
 #[derive(Debug, Copy, Clone, PartialEq, Encodable, Decodable)]
 pub enum NonterminalKind {
@@ -821,12 +801,33 @@ impl Nonterminal {
             if let ExpnKind::Macro(_, macro_name) = orig_span.ctxt().outer_expn_data().kind {
                 let filename = source_map.span_to_filename(orig_span);
                 if let FileName::Real(RealFileName::Named(path)) = filename {
-                    if (path.ends_with("time-macros-impl/src/lib.rs")
-                        && macro_name == sym::impl_macros)
-                        || (path.ends_with("js-sys/src/lib.rs") && macro_name == sym::arrays)
+                    let matches_prefix = |prefix, filename| {
+                        // Check for a path that ends with 'prefix*/src/<filename>'
+                        let mut iter = path.components().rev();
+                        iter.next().and_then(|p| p.as_os_str().to_str()) == Some(filename)
+                            && iter.next().and_then(|p| p.as_os_str().to_str()) == Some("src")
+                            && iter
+                                .next()
+                                .and_then(|p| p.as_os_str().to_str())
+                                .map_or(false, |p| p.starts_with(prefix))
+                    };
+
+                    if (macro_name == sym::impl_macros
+                        && matches_prefix("time-macros-impl", "lib.rs"))
+                        || (macro_name == sym::arrays && matches_prefix("js-sys", "lib.rs"))
                     {
                         let snippet = source_map.span_to_snippet(orig_span);
                         if snippet.as_deref() == Ok("$name") {
+                            return Some((*ident, *is_raw));
+                        }
+                    }
+
+                    if macro_name == sym::tuple_from_req
+                        && (matches_prefix("actix-web", "extract.rs")
+                            || matches_prefix("actori-web", "extract.rs"))
+                    {
+                        let snippet = source_map.span_to_snippet(orig_span);
+                        if snippet.as_deref() == Ok("$T") {
                             return Some((*ident, *is_raw));
                         }
                     }

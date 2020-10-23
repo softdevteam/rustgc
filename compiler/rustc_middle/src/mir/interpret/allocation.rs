@@ -40,7 +40,7 @@ pub struct Allocation<Tag = (), Extra = ()> {
     pub extra: Extra,
 }
 
-pub trait AllocationExtra<Tag>: ::std::fmt::Debug + Clone {
+pub trait AllocationExtra<Tag>: std::fmt::Debug + Clone {
     // There is no constructor in here because the constructor's type depends
     // on `MemoryKind`, and making things sufficiently generic leads to painful
     // inference failure.
@@ -345,10 +345,8 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
 
     /// Reads a *non-ZST* scalar.
     ///
-    /// ZSTs can't be read for two reasons:
-    /// * byte-order cannot work with zero-element buffers;
-    /// * in order to obtain a `Pointer`, we need to check for ZSTness anyway due to integer
-    ///   pointers being valid for ZSTs.
+    /// ZSTs can't be read because in order to obtain a `Pointer`, we need to check
+    /// for ZSTness anyway due to integer pointers being valid for ZSTs.
     ///
     /// It is the caller's responsibility to check bounds and alignment beforehand.
     /// Most likely, you want to call `InterpCx::read_scalar` instead of this method.
@@ -397,10 +395,8 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
 
     /// Writes a *non-ZST* scalar.
     ///
-    /// ZSTs can't be read for two reasons:
-    /// * byte-order cannot work with zero-element buffers;
-    /// * in order to obtain a `Pointer`, we need to check for ZSTness anyway due to integer
-    ///   pointers being valid for ZSTs.
+    /// ZSTs can't be read because in order to obtain a `Pointer`, we need to check
+    /// for ZSTness anyway due to integer pointers being valid for ZSTs.
     ///
     /// It is the caller's responsibility to check bounds and alignment beforehand.
     /// Most likely, you want to call `InterpCx::write_scalar` instead of this method.

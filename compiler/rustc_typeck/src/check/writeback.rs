@@ -70,10 +70,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         debug!("used_trait_imports({:?}) = {:?}", item_def_id, used_trait_imports);
         wbcx.typeck_results.used_trait_imports = used_trait_imports;
 
-        wbcx.typeck_results.closure_captures = mem::replace(
-            &mut self.typeck_results.borrow_mut().closure_captures,
-            Default::default(),
-        );
+        wbcx.typeck_results.closure_captures =
+            mem::take(&mut self.typeck_results.borrow_mut().closure_captures);
 
         if self.is_tainted_by_errors() {
             // FIXME(eddyb) keep track of `ErrorReported` from where the error was emitted.
@@ -193,7 +191,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             let mut typeck_results = self.fcx.typeck_results.borrow_mut();
 
             // All valid indexing looks like this; might encounter non-valid indexes at this point.
-            let base_ty = typeck_results.expr_ty_adjusted_opt(&base).map(|t| &t.kind);
+            let base_ty = typeck_results.expr_ty_adjusted_opt(&base).map(|t| t.kind());
             if base_ty.is_none() {
                 // When encountering `return [0][0]` outside of a `fn` body we can encounter a base
                 // that isn't in the type table. We assume more relevant errors have already been
@@ -459,7 +457,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
 
             let mut skip_add = false;
 
-            if let ty::Opaque(defin_ty_def_id, _substs) = definition_ty.kind {
+            if let ty::Opaque(defin_ty_def_id, _substs) = *definition_ty.kind() {
                 if let hir::OpaqueTyOrigin::Misc = opaque_defn.origin {
                     if def_id == defin_ty_def_id {
                         debug!(
@@ -653,7 +651,12 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
     fn report_type_error(&self, t: Ty<'tcx>) {
         if !self.tcx.sess.has_errors() {
             self.infcx
-                .need_type_info_err(Some(self.body.id()), self.span.to_span(self.tcx), t, E0282)
+                .emit_inference_failure_err(
+                    Some(self.body.id()),
+                    self.span.to_span(self.tcx),
+                    t.into(),
+                    E0282,
+                )
                 .emit();
         }
     }
@@ -661,10 +664,10 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
     fn report_const_error(&self, c: &'tcx ty::Const<'tcx>) {
         if !self.tcx.sess.has_errors() {
             self.infcx
-                .need_type_info_err_const(
+                .emit_inference_failure_err(
                     Some(self.body.id()),
                     self.span.to_span(self.tcx),
-                    c,
+                    c.into(),
                     E0282,
                 )
                 .emit();

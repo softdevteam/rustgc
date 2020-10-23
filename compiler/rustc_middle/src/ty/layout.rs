@@ -106,7 +106,7 @@ impl IntegerExt for Integer {
         }
 
         if repr.c() {
-            match &tcx.sess.target.target.arch[..] {
+            match &tcx.sess.target.arch[..] {
                 // WARNING: the ARM EABI has two variants; the one corresponding
                 // to `at_least == I32` appears to be used on Linux and NetBSD,
                 // but some systems may use the variant corresponding to no
@@ -174,9 +174,9 @@ pub enum LayoutError<'tcx> {
 impl<'tcx> fmt::Display for LayoutError<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            LayoutError::Unknown(ty) => write!(f, "the type `{:?}` has an unknown layout", ty),
+            LayoutError::Unknown(ty) => write!(f, "the type `{}` has an unknown layout", ty),
             LayoutError::SizeOverflow(ty) => {
-                write!(f, "the type `{:?}` is too big for the current architecture", ty)
+                write!(f, "the type `{}` is too big for the current architecture", ty)
             }
         }
     }
@@ -390,78 +390,60 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
 
         // Unpack newtype ABIs and find scalar pairs.
         if sized && size.bytes() > 0 {
-            // All other fields must be ZSTs, and we need them to all start at 0.
-            let mut zst_offsets = offsets.iter().enumerate().filter(|&(i, _)| fields[i].is_zst());
-            if zst_offsets.all(|(_, o)| o.bytes() == 0) {
-                let mut non_zst_fields = fields.iter().enumerate().filter(|&(_, f)| !f.is_zst());
+            // All other fields must be ZSTs.
+            let mut non_zst_fields = fields.iter().enumerate().filter(|&(_, f)| !f.is_zst());
 
-                match (non_zst_fields.next(), non_zst_fields.next(), non_zst_fields.next()) {
-                    // We have exactly one non-ZST field.
-                    (Some((i, field)), None, None) => {
-                        // Field fills the struct and it has a scalar or scalar pair ABI.
-                        if offsets[i].bytes() == 0
-                            && align.abi == field.align.abi
-                            && size == field.size
-                        {
-                            match field.abi {
-                                // For plain scalars, or vectors of them, we can't unpack
-                                // newtypes for `#[repr(C)]`, as that affects C ABIs.
-                                Abi::Scalar(_) | Abi::Vector { .. } if optimize => {
-                                    abi = field.abi.clone();
-                                }
-                                // But scalar pairs are Rust-specific and get
-                                // treated as aggregates by C ABIs anyway.
-                                Abi::ScalarPair(..) => {
-                                    abi = field.abi.clone();
-                                }
-                                _ => {}
+            match (non_zst_fields.next(), non_zst_fields.next(), non_zst_fields.next()) {
+                // We have exactly one non-ZST field.
+                (Some((i, field)), None, None) => {
+                    // Field fills the struct and it has a scalar or scalar pair ABI.
+                    if offsets[i].bytes() == 0 && align.abi == field.align.abi && size == field.size
+                    {
+                        match field.abi {
+                            // For plain scalars, or vectors of them, we can't unpack
+                            // newtypes for `#[repr(C)]`, as that affects C ABIs.
+                            Abi::Scalar(_) | Abi::Vector { .. } if optimize => {
+                                abi = field.abi.clone();
                             }
+                            // But scalar pairs are Rust-specific and get
+                            // treated as aggregates by C ABIs anyway.
+                            Abi::ScalarPair(..) => {
+                                abi = field.abi.clone();
+                            }
+                            _ => {}
                         }
                     }
-
-                    // Two non-ZST fields, and they're both scalars.
-                    (
-                        Some((
-                            i,
-                            &TyAndLayout {
-                                layout: &Layout { abi: Abi::Scalar(ref a), .. }, ..
-                            },
-                        )),
-                        Some((
-                            j,
-                            &TyAndLayout {
-                                layout: &Layout { abi: Abi::Scalar(ref b), .. }, ..
-                            },
-                        )),
-                        None,
-                    ) => {
-                        // Order by the memory placement, not source order.
-                        let ((i, a), (j, b)) = if offsets[i] < offsets[j] {
-                            ((i, a), (j, b))
-                        } else {
-                            ((j, b), (i, a))
-                        };
-                        let pair = self.scalar_pair(a.clone(), b.clone());
-                        let pair_offsets = match pair.fields {
-                            FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
-                                assert_eq!(memory_index, &[0, 1]);
-                                offsets
-                            }
-                            _ => bug!(),
-                        };
-                        if offsets[i] == pair_offsets[0]
-                            && offsets[j] == pair_offsets[1]
-                            && align == pair.align
-                            && size == pair.size
-                        {
-                            // We can use `ScalarPair` only when it matches our
-                            // already computed layout (including `#[repr(C)]`).
-                            abi = pair.abi;
-                        }
-                    }
-
-                    _ => {}
                 }
+
+                // Two non-ZST fields, and they're both scalars.
+                (
+                    Some((i, &TyAndLayout { layout: &Layout { abi: Abi::Scalar(ref a), .. }, .. })),
+                    Some((j, &TyAndLayout { layout: &Layout { abi: Abi::Scalar(ref b), .. }, .. })),
+                    None,
+                ) => {
+                    // Order by the memory placement, not source order.
+                    let ((i, a), (j, b)) =
+                        if offsets[i] < offsets[j] { ((i, a), (j, b)) } else { ((j, b), (i, a)) };
+                    let pair = self.scalar_pair(a.clone(), b.clone());
+                    let pair_offsets = match pair.fields {
+                        FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
+                            assert_eq!(memory_index, &[0, 1]);
+                            offsets
+                        }
+                        _ => bug!(),
+                    };
+                    if offsets[i] == pair_offsets[0]
+                        && offsets[j] == pair_offsets[1]
+                        && align == pair.align
+                        && size == pair.size
+                    {
+                        // We can use `ScalarPair` only when it matches our
+                        // already computed layout (including `#[repr(C)]`).
+                        abi = pair.abi;
+                    }
+                }
+
+                _ => {}
             }
         }
 
@@ -495,7 +477,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         };
         debug_assert!(!ty.has_infer_types_or_consts());
 
-        Ok(match ty.kind {
+        Ok(match *ty.kind() {
             // Basic scalars.
             ty::Bool => tcx.intern_layout(Layout::scalar(
                 self,
@@ -540,7 +522,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                 }
 
                 let unsized_part = tcx.struct_tail_erasing_lifetimes(pointee, param_env);
-                let metadata = match unsized_part.kind {
+                let metadata = match unsized_part.kind() {
                     ty::Foreign(..) => {
                         return Ok(tcx.intern_layout(Layout::scalar(self, data_ptr)));
                     }
@@ -1259,11 +1241,11 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                 tcx.layout_raw(param_env.and(normalized))?
             }
 
-            ty::Bound(..) | ty::Placeholder(..) | ty::GeneratorWitness(..) | ty::Infer(_) => {
+            ty::Placeholder(..) | ty::GeneratorWitness(..) | ty::Infer(_) => {
                 bug!("Layout::compute: unexpected type `{}`", ty)
             }
 
-            ty::Param(_) | ty::Error(_) => {
+            ty::Bound(..) | ty::Param(_) | ty::Error(_) => {
                 return Err(LayoutError::Unknown(ty));
             }
         })
@@ -1624,7 +1606,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
             );
         };
 
-        let adt_def = match layout.ty.kind {
+        let adt_def = match *layout.ty.kind() {
             ty::Adt(ref adt_def, _) => {
                 debug!("print-type-size t: `{:?}` process adt", layout.ty);
                 adt_def
@@ -1767,11 +1749,11 @@ impl<'tcx> SizeSkeleton<'tcx> {
             Err(err) => err,
         };
 
-        match ty.kind {
+        match *ty.kind() {
             ty::Ref(_, pointee, _) | ty::RawPtr(ty::TypeAndMut { ty: pointee, .. }) => {
                 let non_zero = !ty.is_unsafe_ptr();
                 let tail = tcx.struct_tail_erasing_lifetimes(pointee, param_env);
-                match tail.kind {
+                match tail.kind() {
                     ty::Param(_) | ty::Projection(_) => {
                         debug_assert!(tail.has_param_types_or_consts());
                         Ok(SizeSkeleton::Pointer { non_zero, tail: tcx.erase_regions(&tail) })
@@ -1912,7 +1894,7 @@ impl<'tcx, T: HasTyCtxt<'tcx>> HasTyCtxt<'tcx> for LayoutCx<'tcx, T> {
     }
 }
 
-pub type TyAndLayout<'tcx> = ::rustc_target::abi::TyAndLayout<'tcx, Ty<'tcx>>;
+pub type TyAndLayout<'tcx> = rustc_target::abi::TyAndLayout<'tcx, Ty<'tcx>>;
 
 impl<'tcx> LayoutOf for LayoutCx<'tcx, TyCtxt<'tcx>> {
     type Ty = Ty<'tcx>;
@@ -2018,7 +2000,7 @@ where
                     assert_eq!(original_layout.variants, Variants::Single { index });
                 }
 
-                let fields = match this.ty.kind {
+                let fields = match this.ty.kind() {
                     ty::Adt(def, _) if def.variants.is_empty() =>
                         bug!("for_variant called on zero-variant enum"),
                     ty::Adt(def, _) => def.variants[variant_index].fields.len(),
@@ -2056,7 +2038,7 @@ where
             }))
         };
 
-        cx.layout_of(match this.ty.kind {
+        cx.layout_of(match *this.ty.kind() {
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -2092,7 +2074,7 @@ where
                     ));
                 }
 
-                match tcx.struct_tail_erasing_lifetimes(pointee, cx.param_env()).kind {
+                match tcx.struct_tail_erasing_lifetimes(pointee, cx.param_env()).kind() {
                     ty::Slice(_) | ty::Str => tcx.types.usize,
                     ty::Dynamic(_, _) => {
                         tcx.mk_imm_ref(tcx.lifetimes.re_static, tcx.mk_array(tcx.types.usize, 3))
@@ -2170,7 +2152,7 @@ where
             if ty.is_fn() { cx.data_layout().instruction_address_space } else { AddressSpace::DATA }
         };
 
-        let pointee_info = match this.ty.kind {
+        let pointee_info = match *this.ty.kind() {
             ty::RawPtr(mt) if offset.bytes() == 0 => {
                 cx.layout_of(mt.ty).to_result().ok().map(|layout| PointeeInfo {
                     size: layout.size,
@@ -2286,7 +2268,7 @@ where
 
                 // FIXME(eddyb) This should be for `ptr::Unique<T>`, not `Box<T>`.
                 if let Some(ref mut pointee) = result {
-                    if let ty::Adt(def, _) = this.ty.kind {
+                    if let ty::Adt(def, _) = this.ty.kind() {
                         if def.is_box() && offset.bytes() == 0 {
                             pointee.safe = Some(PointerKind::UniqueOwned);
                         }
@@ -2299,7 +2281,9 @@ where
 
         debug!(
             "pointee_info_at (offset={:?}, type kind: {:?}) => {:?}",
-            offset, this.ty.kind, pointee_info
+            offset,
+            this.ty.kind(),
+            pointee_info
         );
 
         pointee_info
@@ -2326,14 +2310,14 @@ impl<'tcx> ty::Instance<'tcx> {
     fn fn_sig_for_fn_abi(&self, tcx: TyCtxt<'tcx>) -> ty::PolyFnSig<'tcx> {
         // FIXME(davidtwco,eddyb): A `ParamEnv` should be passed through to this function.
         let ty = self.ty(tcx, ty::ParamEnv::reveal_all());
-        match ty.kind {
+        match *ty.kind() {
             ty::FnDef(..) => {
                 // HACK(davidtwco,eddyb): This is a workaround for polymorphization considering
                 // parameters unused if they show up in the signature, but not in the `mir::Body`
                 // (i.e. due to being inside a projection that got normalized, see
                 // `src/test/ui/polymorphization/normalized_sig_types.rs`), and codegen not keeping
                 // track of a polymorphization `ParamEnv` to allow normalizing later.
-                let mut sig = match ty.kind {
+                let mut sig = match *ty.kind() {
                     ty::FnDef(def_id, substs) => tcx
                         .normalize_erasing_regions(tcx.param_env(def_id), tcx.fn_sig(def_id))
                         .subst(tcx, substs),
@@ -2564,7 +2548,7 @@ where
         let sig = cx.tcx().normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), &sig);
 
         use rustc_target::spec::abi::Abi::*;
-        let conv = match cx.tcx().sess.target.target.adjust_abi(sig.abi) {
+        let conv = match cx.tcx().sess.target.adjust_abi(sig.abi) {
             RustIntrinsic | PlatformIntrinsic | Rust | RustCall => Conv::Rust,
 
             // It's the ABI's job to select this, not ours.
@@ -2596,7 +2580,7 @@ where
             assert!(!sig.c_variadic && extra_args.is_empty());
 
             if let Some(input) = sig.inputs().last() {
-                if let ty::Tuple(tupled_arguments) = input.kind {
+                if let ty::Tuple(tupled_arguments) = input.kind() {
                     inputs = &sig.inputs()[0..sig.inputs().len() - 1];
                     tupled_arguments.iter().map(|k| k.expect_ty()).collect()
                 } else {
@@ -2616,7 +2600,7 @@ where
             extra_args.to_vec()
         };
 
-        let target = &cx.tcx().sess.target.target;
+        let target = &cx.tcx().sess.target;
         let target_env_gnu_like = matches!(&target.target_env[..], "gnu" | "musl");
         let win_x64_gnu =
             target.target_os == "windows" && target.arch == "x86_64" && target.target_env == "gnu";
@@ -2626,10 +2610,7 @@ where
             target.target_os == "linux" && target.arch == "sparc64" && target_env_gnu_like;
         let linux_powerpc_gnu_like =
             target.target_os == "linux" && target.arch == "powerpc" && target_env_gnu_like;
-        let rust_abi = match sig.abi {
-            RustIntrinsic | PlatformIntrinsic | Rust | RustCall => true,
-            _ => false,
-        };
+        let rust_abi = matches!(sig.abi, RustIntrinsic | PlatformIntrinsic | Rust | RustCall);
 
         // Handle safe Rust thin and fat pointers.
         let adjust_for_rust_scalar = |attrs: &mut ArgAttributes,
@@ -2751,6 +2732,7 @@ where
             can_unwind: fn_can_unwind(cx.tcx().sess.panic_strategy(), codegen_fn_attr_flags, conv),
         };
         fn_abi.adjust_for_abi(cx, sig.abi);
+        debug!("FnAbi::new_internal = {:?}", fn_abi);
         fn_abi
     }
 
@@ -2764,7 +2746,7 @@ where
             || abi == SpecAbi::RustIntrinsic
             || abi == SpecAbi::PlatformIntrinsic
         {
-            let fixup = |arg: &mut ArgAbi<'tcx, Ty<'tcx>>| {
+            let fixup = |arg: &mut ArgAbi<'tcx, Ty<'tcx>>, is_ret: bool| {
                 if arg.is_ignore() {
                     return;
                 }
@@ -2793,7 +2775,7 @@ where
                     // anyway, we control all calls to it in libstd.
                     Abi::Vector { .. }
                         if abi != SpecAbi::PlatformIntrinsic
-                            && cx.tcx().sess.target.target.options.simd_types_indirect =>
+                            && cx.tcx().sess.target.options.simd_types_indirect =>
                     {
                         arg.make_indirect();
                         return;
@@ -2802,8 +2784,12 @@ where
                     _ => return,
                 }
 
+                // Return structures up to 2 pointers in size by value, matching `ScalarPair`. LLVM
+                // will usually return these in 2 registers, which is more efficient than by-ref.
+                let max_by_val_size = if is_ret { Pointer.size(cx) * 2 } else { Pointer.size(cx) };
                 let size = arg.layout.size;
-                if arg.layout.is_unsized() || size > Pointer.size(cx) {
+
+                if arg.layout.is_unsized() || size > max_by_val_size {
                     arg.make_indirect();
                 } else {
                     // We want to pass small aggregates as immediates, but using
@@ -2812,9 +2798,9 @@ where
                     arg.cast_to(Reg { kind: RegKind::Integer, size });
                 }
             };
-            fixup(&mut self.ret);
+            fixup(&mut self.ret, true);
             for arg in &mut self.args {
-                fixup(arg);
+                fixup(arg, false);
             }
             if let PassMode::Indirect(ref mut attrs, _) = self.ret.mode {
                 attrs.set(ArgAttribute::StructRet);

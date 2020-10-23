@@ -120,14 +120,12 @@ pub fn finalize(cx: &CodegenCx<'_, '_>) {
         // for macOS to understand. For more info see #11352
         // This can be overridden using --llvm-opts -dwarf-version,N.
         // Android has the same issue (#22398)
-        if cx.sess().target.target.options.is_like_osx
-            || cx.sess().target.target.options.is_like_android
-        {
-            llvm::LLVMRustAddModuleFlag(cx.llmod, "Dwarf Version\0".as_ptr().cast(), 2)
+        if let Some(version) = cx.sess().target.options.dwarf_version {
+            llvm::LLVMRustAddModuleFlag(cx.llmod, "Dwarf Version\0".as_ptr().cast(), version)
         }
 
         // Indicate that we want CodeView debug information on MSVC
-        if cx.sess().target.target.options.is_like_msvc {
+        if cx.sess().target.options.is_like_msvc {
             llvm::LLVMRustAddModuleFlag(cx.llmod, "CodeView\0".as_ptr().cast(), 1)
         }
 
@@ -348,7 +346,7 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
             });
 
             // Arguments types
-            if cx.sess().target.target.options.is_like_msvc {
+            if cx.sess().target.options.is_like_msvc {
                 // FIXME(#42800):
                 // There is a bug in MSDIA that leads to a crash when it encounters
                 // a fixed-size array of `u8` or something zero-sized in a
@@ -361,9 +359,9 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 // already inaccurate due to ABI adjustments (see #42800).
                 signature.extend(fn_abi.args.iter().map(|arg| {
                     let t = arg.layout.ty;
-                    let t = match t.kind {
+                    let t = match t.kind() {
                         ty::Array(ct, _)
-                            if (ct == cx.tcx.types.u8) || cx.layout_of(ct).is_zst() =>
+                            if (*ct == cx.tcx.types.u8) || cx.layout_of(ct).is_zst() =>
                         {
                             cx.tcx.mk_imm_ptr(ct)
                         }
@@ -467,7 +465,7 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 
                     // Only "class" methods are generally understood by LLVM,
                     // so avoid methods on other types (e.g., `<*mut T>::null`).
-                    match impl_self_ty.kind {
+                    match impl_self_ty.kind() {
                         ty::Adt(def, ..) if !def.is_box() => {
                             // Again, only create type information if full debuginfo is enabled
                             if cx.sess().opts.debuginfo == DebugInfo::Full

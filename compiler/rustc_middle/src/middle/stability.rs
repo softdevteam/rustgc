@@ -13,6 +13,7 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId, CRATE_DEF_INDEX};
 use rustc_hir::{self, HirId};
+use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::lint::builtin::{DEPRECATED, DEPRECATED_IN_FUTURE, SOFT_UNSTABLE};
 use rustc_session::lint::{BuiltinLintDiagnostics, Lint, LintBuffer};
 use rustc_session::parse::feature_err_issue;
@@ -255,24 +256,12 @@ pub enum EvalResult {
 }
 
 // See issue #38412.
-fn skip_stability_check_due_to_privacy(tcx: TyCtxt<'_>, mut def_id: DefId) -> bool {
-    // Check if `def_id` is a trait method.
-    match tcx.def_kind(def_id) {
-        DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst => {
-            if let ty::TraitContainer(trait_def_id) = tcx.associated_item(def_id).container {
-                // Trait methods do not declare visibility (even
-                // for visibility info in cstore). Use containing
-                // trait instead, so methods of `pub` traits are
-                // themselves considered `pub`.
-                def_id = trait_def_id;
-            }
-        }
-        _ => {}
+fn skip_stability_check_due_to_privacy(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    if tcx.def_kind(def_id) == DefKind::TyParam {
+        // Have no visibility, considered public for the purpose of this check.
+        return false;
     }
-
-    let visibility = tcx.visibility(def_id);
-
-    match visibility {
+    match tcx.visibility(def_id) {
         // Must check stability for `pub` items.
         ty::Visibility::Public => false,
 
@@ -308,7 +297,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 // #[rustc_deprecated] however wants to emit down the whole
                 // hierarchy.
                 if !skip || depr_entry.attr.is_since_rustc_version {
-                    let path = &self.def_path_str(def_id);
+                    let path = &with_no_trimmed_paths(|| self.def_path_str(def_id));
                     let kind = self.def_kind(def_id).descr(def_id);
                     let (message, lint) = deprecation_message(&depr_entry.attr, kind, path);
                     late_report_deprecation(
@@ -391,9 +380,27 @@ impl<'tcx> TyCtxt<'tcx> {
     /// If the item defined by `def_id` is unstable and the corresponding `#![feature]` does not
     /// exist, emits an error.
     ///
-    /// Additionally, this function will also check if the item is deprecated. If so, and `id` is
-    /// not `None`, a deprecated lint attached to `id` will be emitted.
+    /// This function will also check if the item is deprecated.
+    /// If so, and `id` is not `None`, a deprecated lint attached to `id` will be emitted.
     pub fn check_stability(self, def_id: DefId, id: Option<HirId>, span: Span) {
+        self.check_optional_stability(def_id, id, span, |span, def_id| {
+            // The API could be uncallable for other reasons, for example when a private module
+            // was referenced.
+            self.sess.delay_span_bug(span, &format!("encountered unmarked API: {:?}", def_id));
+        })
+    }
+
+    /// Like `check_stability`, except that we permit items to have custom behaviour for
+    /// missing stability attributes (not necessarily just emit a `bug!`). This is necessary
+    /// for default generic parameters, which only have stability attributes if they were
+    /// added after the type on which they're defined.
+    pub fn check_optional_stability(
+        self,
+        def_id: DefId,
+        id: Option<HirId>,
+        span: Span,
+        unmarked: impl FnOnce(Span, DefId) -> (),
+    ) {
         let soft_handler = |lint, span, msg: &_| {
             self.struct_span_lint_hir(lint, id.unwrap_or(hir::CRATE_HIR_ID), span, |lint| {
                 lint.build(msg).emit()
@@ -404,11 +411,7 @@ impl<'tcx> TyCtxt<'tcx> {
             EvalResult::Deny { feature, reason, issue, is_soft } => {
                 report_unstable(self.sess, feature, reason, issue, is_soft, span, soft_handler)
             }
-            EvalResult::Unmarked => {
-                // The API could be uncallable for other reasons, for example when a private module
-                // was referenced.
-                self.sess.delay_span_bug(span, &format!("encountered unmarked API: {:?}", def_id));
-            }
+            EvalResult::Unmarked => unmarked(span, def_id),
         }
     }
 

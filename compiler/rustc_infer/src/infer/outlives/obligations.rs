@@ -110,7 +110,7 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
 
     /// Trait queries just want to pass back type obligations "as is"
     pub fn take_registered_region_obligations(&self) -> Vec<(hir::HirId, RegionObligation<'tcx>)> {
-        ::std::mem::take(&mut self.inner.borrow_mut().region_obligations)
+        std::mem::take(&mut self.inner.borrow_mut().region_obligations)
     }
 
     /// Process the region obligations that must be proven (during
@@ -383,7 +383,7 @@ where
         // #55756) in cases where you have e.g., `<T as Foo<'a>>::Item:
         // 'a` in the environment but `trait Foo<'b> { type Item: 'b
         // }` in the trait definition.
-        approx_env_bounds.retain(|bound| match bound.0.kind {
+        approx_env_bounds.retain(|bound| match *bound.0.kind() {
             ty::Projection(projection_ty) => self
                 .verify_bound
                 .projection_declared_bounds_from_trait(projection_ty)

@@ -30,7 +30,7 @@
 //! ## No interop with C required
 //!
 //! By default the `crt-static` target feature is enabled, and when enabled
-//! this means that the the bundled version of `libc.a` found in `liblibc.rlib`
+//! this means that the bundled version of `libc.a` found in `liblibc.rlib`
 //! is used. This isn't intended really for interoperation with a C because it
 //! may be the case that Rust's bundled C library is incompatible with a
 //! foreign-compiled C library. In this use case, though, we use `rust-lld` and
@@ -75,7 +75,7 @@
 use super::wasm32_base;
 use super::{crt_objects, LinkerFlavor, LldFlavor, Target};
 
-pub fn target() -> Result<Target, String> {
+pub fn target() -> Target {
     let mut options = wasm32_base::options();
 
     options
@@ -104,10 +104,10 @@ pub fn target() -> Result<Target, String> {
     // `args::args()` makes the WASI API calls itself.
     options.main_needs_argc_argv = false;
 
-    Ok(Target {
+    Target {
         llvm_target: "wasm32-wasi".to_string(),
         target_endian: "little".to_string(),
-        target_pointer_width: "32".to_string(),
+        pointer_width: 32,
         target_c_int_width: "32".to_string(),
         target_os: "wasi".to_string(),
         target_env: String::new(),
@@ -116,5 +116,5 @@ pub fn target() -> Result<Target, String> {
         arch: "wasm32".to_string(),
         linker_flavor: LinkerFlavor::Lld(LldFlavor::Wasm),
         options,
-    })
+    }
 }

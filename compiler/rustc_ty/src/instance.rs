@@ -53,7 +53,7 @@ fn inner_resolve_instance<'tcx>(
         let ty = tcx.type_of(def.def_id_for_type_of());
         let item_type = tcx.subst_and_normalize_erasing_regions(substs, param_env, &ty);
 
-        let def = match item_type.kind {
+        let def = match *item_type.kind() {
             ty::FnDef(..)
                 if {
                     let f = item_type.fn_sig(tcx);
@@ -68,7 +68,7 @@ fn inner_resolve_instance<'tcx>(
 
                 if ty.needs_drop(tcx, param_env) {
                     debug!(" => nontrivial drop glue");
-                    match ty.kind {
+                    match *ty.kind() {
                         ty::Closure(..)
                         | ty::Generator(..)
                         | ty::Tuple(..)
@@ -119,9 +119,9 @@ fn resolve_associated_item<'tcx>(
     // Now that we know which impl is being used, we can dispatch to
     // the actual function:
     Ok(match vtbl {
-        traits::ImplSourceUserDefined(impl_data) => {
+        traits::ImplSource::UserDefined(impl_data) => {
             debug!(
-                "resolving ImplSourceUserDefined: {:?}, {:?}, {:?}, {:?}",
+                "resolving ImplSource::UserDefined: {:?}, {:?}, {:?}, {:?}",
                 param_env, trait_item, rcvr_substs, impl_data
             );
             assert!(!rcvr_substs.needs_infer());
@@ -216,13 +216,13 @@ fn resolve_associated_item<'tcx>(
 
             Some(ty::Instance::new(leaf_def.item.def_id, substs))
         }
-        traits::ImplSourceGenerator(generator_data) => Some(Instance {
+        traits::ImplSource::Generator(generator_data) => Some(Instance {
             def: ty::InstanceDef::Item(ty::WithOptConstParam::unknown(
                 generator_data.generator_def_id,
             )),
             substs: generator_data.substs,
         }),
-        traits::ImplSourceClosure(closure_data) => {
+        traits::ImplSource::Closure(closure_data) => {
             let trait_closure_kind = tcx.fn_trait_kind_from_lang_item(trait_id).unwrap();
             Some(Instance::resolve_closure(
                 tcx,
@@ -231,18 +231,18 @@ fn resolve_associated_item<'tcx>(
                 trait_closure_kind,
             ))
         }
-        traits::ImplSourceFnPointer(ref data) => match data.fn_ty.kind {
+        traits::ImplSource::FnPointer(ref data) => match data.fn_ty.kind() {
             ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
                 def: ty::InstanceDef::FnPtrShim(trait_item.def_id, data.fn_ty),
                 substs: rcvr_substs,
             }),
             _ => None,
         },
-        traits::ImplSourceObject(ref data) => {
+        traits::ImplSource::Object(ref data) => {
             let index = traits::get_vtable_index_of_object_method(tcx, data, def_id);
             Some(Instance { def: ty::InstanceDef::Virtual(def_id, index), substs: rcvr_substs })
         }
-        traits::ImplSourceBuiltin(..) => {
+        traits::ImplSource::Builtin(..) => {
             if Some(trait_ref.def_id) == tcx.lang_items().clone_trait() {
                 // FIXME(eddyb) use lang items for methods instead of names.
                 let name = tcx.item_name(def_id);
@@ -250,7 +250,7 @@ fn resolve_associated_item<'tcx>(
                     let self_ty = trait_ref.self_ty();
 
                     let is_copy = self_ty.is_copy_modulo_regions(tcx.at(DUMMY_SP), param_env);
-                    match self_ty.kind {
+                    match self_ty.kind() {
                         _ if is_copy => (),
                         ty::Array(..) | ty::Closure(..) | ty::Tuple(..) => {}
                         _ => return Ok(None),
@@ -271,10 +271,10 @@ fn resolve_associated_item<'tcx>(
                 None
             }
         }
-        traits::ImplSourceAutoImpl(..)
-        | traits::ImplSourceParam(..)
-        | traits::ImplSourceTraitAlias(..)
-        | traits::ImplSourceDiscriminantKind(..) => None,
+        traits::ImplSource::AutoImpl(..)
+        | traits::ImplSource::Param(..)
+        | traits::ImplSource::TraitAlias(..)
+        | traits::ImplSource::DiscriminantKind(..) => None,
     })
 }
 

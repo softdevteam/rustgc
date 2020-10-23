@@ -120,7 +120,7 @@ pub fn compare_simd_types<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     ret_ty: Bx::Type,
     op: hir::BinOpKind,
 ) -> Bx::Value {
-    let signed = match t.kind {
+    let signed = match t.kind() {
         ty::Float(_) => {
             let cmp = bin_op_to_fcmp_predicate(op);
             let cmp = bx.fcmp(cmp, lhs, rhs);
@@ -153,7 +153,7 @@ pub fn unsized_info<'tcx, Cx: CodegenMethods<'tcx>>(
 ) -> Cx::Value {
     let (source, target) =
         cx.tcx().struct_lockstep_tails_erasing_lifetimes(source, target, cx.param_env());
-    match (&source.kind, &target.kind) {
+    match (source.kind(), target.kind()) {
         (&ty::Array(_, len), &ty::Slice(_)) => {
             cx.const_usize(len.eval_usize(cx.tcx(), ty::ParamEnv::reveal_all()))
         }
@@ -182,7 +182,7 @@ pub fn unsize_thin_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     dst_ty: Ty<'tcx>,
 ) -> (Bx::Value, Bx::Value) {
     debug!("unsize_thin_ptr: {:?} => {:?}", src_ty, dst_ty);
-    match (&src_ty.kind, &dst_ty.kind) {
+    match (src_ty.kind(), dst_ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
         | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
             assert!(bx.cx().type_is_sized(a));
@@ -231,7 +231,7 @@ pub fn coerce_unsized_into<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 ) {
     let src_ty = src.layout.ty;
     let dst_ty = dst.layout.ty;
-    match (&src_ty.kind, &dst_ty.kind) {
+    match (src_ty.kind(), dst_ty.kind()) {
         (&ty::Ref(..), &ty::Ref(..) | &ty::RawPtr(..)) | (&ty::RawPtr(..), &ty::RawPtr(..)) => {
             let (base, info) = match bx.load_operand(src).val {
                 OperandValue::Pair(base, info) => {
@@ -327,7 +327,7 @@ fn cast_shift_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 /// currently uses SEH-ish unwinding with DWARF info tables to the side (same as
 /// 64-bit MinGW) instead of "full SEH".
 pub fn wants_msvc_seh(sess: &Session) -> bool {
-    sess.target.target.options.is_like_msvc
+    sess.target.options.is_like_msvc
 }
 
 pub fn memcpy_ty<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
@@ -393,7 +393,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     ) -> Bx::Function {
         // The entry function is either `int main(void)` or `int main(int argc, char **argv)`,
         // depending on whether the target needs `argc` and `argv` to be passed in.
-        let llfty = if cx.sess().target.target.options.main_needs_argc_argv {
+        let llfty = if cx.sess().target.options.main_needs_argc_argv {
             cx.type_func(&[cx.type_int(), cx.type_ptr_to(cx.type_i8p())], cx.type_int())
         } else {
             cx.type_func(&[], cx.type_int())
@@ -407,16 +407,18 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         // listing.
         let main_ret_ty = cx.tcx().erase_regions(&main_ret_ty.no_bound_vars().unwrap());
 
-        if cx.get_declared_value("main").is_some() {
-            // FIXME: We should be smart and show a better diagnostic here.
-            cx.sess()
-                .struct_span_err(sp, "entry symbol `main` declared multiple times")
-                .help("did you use `#[no_mangle]` on `fn main`? Use `#[start]` instead")
-                .emit();
-            cx.sess().abort_if_errors();
-            bug!();
-        }
-        let llfn = cx.declare_cfn("main", llfty);
+        let llfn = match cx.declare_c_main(llfty) {
+            Some(llfn) => llfn,
+            None => {
+                // FIXME: We should be smart and show a better diagnostic here.
+                cx.sess()
+                    .struct_span_err(sp, "entry symbol `main` declared multiple times")
+                    .help("did you use `#[no_mangle]` on `fn main`? Use `#[start]` instead")
+                    .emit();
+                cx.sess().abort_if_errors();
+                bug!();
+            }
+        };
 
         // `main` should respect same config for frame pointer elimination as rest of code
         cx.set_frame_pointer_elimination(llfn);
@@ -462,7 +464,7 @@ fn get_argc_argv<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     cx: &'a Bx::CodegenCx,
     bx: &mut Bx,
 ) -> (Bx::Value, Bx::Value) {
-    if cx.sess().target.target.options.main_needs_argc_argv {
+    if cx.sess().target.options.main_needs_argc_argv {
         // Params from native `main()` used as args for rust start function
         let param_argc = bx.get_param(0);
         let param_argv = bx.get_param(1);
@@ -476,8 +478,6 @@ fn get_argc_argv<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         (arg_argc, arg_argv)
     }
 }
-
-pub const CODEGEN_WORKER_ID: usize = usize::MAX;
 
 pub fn codegen_crate<B: ExtraBackendMethods>(
     backend: B,
@@ -536,8 +536,9 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         let llmod_id =
             cgu_name_builder.build_cgu_name(LOCAL_CRATE, &["crate"], Some("allocator")).to_string();
         let mut modules = backend.new_metadata(tcx, &llmod_id);
-        tcx.sess
-            .time("write_allocator_module", || backend.codegen_allocator(tcx, &mut modules, kind));
+        tcx.sess.time("write_allocator_module", || {
+            backend.codegen_allocator(tcx, &mut modules, kind, tcx.lang_items().oom().is_some())
+        });
 
         Some(ModuleCodegen { name: llmod_id, module_llvm: modules, kind: ModuleKind::Allocator })
     } else {
@@ -692,7 +693,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         total_codegen_time.into_inner(),
     );
 
-    ::rustc_incremental::assert_module_sources::assert_module_sources(tcx);
+    rustc_incremental::assert_module_sources::assert_module_sources(tcx);
 
     symbol_names_test::report_symbol_names(tcx);
 
@@ -751,8 +752,8 @@ impl<B: ExtraBackendMethods> Drop for AbortCodegenOnDrop<B> {
 }
 
 fn finalize_tcx(tcx: TyCtxt<'_>) {
-    tcx.sess.time("assert_dep_graph", || ::rustc_incremental::assert_dep_graph(tcx));
-    tcx.sess.time("serialize_dep_graph", || ::rustc_incremental::save_dep_graph(tcx));
+    tcx.sess.time("assert_dep_graph", || rustc_incremental::assert_dep_graph(tcx));
+    tcx.sess.time("serialize_dep_graph", || rustc_incremental::save_dep_graph(tcx));
 
     // We assume that no queries are run past here. If there are new queries
     // after this point, they'll show up as "<unknown>" in self-profiling data.

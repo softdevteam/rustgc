@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(bool_to_option)]
 #![feature(option_expect_none)]
 #![feature(box_patterns)]
@@ -6,10 +6,7 @@
 #![feature(in_band_lifetimes)]
 #![feature(nll)]
 #![feature(or_patterns)]
-#![feature(trusted_len)]
 #![feature(associated_type_bounds)]
-#![feature(const_fn)] // for rustc_index::newtype_index
-#![feature(const_panic)] // for rustc_index::newtype_index
 #![recursion_limit = "256"]
 
 //! This crate contains codegen code that is used by all codegen backends (LLVM and others).
@@ -24,7 +21,6 @@ extern crate tracing;
 extern crate rustc_middle;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::Lrc;
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::LangItem;
@@ -45,6 +41,7 @@ pub mod glue;
 pub mod meth;
 pub mod mir;
 pub mod mono_item;
+pub mod target_features;
 pub mod traits;
 
 pub struct ModuleCodegen<M> {
@@ -136,7 +133,6 @@ pub struct CodegenResults {
     pub modules: Vec<CompiledModule>,
     pub allocator_module: Option<CompiledModule>,
     pub metadata_module: Option<CompiledModule>,
-    pub crate_hash: Svh,
     pub metadata: rustc_middle::middle::cstore::EncodedMetadata,
     pub windows_subsystem: Option<String>,
     pub linker_info: back::linker::LinkerInfo,
@@ -146,6 +142,7 @@ pub struct CodegenResults {
 pub fn provide(providers: &mut Providers) {
     crate::back::symbol_export::provide(providers);
     crate::base::provide_both(providers);
+    crate::target_features::provide(providers);
 }
 
 pub fn provide_extern(providers: &mut Providers) {

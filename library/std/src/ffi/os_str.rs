@@ -69,7 +69,7 @@ use crate::sys_common::{AsInner, FromInner, IntoInner};
 /// [`&OsStr`]: OsStr
 /// [`&str`]: str
 /// [`CStr`]: crate::ffi::CStr
-/// [conversions]: index.html#conversions
+/// [conversions]: super#conversions
 #[derive(Clone)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct OsString {
@@ -88,13 +88,13 @@ pub struct OsString {
 /// the traits which `OsStr` implements for [conversions] from/to native representations.
 ///
 /// [`&str`]: str
-/// [conversions]: index.html#conversions
+/// [conversions]: super#conversions
 #[stable(feature = "rust1", since = "1.0.0")]
 // FIXME:
 // `OsStr::from_inner` current implementation relies
 // on `OsStr` being layout-compatible with `Slice`.
 // When attribute privacy is implemented, `OsStr` should be annotated as `#[repr(transparent)]`.
-// Anyway, `OsStr` representation and layout are considered implementation detail, are
+// Anyway, `OsStr` representation and layout are considered implementation details, are
 // not documented and must not be relied upon.
 pub struct OsStr {
     inner: Slice,
@@ -510,14 +510,14 @@ impl OsStr {
 
     #[inline]
     fn from_inner(inner: &Slice) -> &OsStr {
-        // Safety: OsStr is just a wrapper of Slice,
+        // SAFETY: OsStr is just a wrapper of Slice,
         // therefore converting &Slice to &OsStr is safe.
         unsafe { &*(inner as *const Slice as *const OsStr) }
     }
 
     #[inline]
     fn from_inner_mut(inner: &mut Slice) -> &mut OsStr {
-        // Safety: OsStr is just a wrapper of Slice,
+        // SAFETY: OsStr is just a wrapper of Slice,
         // therefore converting &mut Slice to &mut OsStr is safe.
         // Any method that mutates OsStr must be careful not to
         // break platform-specific encoding, in particular Wtf8 on Windows.

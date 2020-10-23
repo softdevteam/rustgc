@@ -303,7 +303,7 @@ const UNICODE_ARRAY: &[(char, &str, char)] = &[
 // However, we should first remove compound tokens like `<<` from `rustc_lexer`, and then add
 // fancier error recovery to it, as there will be less overall work to do this way.
 const ASCII_ARRAY: &[(char, &str, Option<token::TokenKind>)] = &[
-    (' ', "Space", Some(token::Whitespace)),
+    (' ', "Space", None),
     ('_', "Underscore", Some(token::Ident(kw::Underscore, false))),
     ('-', "Minus/Hyphen", Some(token::BinOp(token::Minus))),
     (',', "Comma", Some(token::Comma)),
@@ -332,7 +332,7 @@ const ASCII_ARRAY: &[(char, &str, Option<token::TokenKind>)] = &[
     ('"', "Quotation Mark", None),
 ];
 
-crate fn check_for_substitution<'a>(
+pub(super) fn check_for_substitution<'a>(
     reader: &StringReader<'a>,
     pos: BytePos,
     ch: char,

@@ -120,10 +120,14 @@ h3.impl, h3.method, h3.type {
 }
 
 h1, h2, h3, h4,
-.sidebar, a.source, .search-input, .content table :not(code)>a,
+.sidebar, a.source, .search-input, .content table td:first-child > a,
 .collapse-toggle, div.item-list .out-of-band,
 #source-sidebar, #sidebar-toggle {
 	font-family: "Fira Sans", sans-serif;
+}
+
+.content ul.crate a.crate {
+	font: 16px/1.6 "Fira Sans";
 }
 
 ol, ul {
@@ -386,15 +390,11 @@ nav.sub {
 	cursor: pointer;
 }
 
+.docblock-short {
+	overflow-wrap: anywhere;
+}
 .docblock-short p {
 	display: inline;
-}
-
-.docblock-short.nowrap {
-	display: block;
-	overflow: hidden;
-	white-space: nowrap;
-	text-overflow: ellipsis;
 }
 
 .docblock-short p {
@@ -796,14 +796,22 @@ body.blur > :not(#help) {
 	clear: left;
 	display: block;
 }
+#help > div > span {
+	text-align: center;
+	display: block;
+	margin: 10px 0;
+	font-size: 18px;
+	border-bottom: 1px solid #ccc;
+	padding-bottom: 4px;
+	margin-bottom: 6px;
+}
 #help dd { margin: 5px 35px; }
 #help .infos { padding-left: 0; }
 #help h1, #help h2 { margin-top: 0; }
 #help > div div {
 	width: 50%;
 	float: left;
-	padding: 20px;
-	padding-left: 17px;
+	padding: 0 20px 20px 17px;;
 }
 
 .stab {
@@ -1092,6 +1100,10 @@ h3 > .collapse-toggle, h4 > .collapse-toggle {
 	margin-top: -5px;
 	border-width: 5px;
 	border-style: solid;
+}
+
+.tooltip:hover .tooltiptext {
+	display: inline;
 }
 
 .tooltip.compile_fail, .tooltip.should_panic, .tooltip.ignore {
@@ -1536,6 +1548,14 @@ h4 > .notable-traits {
 		left: 0;
 		top: 100%;
 	}
+
+	/* We don't display the help button on mobile devices. */
+	.help-button {
+		display: none;
+	}
+	.search-container > div {
+		width: calc(100% - 32px);
+	}
 }
 
 @media print {
@@ -1545,12 +1565,43 @@ h4 > .notable-traits {
 }
 
 @media (max-width: 416px) {
-	#titles {
+	#titles, #titles > div {
 		height: 73px;
 	}
 
-	#titles > div {
-		height: 73px;
+	#main > table:not(.table-display) td {
+		word-break: break-word;
+		min-width: 10%;
+	}
+
+	.search-container > div {
+		display: block;
+		width: calc(100% - 37px);
+	}
+
+	#crate-search {
+		width: 100%;
+		border-radius: 4px;
+		border: 0;
+	}
+
+	#crate-search + .search-input {
+		width: calc(100% + 71px);
+		margin-left: -36px;
+	}
+
+	#theme-picker, #settings-menu {
+		padding: 5px;
+		width: 31px;
+		height: 31px;
+	}
+
+	#theme-picker {
+		margin-top: -2px;
+	}
+
+	#settings-menu {
+		top: 7px;
 	}
 }
 

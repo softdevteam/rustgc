@@ -6,6 +6,7 @@ use crate::maybe_recover_from_interpolated_ty_qpath;
 
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Token, TokenKind};
+use rustc_ast::tokenstream::Spacing;
 use rustc_ast::util::classify;
 use rustc_ast::util::literal::LitError;
 use rustc_ast::util::parser::{prec_let_scrutinee_needs_par, AssocOp, Fixity};
@@ -16,8 +17,8 @@ use rustc_ast_pretty::pprust;
 use rustc_errors::{Applicability, DiagnosticBuilder, PResult};
 use rustc_span::source_map::{self, Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
+use rustc_span::{BytePos, Pos};
 use std::mem;
-use tracing::debug;
 
 /// Possibly accepts an `token::Interpolated` expression (a pre-parsed expression
 /// dropped into the token stream, which happens while parsing the result of
@@ -245,11 +246,7 @@ impl<'a> Parser<'a> {
                 this.parse_assoc_expr_with(prec + prec_adjustment, LhsExpr::NotYetParsed)
             })?;
 
-            // Make sure that the span of the parent node is larger than the span of lhs and rhs,
-            // including the attributes.
-            let lhs_span =
-                lhs.attrs.iter().find(|a| a.style == AttrStyle::Outer).map_or(lhs_span, |a| a.span);
-            let span = lhs_span.to(rhs.span);
+            let span = self.mk_expr_sp(&lhs, lhs_span, rhs.span);
             lhs = match op {
                 AssocOp::Add
                 | AssocOp::Subtract
@@ -410,7 +407,7 @@ impl<'a> Parser<'a> {
             None
         };
         let rhs_span = rhs.as_ref().map_or(cur_op_span, |x| x.span);
-        let span = lhs.span.to(rhs_span);
+        let span = self.mk_expr_sp(&lhs, lhs.span, rhs_span);
         let limits =
             if op == AssocOp::DotDot { RangeLimits::HalfOpen } else { RangeLimits::Closed };
         Ok(self.mk_expr(span, self.mk_range(Some(lhs), rhs, limits)?, AttrVec::new()))
@@ -462,7 +459,7 @@ impl<'a> Parser<'a> {
     /// Parses a prefix-unary-operator expr.
     fn parse_prefix_expr(&mut self, attrs: Option<AttrVec>) -> PResult<'a, P<Expr>> {
         let attrs = self.parse_or_use_outer_attributes(attrs)?;
-        self.maybe_collect_tokens(!attrs.is_empty(), |this| {
+        self.maybe_collect_tokens(super::attr::maybe_needs_tokens(&attrs), |this| {
             let lo = this.token.span;
             // Note: when adding new unary operators, don't forget to adjust TokenKind::can_begin_expr()
             let (hi, ex) = match this.token.uninterpolate().kind {
@@ -570,7 +567,11 @@ impl<'a> Parser<'a> {
         expr_kind: fn(P<Expr>, P<Ty>) -> ExprKind,
     ) -> PResult<'a, P<Expr>> {
         let mk_expr = |this: &mut Self, rhs: P<Ty>| {
-            this.mk_expr(lhs_span.to(rhs.span), expr_kind(lhs, rhs), AttrVec::new())
+            this.mk_expr(
+                this.mk_expr_sp(&lhs, lhs_span, rhs.span),
+                expr_kind(lhs, rhs),
+                AttrVec::new(),
+            )
         };
 
         // Save the state of the parser before parsing type normally, in case there is a
@@ -839,9 +840,10 @@ impl<'a> Parser<'a> {
         }
         use FloatComponent::*;
 
+        let float_str = float.as_str();
         let mut components = Vec::new();
         let mut ident_like = String::new();
-        for c in float.as_str().chars() {
+        for c in float_str.chars() {
             if c == '_' || c.is_ascii_alphanumeric() {
                 ident_like.push(c);
             } else if matches!(c, '.' | '+' | '-') {
@@ -857,8 +859,13 @@ impl<'a> Parser<'a> {
             components.push(IdentLike(ident_like));
         }
 
-        // FIXME: Make the span more precise.
+        // With proc macros the span can refer to anything, the source may be too short,
+        // or too long, or non-ASCII. It only makes sense to break our span into components
+        // if its underlying text is identical to our float literal.
         let span = self.token.span;
+        let can_take_span_apart =
+            || self.span_to_snippet(span).as_deref() == Ok(float_str).as_deref();
+
         match &*components {
             // 1e2
             [IdentLike(i)] => {
@@ -866,22 +873,43 @@ impl<'a> Parser<'a> {
             }
             // 1.
             [IdentLike(i), Punct('.')] => {
+                let (ident_span, dot_span) = if can_take_span_apart() {
+                    let (span, ident_len) = (span.data(), BytePos::from_usize(i.len()));
+                    let ident_span = span.with_hi(span.lo + ident_len);
+                    let dot_span = span.with_lo(span.lo + ident_len);
+                    (ident_span, dot_span)
+                } else {
+                    (span, span)
+                };
                 assert!(suffix.is_none());
                 let symbol = Symbol::intern(&i);
-                self.token = Token::new(token::Ident(symbol, false), span);
-                let next_token = Token::new(token::Dot, span);
+                self.token = Token::new(token::Ident(symbol, false), ident_span);
+                let next_token = (Token::new(token::Dot, dot_span), self.token_spacing);
                 self.parse_tuple_field_access_expr(lo, base, symbol, None, Some(next_token))
             }
             // 1.2 | 1.2e3
             [IdentLike(i1), Punct('.'), IdentLike(i2)] => {
+                let (ident1_span, dot_span, ident2_span) = if can_take_span_apart() {
+                    let (span, ident1_len) = (span.data(), BytePos::from_usize(i1.len()));
+                    let ident1_span = span.with_hi(span.lo + ident1_len);
+                    let dot_span = span
+                        .with_lo(span.lo + ident1_len)
+                        .with_hi(span.lo + ident1_len + BytePos(1));
+                    let ident2_span = self.token.span.with_lo(span.lo + ident1_len + BytePos(1));
+                    (ident1_span, dot_span, ident2_span)
+                } else {
+                    (span, span, span)
+                };
                 let symbol1 = Symbol::intern(&i1);
-                self.token = Token::new(token::Ident(symbol1, false), span);
-                let next_token1 = Token::new(token::Dot, span);
+                self.token = Token::new(token::Ident(symbol1, false), ident1_span);
+                // This needs to be `Spacing::Alone` to prevent regressions.
+                // See issue #76399 and PR #76285 for more details
+                let next_token1 = (Token::new(token::Dot, dot_span), Spacing::Alone);
                 let base1 =
                     self.parse_tuple_field_access_expr(lo, base, symbol1, None, Some(next_token1));
                 let symbol2 = Symbol::intern(&i2);
-                let next_token2 = Token::new(token::Ident(symbol2, false), span);
-                self.bump_with(next_token2); // `.`
+                let next_token2 = Token::new(token::Ident(symbol2, false), ident2_span);
+                self.bump_with((next_token2, self.token_spacing)); // `.`
                 self.parse_tuple_field_access_expr(lo, base1, symbol2, suffix, None)
             }
             // 1e+ | 1e- (recovered)
@@ -904,7 +932,7 @@ impl<'a> Parser<'a> {
         base: P<Expr>,
         field: Symbol,
         suffix: Option<Symbol>,
-        next_token: Option<Token>,
+        next_token: Option<(Token, Spacing)>,
     ) -> P<Expr> {
         match next_token {
             Some(next_token) => self.bump_with(next_token),
@@ -1034,6 +1062,8 @@ impl<'a> Parser<'a> {
             })
         } else if self.eat_keyword(kw::Unsafe) {
             self.parse_block_expr(None, lo, BlockCheckMode::Unsafe(ast::UserProvided), attrs)
+        } else if self.check_inline_const() {
+            self.parse_const_expr(lo.to(self.token.span))
         } else if self.is_do_catch_block() {
             self.recover_do_catch(attrs)
         } else if self.is_try_block() {
@@ -1081,12 +1111,11 @@ impl<'a> Parser<'a> {
 
     fn maybe_collect_tokens(
         &mut self,
-        has_outer_attrs: bool,
+        needs_tokens: bool,
         f: impl FnOnce(&mut Self) -> PResult<'a, P<Expr>>,
     ) -> PResult<'a, P<Expr>> {
-        if has_outer_attrs {
+        if needs_tokens {
             let (mut expr, tokens) = self.collect_tokens(f)?;
-            debug!("maybe_collect_tokens: Collected tokens for {:?} (tokens {:?}", expr, tokens);
             expr.tokens = Some(tokens);
             Ok(expr)
         } else {
@@ -2015,9 +2044,12 @@ impl<'a> Parser<'a> {
     ) -> Option<PResult<'a, P<Expr>>> {
         let struct_allowed = !self.restrictions.contains(Restrictions::NO_STRUCT_LITERAL);
         if struct_allowed || self.is_certainly_not_a_block() {
-            // This is a struct literal, but we don't can't accept them here.
-            let expr = self.parse_struct_expr(path.clone(), attrs.clone());
+            if let Err(err) = self.expect(&token::OpenDelim(token::Brace)) {
+                return Some(Err(err));
+            }
+            let expr = self.parse_struct_expr(path.clone(), attrs.clone(), true);
             if let (Ok(expr), false) = (&expr, struct_allowed) {
+                // This is a struct literal, but we don't can't accept them here.
                 self.error_struct_lit_not_allowed_here(path.span, expr.span);
             }
             return Some(expr);
@@ -2035,12 +2067,13 @@ impl<'a> Parser<'a> {
             .emit();
     }
 
+    /// Precondition: already parsed the '{'.
     pub(super) fn parse_struct_expr(
         &mut self,
         pth: ast::Path,
         mut attrs: AttrVec,
+        recover: bool,
     ) -> PResult<'a, P<Expr>> {
-        self.bump();
         let mut fields = Vec::new();
         let mut base = None;
         let mut recover_async = false;
@@ -2059,10 +2092,11 @@ impl<'a> Parser<'a> {
                 let exp_span = self.prev_token.span;
                 match self.parse_expr() {
                     Ok(e) => base = Some(e),
-                    Err(mut e) => {
+                    Err(mut e) if recover => {
                         e.emit();
                         self.recover_stmt();
                     }
+                    Err(e) => return Err(e),
                 }
                 self.recover_struct_comma_after_dotdot(exp_span);
                 break;
@@ -2113,6 +2147,9 @@ impl<'a> Parser<'a> {
                                 Applicability::MachineApplicable,
                             );
                         }
+                    }
+                    if !recover {
+                        return Err(e);
                     }
                     e.emit();
                     self.recover_stmt_(SemiColonMode::Comma, BlockMode::Ignore);
@@ -2289,5 +2326,15 @@ impl<'a> Parser<'a> {
 
     pub(super) fn mk_expr_err(&self, span: Span) -> P<Expr> {
         self.mk_expr(span, ExprKind::Err, AttrVec::new())
+    }
+
+    /// Create expression span ensuring the span of the parent node
+    /// is larger than the span of lhs and rhs, including the attributes.
+    fn mk_expr_sp(&self, lhs: &P<Expr>, lhs_span: Span, rhs_span: Span) -> Span {
+        lhs.attrs
+            .iter()
+            .find(|a| a.style == AttrStyle::Outer)
+            .map_or(lhs_span, |a| a.span)
+            .to(rhs_span)
     }
 }

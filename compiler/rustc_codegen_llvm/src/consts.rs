@@ -7,12 +7,13 @@ use crate::type_of::LayoutLlvmExt;
 use crate::value::Value;
 use libc::c_uint;
 use rustc_codegen_ssa::traits::*;
+use rustc_data_structures::const_cstr;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::Node;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::mir::interpret::{
-    read_target_uint, Allocation, ConstValue, ErrorHandled, GlobalAlloc, Pointer,
+    read_target_uint, Allocation, ErrorHandled, GlobalAlloc, Pointer,
 };
 use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::ty::{self, Instance, Ty};
@@ -21,8 +22,6 @@ use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_target::abi::{AddressSpace, Align, HasDataLayout, LayoutOf, Primitive, Scalar, Size};
 use tracing::debug;
-
-use std::ffi::CStr;
 
 pub fn const_alloc_to_llvm(cx: &CodegenCx<'ll, '_>, alloc: &Allocation) -> &'ll Value {
     let mut llvals = Vec::with_capacity(alloc.relocations().len() + 1);
@@ -85,10 +84,7 @@ pub fn codegen_static_initializer(
     cx: &CodegenCx<'ll, 'tcx>,
     def_id: DefId,
 ) -> Result<(&'ll Value, &'tcx Allocation), ErrorHandled> {
-    let alloc = match cx.tcx.const_eval_poly(def_id)? {
-        ConstValue::ByRef { alloc, offset } if offset.bytes() == 0 => alloc,
-        val => bug!("static const eval returned {:#?}", val),
-    };
+    let alloc = cx.tcx.eval_static_initializer(def_id)?;
     Ok((const_alloc_to_llvm(cx, alloc), alloc))
 }
 
@@ -96,7 +92,7 @@ fn set_global_alignment(cx: &CodegenCx<'ll, '_>, gv: &'ll Value, mut align: Alig
     // The target may require greater alignment for globals than the type does.
     // Note: GCC and Clang also allow `__attribute__((aligned))` on variables,
     // which can force it to be smaller.  Rust doesn't support this yet.
-    if let Some(min) = cx.sess().target.target.options.min_global_align {
+    if let Some(min) = cx.sess().target.options.min_global_align {
         match Align::from_bits(min) {
             Ok(min) => align = align.max(min),
             Err(err) => {
@@ -125,7 +121,7 @@ fn check_and_apply_linkage(
         // extern "C" fn() from being non-null, so we can't just declare a
         // static and call it a day. Some linkages (like weak) will make it such
         // that the static actually has a null value.
-        let llty2 = if let ty::RawPtr(ref mt) = ty.kind {
+        let llty2 = if let ty::RawPtr(ref mt) = ty.kind() {
             cx.layout_of(mt.ty).llvm_type(cx)
         } else {
             cx.sess().span_fatal(
@@ -287,7 +283,7 @@ impl CodegenCx<'ll, 'tcx> {
             // argument validation.
             debug_assert!(
                 !(self.tcx.sess.opts.cg.linker_plugin_lto.enabled()
-                    && self.tcx.sess.target.target.options.is_like_windows
+                    && self.tcx.sess.target.options.is_like_windows
                     && self.tcx.sess.opts.cg.prefer_dynamic)
             );
 
@@ -441,7 +437,7 @@ impl StaticMethods for CodegenCx<'ll, 'tcx> {
                 // will use load-unaligned instructions instead, and thus avoiding the crash.
                 //
                 // We could remove this hack whenever we decide to drop macOS 10.10 support.
-                if self.tcx.sess.target.target.options.is_like_osx {
+                if self.tcx.sess.target.options.is_like_osx {
                     // The `inspect` method is okay here because we checked relocations, and
                     // because we are doing this access to inspect the final interpreter state
                     // (not as part of the interpreter execution).
@@ -457,9 +453,9 @@ impl StaticMethods for CodegenCx<'ll, 'tcx> {
                             .all(|&byte| byte == 0);
 
                     let sect_name = if all_bytes_are_zero {
-                        CStr::from_bytes_with_nul_unchecked(b"__DATA,__thread_bss\0")
+                        const_cstr!("__DATA,__thread_bss")
                     } else {
-                        CStr::from_bytes_with_nul_unchecked(b"__DATA,__thread_data\0")
+                        const_cstr!("__DATA,__thread_data")
                     };
                     llvm::LLVMSetSection(g, sect_name.as_ptr());
                 }

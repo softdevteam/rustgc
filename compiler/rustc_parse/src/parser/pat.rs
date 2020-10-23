@@ -313,6 +313,9 @@ impl<'a> Parser<'a> {
             let pat = self.parse_pat_with_range_pat(false, None)?;
             self.sess.gated_spans.gate(sym::box_patterns, lo.to(self.prev_token.span));
             PatKind::Box(pat)
+        } else if self.check_inline_const() {
+            // Parse `const pat`
+            PatKind::Lit(self.parse_const_expr(lo.to(self.token.span))?)
         } else if self.can_be_ident_pat() {
             // Parse `ident @ pat`
             // This can give false positives and parse nullary enums,
@@ -795,6 +798,7 @@ impl<'a> Parser<'a> {
         }
         self.bump();
         let (fields, etc) = self.parse_pat_fields().unwrap_or_else(|mut e| {
+            e.span_label(path.span, "while parsing the fields for this pattern");
             e.emit();
             self.recover_stmt();
             (vec![], true)
@@ -844,7 +848,7 @@ impl<'a> Parser<'a> {
 
             // check that a comma comes after every field
             if !ate_comma {
-                let err = self.struct_span_err(self.prev_token.span, "expected `,`");
+                let err = self.struct_span_err(self.token.span, "expected `,`");
                 if let Some(mut delayed) = delayed_err {
                     delayed.emit();
                 }

@@ -5,8 +5,9 @@ use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Lit, LitKind, TokenKind};
 use rustc_ast::util::parser::AssocOp;
 use rustc_ast::{
-    self as ast, AngleBracketedArgs, AttrVec, BinOpKind, BindingMode, BlockCheckMode, Expr,
-    ExprKind, Item, ItemKind, Mutability, Param, Pat, PatKind, PathSegment, QSelf, Ty, TyKind,
+    self as ast, AngleBracketedArgs, AttrVec, BinOpKind, BindingMode, Block, BlockCheckMode, Expr,
+    ExprKind, Item, ItemKind, Mutability, Param, Pat, PatKind, Path, PathSegment, QSelf, Ty,
+    TyKind,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
@@ -28,7 +29,7 @@ pub(super) fn dummy_arg(ident: Ident) -> Param {
         span: ident.span,
         tokens: None,
     });
-    let ty = Ty { kind: TyKind::Err, span: ident.span, id: ast::DUMMY_NODE_ID };
+    let ty = Ty { kind: TyKind::Err, span: ident.span, id: ast::DUMMY_NODE_ID, tokens: None };
     Param {
         attrs: AttrVec::default(),
         id: ast::DUMMY_NODE_ID,
@@ -75,7 +76,12 @@ impl RecoverQPath for Ty {
         Some(P(self.clone()))
     }
     fn recovered(qself: Option<QSelf>, path: ast::Path) -> Self {
-        Self { span: path.span, kind: TyKind::Path(qself, path), id: ast::DUMMY_NODE_ID }
+        Self {
+            span: path.span,
+            kind: TyKind::Path(qself, path),
+            id: ast::DUMMY_NODE_ID,
+            tokens: None,
+        }
     }
 }
 
@@ -112,6 +118,28 @@ impl RecoverQPath for Expr {
 crate enum ConsumeClosingDelim {
     Yes,
     No,
+}
+
+#[derive(Clone, Copy)]
+pub enum AttemptLocalParseRecovery {
+    Yes,
+    No,
+}
+
+impl AttemptLocalParseRecovery {
+    pub fn yes(&self) -> bool {
+        match self {
+            AttemptLocalParseRecovery::Yes => true,
+            AttemptLocalParseRecovery::No => false,
+        }
+    }
+
+    pub fn no(&self) -> bool {
+        match self {
+            AttemptLocalParseRecovery::Yes => false,
+            AttemptLocalParseRecovery::No => true,
+        }
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -314,6 +342,66 @@ impl<'a> Parser<'a> {
             }
             _ => false,
         }
+    }
+
+    pub fn maybe_suggest_struct_literal(
+        &mut self,
+        lo: Span,
+        s: BlockCheckMode,
+    ) -> Option<PResult<'a, P<Block>>> {
+        if self.token.is_ident() && self.look_ahead(1, |t| t == &token::Colon) {
+            // We might be having a struct literal where people forgot to include the path:
+            // fn foo() -> Foo {
+            //     field: value,
+            // }
+            let mut snapshot = self.clone();
+            let path =
+                Path { segments: vec![], span: self.prev_token.span.shrink_to_lo(), tokens: None };
+            let struct_expr = snapshot.parse_struct_expr(path, AttrVec::new(), false);
+            let block_tail = self.parse_block_tail(lo, s, AttemptLocalParseRecovery::No);
+            return Some(match (struct_expr, block_tail) {
+                (Ok(expr), Err(mut err)) => {
+                    // We have encountered the following:
+                    // fn foo() -> Foo {
+                    //     field: value,
+                    // }
+                    // Suggest:
+                    // fn foo() -> Foo { Path {
+                    //     field: value,
+                    // } }
+                    err.delay_as_bug();
+                    self.struct_span_err(expr.span, "struct literal body without path")
+                        .multipart_suggestion(
+                            "you might have forgotten to add the struct literal inside the block",
+                            vec![
+                                (expr.span.shrink_to_lo(), "{ SomeStruct ".to_string()),
+                                (expr.span.shrink_to_hi(), " }".to_string()),
+                            ],
+                            Applicability::MaybeIncorrect,
+                        )
+                        .emit();
+                    *self = snapshot;
+                    Ok(self.mk_block(
+                        vec![self.mk_stmt_err(expr.span)],
+                        s,
+                        lo.to(self.prev_token.span),
+                    ))
+                }
+                (Err(mut err), Ok(tail)) => {
+                    // We have a block tail that contains a somehow valid type ascription expr.
+                    err.cancel();
+                    Ok(tail)
+                }
+                (Err(mut snapshot_err), Err(err)) => {
+                    // We don't know what went wrong, emit the normal error.
+                    snapshot_err.cancel();
+                    self.consume_block(token::Brace, ConsumeClosingDelim::Yes);
+                    Err(err)
+                }
+                (Ok(_), Ok(tail)) => Ok(tail),
+            });
+        }
+        None
     }
 
     pub fn maybe_annotate_with_ascription(
@@ -546,6 +634,52 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// When writing a turbofish with multiple type parameters missing the leading `::`, we will
+    /// encounter a parse error when encountering the first `,`.
+    pub(super) fn check_mistyped_turbofish_with_multiple_type_params(
+        &mut self,
+        mut e: DiagnosticBuilder<'a>,
+        expr: &mut P<Expr>,
+    ) -> PResult<'a, ()> {
+        if let ExprKind::Binary(binop, _, _) = &expr.kind {
+            if let ast::BinOpKind::Lt = binop.node {
+                if self.eat(&token::Comma) {
+                    let x = self.parse_seq_to_before_end(
+                        &token::Gt,
+                        SeqSep::trailing_allowed(token::Comma),
+                        |p| p.parse_ty(),
+                    );
+                    match x {
+                        Ok((_, _, false)) => {
+                            self.bump(); // `>`
+                            match self.parse_expr() {
+                                Ok(_) => {
+                                    e.span_suggestion_verbose(
+                                        binop.span.shrink_to_lo(),
+                                        "use `::<...>` instead of `<...>` to specify type arguments",
+                                        "::".to_string(),
+                                        Applicability::MaybeIncorrect,
+                                    );
+                                    e.emit();
+                                    *expr = self.mk_expr_err(expr.span.to(self.prev_token.span));
+                                    return Ok(());
+                                }
+                                Err(mut err) => {
+                                    err.cancel();
+                                }
+                            }
+                        }
+                        Err(mut err) => {
+                            err.cancel();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Err(e)
     }
 
     /// Check to see if a pair of chained operators looks like an attempt at chained comparison,
@@ -896,7 +1030,7 @@ impl<'a> Parser<'a> {
     ) -> PResult<'a, P<T>> {
         self.expect(&token::ModSep)?;
 
-        let mut path = ast::Path { segments: Vec::new(), span: DUMMY_SP };
+        let mut path = ast::Path { segments: Vec::new(), span: DUMMY_SP, tokens: None };
         self.parse_path_segments(&mut path.segments, T::PATH_STYLE)?;
         path.span = ty_span.to(self.prev_token.span);
 

@@ -185,7 +185,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                 let val = match *kind {
                     mir::CastKind::Pointer(PointerCast::ReifyFnPointer) => {
-                        match operand.layout.ty.kind {
+                        match *operand.layout.ty.kind() {
                             ty::FnDef(def_id, substs) => {
                                 if bx.cx().tcx().has_attr(def_id, sym::rustc_args_required_const) {
                                     bug!("reifying a fn ptr that requires const arguments");
@@ -204,7 +204,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         }
                     }
                     mir::CastKind::Pointer(PointerCast::ClosureFnPointer(_)) => {
-                        match operand.layout.ty.kind {
+                        match *operand.layout.ty.kind() {
                             ty::Closure(def_id, substs) => {
                                 let instance = Instance::resolve_closure(
                                     bx.cx().tcx(),
@@ -327,13 +327,29 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                 if er.end != er.start
                                     && scalar.valid_range.end() > scalar.valid_range.start()
                                 {
-                                    // We want `table[e as usize]` to not
+                                    // We want `table[e as usize ± k]` to not
                                     // have bound checks, and this is the most
-                                    // convenient place to put the `assume`.
-                                    let ll_t_in_const =
+                                    // convenient place to put the `assume`s.
+                                    if *scalar.valid_range.start() > 0 {
+                                        let enum_value_lower_bound = bx
+                                            .cx()
+                                            .const_uint_big(ll_t_in, *scalar.valid_range.start());
+                                        let cmp_start = bx.icmp(
+                                            IntPredicate::IntUGE,
+                                            llval,
+                                            enum_value_lower_bound,
+                                        );
+                                        bx.assume(cmp_start);
+                                    }
+
+                                    let enum_value_upper_bound =
                                         bx.cx().const_uint_big(ll_t_in, *scalar.valid_range.end());
-                                    let cmp = bx.icmp(IntPredicate::IntULE, llval, ll_t_in_const);
-                                    bx.assume(cmp);
+                                    let cmp_end = bx.icmp(
+                                        IntPredicate::IntULE,
+                                        llval,
+                                        enum_value_upper_bound,
+                                    );
+                                    bx.assume(cmp_end);
                                 }
                             }
                         }
@@ -548,7 +564,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // because codegen_place() panics if Local is operand.
         if let Some(index) = place.as_local() {
             if let LocalRef::Operand(Some(op)) = self.locals[index] {
-                if let ty::Array(_, n) = op.layout.ty.kind {
+                if let ty::Array(_, n) = op.layout.ty.kind() {
                     let n = n.eval_usize(bx.cx().tcx(), ty::ParamEnv::reveal_all());
                     return bx.cx().const_usize(n);
                 }

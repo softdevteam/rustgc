@@ -40,6 +40,7 @@ fn mk_session(matches: getopts::Matches) -> (Session, CfgSpecs) {
         DiagnosticOutput::Default,
         Default::default(),
         None,
+        None,
     );
     (sess, cfg)
 }
@@ -402,6 +403,7 @@ fn test_codegen_options_tracking_hash() {
     // `link_arg` is omitted because it just forwards to `link_args`.
     untracked!(link_args, vec![String::from("abc"), String::from("def")]);
     untracked!(link_dead_code, Some(true));
+    untracked!(link_self_contained, Some(true));
     untracked!(linker, Some(PathBuf::from("linker")));
     untracked!(linker_flavor, Some(LinkerFlavor::Gcc));
     untracked!(no_stack_check, true);
@@ -517,6 +519,7 @@ fn test_debugging_options_tracking_hash() {
     untracked!(time_llvm_passes, true);
     untracked!(time_passes, true);
     untracked!(trace_macros, true);
+    untracked!(trim_diagnostic_paths, false);
     untracked!(ui_testing, true);
     untracked!(unpretty, Some("expanded".to_string()));
     untracked!(unstable_options, true);
@@ -565,6 +568,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(osx_rpath_install_name, true);
     tracked!(panic_abort_tests, true);
     tracked!(plt, Some(true));
+    tracked!(precise_enum_drop_elaboration, false);
     tracked!(print_fuel, Some("abc".to_string()));
     tracked!(profile, true);
     tracked!(profile_emit, Some(PathBuf::from("abc")));
@@ -581,6 +585,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(symbol_mangling_version, SymbolManglingVersion::V0);
     tracked!(teach, true);
     tracked!(thinlto, Some(true));
+    tracked!(tune_cpu, Some(String::from("abc")));
     tracked!(tls_model, Some(TlsModel::GeneralDynamic));
     tracked!(treat_err_as_bug, Some(1));
     tracked!(unleash_the_miri_inside_of_you, true);

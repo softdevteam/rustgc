@@ -21,10 +21,9 @@ impl<'tcx> TypeFoldable<'tcx> for Terminator<'tcx> {
 
         let kind = match self.kind {
             Goto { target } => Goto { target },
-            SwitchInt { ref discr, switch_ty, ref values, ref targets } => SwitchInt {
+            SwitchInt { ref discr, switch_ty, ref targets } => SwitchInt {
                 discr: discr.fold_with(folder),
                 switch_ty: switch_ty.fold_with(folder),
-                values: values.clone(),
                 targets: targets.clone(),
             },
             Drop { ref place, target, unwind } => {
@@ -175,7 +174,7 @@ impl<'tcx> TypeFoldable<'tcx> for Rvalue<'tcx> {
         use crate::mir::Rvalue::*;
         match *self {
             Use(ref op) => Use(op.fold_with(folder)),
-            Repeat(ref op, len) => Repeat(op.fold_with(folder), len),
+            Repeat(ref op, len) => Repeat(op.fold_with(folder), len.fold_with(folder)),
             ThreadLocalRef(did) => ThreadLocalRef(did.fold_with(folder)),
             Ref(region, bk, ref place) => {
                 Ref(region.fold_with(folder), bk, place.fold_with(folder))

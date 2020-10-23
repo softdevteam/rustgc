@@ -128,40 +128,40 @@ pub fn target_machine_factory(
     let (opt_level, _) = to_llvm_opt_settings(optlvl);
     let use_softfp = sess.opts.cg.soft_float;
 
-    let ffunction_sections = sess.target.target.options.function_sections;
+    let ffunction_sections = sess.target.options.function_sections;
     let fdata_sections = ffunction_sections;
 
     let code_model = to_llvm_code_model(sess.code_model());
 
     let features = attributes::llvm_target_features(sess).collect::<Vec<_>>();
-    let mut singlethread = sess.target.target.options.singlethread;
+    let mut singlethread = sess.target.options.singlethread;
 
     // On the wasm target once the `atomics` feature is enabled that means that
     // we're no longer single-threaded, or otherwise we don't want LLVM to
     // lower atomic operations to single-threaded operations.
     if singlethread
-        && sess.target.target.llvm_target.contains("wasm32")
+        && sess.target.llvm_target.contains("wasm32")
         && sess.target_features.contains(&sym::atomics)
     {
         singlethread = false;
     }
 
-    let triple = SmallCStr::new(&sess.target.target.llvm_target);
+    let triple = SmallCStr::new(&sess.target.llvm_target);
     let cpu = SmallCStr::new(llvm_util::target_cpu(sess));
     let features = features.join(",");
     let features = CString::new(features).unwrap();
-    let abi = SmallCStr::new(&sess.target.target.options.llvm_abiname);
-    let trap_unreachable = sess.target.target.options.trap_unreachable;
+    let abi = SmallCStr::new(&sess.target.options.llvm_abiname);
+    let trap_unreachable = sess.target.options.trap_unreachable;
     let emit_stack_size_section = sess.opts.debugging_opts.emit_stack_sizes;
 
     let asm_comments = sess.asm_comments();
-    let relax_elf_relocations = sess.target.target.options.relax_elf_relocations;
+    let relax_elf_relocations = sess.target.options.relax_elf_relocations;
 
     let use_init_array = !sess
         .opts
         .debugging_opts
         .use_ctors_section
-        .unwrap_or(sess.target.target.options.use_ctors_section);
+        .unwrap_or(sess.target.options.use_ctors_section);
 
     Arc::new(move || {
         let tm = unsafe {
@@ -343,6 +343,13 @@ unsafe extern "C" fn diagnostic_handler(info: &DiagnosticInfo, user: *mut c_void
             })
             .expect("non-UTF8 diagnostic");
             diag_handler.warn(&msg);
+        }
+        llvm::diagnostic::Unsupported(diagnostic_ref) => {
+            let msg = llvm::build_string(|s| {
+                llvm::LLVMRustWriteDiagnosticInfoToString(diagnostic_ref, s)
+            })
+            .expect("non-UTF8 diagnostic");
+            diag_handler.err(&msg);
         }
         llvm::diagnostic::UnknownDiagnostic(..) => {}
     }
@@ -615,6 +622,31 @@ unsafe fn add_sanitizer_passes(config: &ModuleConfig, passes: &mut Vec<&'static 
     if config.sanitizer.contains(SanitizerSet::THREAD) {
         passes.push(llvm::LLVMRustCreateThreadSanitizerPass());
     }
+}
+
+pub(crate) fn link(
+    cgcx: &CodegenContext<LlvmCodegenBackend>,
+    diag_handler: &Handler,
+    mut modules: Vec<ModuleCodegen<ModuleLlvm>>,
+) -> Result<ModuleCodegen<ModuleLlvm>, FatalError> {
+    use super::lto::{Linker, ModuleBuffer};
+    // Sort the modules by name to ensure to ensure deterministic behavior.
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    let (first, elements) =
+        modules.split_first().expect("Bug! modules must contain at least one module.");
+
+    let mut linker = Linker::new(first.module_llvm.llmod());
+    for module in elements {
+        let _timer =
+            cgcx.prof.generic_activity_with_arg("LLVM_link_module", format!("{:?}", module.name));
+        let buffer = ModuleBuffer::new(module.module_llvm.llmod());
+        linker.add(&buffer.data()).map_err(|()| {
+            let msg = format!("failed to serialize module {:?}", module.name);
+            llvm_err(&diag_handler, &msg)
+        })?;
+    }
+    drop(linker);
+    Ok(modules.remove(0))
 }
 
 pub(crate) unsafe fn codegen(
@@ -904,8 +936,8 @@ unsafe fn embed_bitcode(
         llvm::LLVMRustAppendModuleInlineAsm(llmod, asm.as_ptr().cast(), asm.len());
     } else {
         let asm = "
-            .section .llvmbc,\"e\"
-            .section .llvmcmd,\"e\"
+            .section .llvmbc,\"a\"
+            .section .llvmcmd,\"a\"
         ";
         llvm::LLVMRustAppendModuleInlineAsm(llmod, asm.as_ptr().cast(), asm.len());
     }

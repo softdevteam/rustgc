@@ -3,6 +3,7 @@
 //! All high-level functions to write to memory work on places as destinations.
 
 use std::convert::TryFrom;
+use std::fmt::Debug;
 use std::hash::Hash;
 
 use rustc_macros::HashStable;
@@ -13,9 +14,9 @@ use rustc_target::abi::{Abi, Align, FieldsShape, TagEncoding};
 use rustc_target::abi::{HasDataLayout, LayoutOf, Size, VariantIdx, Variants};
 
 use super::{
-    mir_assign_valid_types, truncate, AllocId, AllocMap, Allocation, AllocationExtra, ImmTy,
-    Immediate, InterpCx, InterpResult, LocalValue, Machine, MemoryKind, OpTy, Operand, Pointer,
-    PointerArithmetic, RawConst, Scalar, ScalarMaybeUninit,
+    mir_assign_valid_types, truncate, AllocId, AllocMap, Allocation, AllocationExtra, ConstAlloc,
+    ImmTy, Immediate, InterpCx, InterpResult, LocalValue, Machine, MemoryKind, OpTy, Operand,
+    Pointer, PointerArithmetic, Scalar, ScalarMaybeUninit,
 };
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable)]
@@ -86,7 +87,7 @@ pub struct PlaceTy<'tcx, Tag = ()> {
     pub layout: TyAndLayout<'tcx>,
 }
 
-impl<'tcx, Tag> ::std::ops::Deref for PlaceTy<'tcx, Tag> {
+impl<'tcx, Tag> std::ops::Deref for PlaceTy<'tcx, Tag> {
     type Target = Place<Tag>;
     #[inline(always)]
     fn deref(&self) -> &Place<Tag> {
@@ -101,7 +102,7 @@ pub struct MPlaceTy<'tcx, Tag = ()> {
     pub layout: TyAndLayout<'tcx>,
 }
 
-impl<'tcx, Tag> ::std::ops::Deref for MPlaceTy<'tcx, Tag> {
+impl<'tcx, Tag> std::ops::Deref for MPlaceTy<'tcx, Tag> {
     type Target = MemPlace<Tag>;
     #[inline(always)]
     fn deref(&self) -> &MemPlace<Tag> {
@@ -202,7 +203,7 @@ impl<'tcx, Tag> MPlaceTy<'tcx, Tag> {
     pub(super) fn len(self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
         if self.layout.is_unsized() {
             // We need to consult `meta` metadata
-            match self.layout.ty.kind {
+            match self.layout.ty.kind() {
                 ty::Slice(..) | ty::Str => self.mplace.meta.unwrap_meta().to_machine_usize(cx),
                 _ => bug!("len not supported on unsized type {:?}", self.layout.ty),
             }
@@ -218,7 +219,7 @@ impl<'tcx, Tag> MPlaceTy<'tcx, Tag> {
 
     #[inline]
     pub(super) fn vtable(self) -> Scalar<Tag> {
-        match self.layout.ty.kind {
+        match self.layout.ty.kind() {
             ty::Dynamic(..) => self.mplace.meta.unwrap_meta(),
             _ => bug!("vtable not supported on type {:?}", self.layout.ty),
         }
@@ -226,7 +227,7 @@ impl<'tcx, Tag> MPlaceTy<'tcx, Tag> {
 }
 
 // These are defined here because they produce a place.
-impl<'tcx, Tag: ::std::fmt::Debug + Copy> OpTy<'tcx, Tag> {
+impl<'tcx, Tag: Debug + Copy> OpTy<'tcx, Tag> {
     #[inline(always)]
     /// Note: do not call `as_ref` on the resulting place. This function should only be used to
     /// read from the resulting mplace, not to get its address back.
@@ -251,7 +252,7 @@ impl<'tcx, Tag: ::std::fmt::Debug + Copy> OpTy<'tcx, Tag> {
     }
 }
 
-impl<Tag: ::std::fmt::Debug> Place<Tag> {
+impl<Tag: Debug> Place<Tag> {
     #[inline]
     pub fn assert_mem_place(self) -> MemPlace<Tag> {
         match self {
@@ -261,7 +262,7 @@ impl<Tag: ::std::fmt::Debug> Place<Tag> {
     }
 }
 
-impl<'tcx, Tag: ::std::fmt::Debug> PlaceTy<'tcx, Tag> {
+impl<'tcx, Tag: Debug> PlaceTy<'tcx, Tag> {
     #[inline]
     pub fn assert_mem_place(self) -> MPlaceTy<'tcx, Tag> {
         MPlaceTy { mplace: self.place.assert_mem_place(), layout: self.layout }
@@ -272,7 +273,7 @@ impl<'tcx, Tag: ::std::fmt::Debug> PlaceTy<'tcx, Tag> {
 impl<'mir, 'tcx: 'mir, Tag, M> InterpCx<'mir, 'tcx, M>
 where
     // FIXME: Working around https://github.com/rust-lang/rust/issues/54385
-    Tag: ::std::fmt::Debug + Copy + Eq + Hash + 'static,
+    Tag: Debug + Copy + Eq + Hash + 'static,
     M: Machine<'mir, 'tcx, PointerTag = Tag>,
     // FIXME: Working around https://github.com/rust-lang/rust/issues/24159
     M::MemoryMap: AllocMap<AllocId, (MemoryKind<M::MemoryKind>, Allocation<Tag, M::AllocExtra>)>,
@@ -498,7 +499,7 @@ where
 
         // Compute meta and new layout
         let inner_len = actual_to.checked_sub(from).unwrap();
-        let (meta, ty) = match base.layout.ty.kind {
+        let (meta, ty) = match base.layout.ty.kind() {
             // It is not nice to match on the type, but that seems to be the only way to
             // implement this.
             ty::Array(inner, _) => (MemPlaceMeta::None, self.tcx.mk_array(inner, inner_len)),
@@ -551,7 +552,7 @@ where
                 let n = base.len(self)?;
                 if n < min_length {
                     // This can only be reached in ConstProp and non-rustc-MIR.
-                    throw_ub!(BoundsCheckFailed { len: min_length.into(), index: n });
+                    throw_ub!(BoundsCheckFailed { len: min_length, index: n });
                 }
 
                 let index = if from_end {
@@ -565,9 +566,7 @@ where
                 self.mplace_index(base, index)?
             }
 
-            Subslice { from, to, from_end } => {
-                self.mplace_subslice(base, u64::from(from), u64::from(to), from_end)?
-            }
+            Subslice { from, to, from_end } => self.mplace_subslice(base, from, to, from_end)?,
         })
     }
 
@@ -1122,7 +1121,7 @@ where
 
     pub fn raw_const_to_mplace(
         &self,
-        raw: RawConst<'tcx>,
+        raw: ConstAlloc<'tcx>,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::PointerTag>> {
         // This must be an allocation in `tcx`
         let _ = self.tcx.global_alloc(raw.alloc_id);
