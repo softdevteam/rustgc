@@ -147,9 +147,6 @@ extern crate std;
 #[cfg(test)]
 extern crate test;
 
-#[allow(unused_extern_crates)]
-extern crate boehm_shim;
-
 // Module with internal macros used by other modules (needs to be included before other modules).
 #[macro_use]
 mod macros;
@@ -185,9 +182,6 @@ pub mod task;
 #[cfg(test)]
 mod tests;
 pub mod vec;
-
-#[unstable(feature = "allocator_api", issue = "32838")]
-pub mod boehm;
 
 #[cfg(not(test))]
 mod std {
