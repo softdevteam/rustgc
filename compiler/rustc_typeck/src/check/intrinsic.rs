@@ -72,6 +72,7 @@ pub fn intrinsic_operation_unsafety(intrinsic: Symbol) -> hir::Unsafety {
         | sym::min_align_of
         | sym::needs_drop
         | sym::needs_finalizer
+        | sym::gc_layout
         | sym::caller_location
         | sym::size_of_val
         | sym::min_align_of_val
@@ -184,7 +185,11 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>) {
             sym::drop_in_place => (1, vec![tcx.mk_mut_ptr(param(0))], tcx.mk_unit()),
             sym::needs_drop => (1, Vec::new(), tcx.types.bool),
             sym::needs_finalizer => (1, Vec::new(), tcx.types.bool),
-
+            sym::gc_layout => (
+                1,
+                Vec::new(),
+                tcx.mk_imm_ref(tcx.mk_region(ty::ReStatic), tcx.mk_slice(tcx.types.u64)),
+            ),
             sym::type_name => (1, Vec::new(), tcx.mk_static_str()),
             sym::type_id => (1, Vec::new(), tcx.types.u64),
             sym::offset | sym::arith_offset => (

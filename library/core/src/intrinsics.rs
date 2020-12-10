@@ -1093,6 +1093,10 @@ extern "rust-intrinsic" {
     #[cfg(not(bootstrap))]
     pub fn needs_finalizer<T>() -> bool;
 
+    #[rustc_const_unstable(feature = "gc", issue = "none")]
+    #[cfg(not(bootstrap))]
+    pub fn gc_layout<T>() -> &'static [u64];
+
     /// Calculates the offset from a pointer.
     ///
     /// This is implemented as an intrinsic to avoid converting to and from an
