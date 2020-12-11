@@ -67,6 +67,26 @@ struct BigAlignNoTrace {
     a: MultiFields,
 }
 
+struct NoTraceInner {
+    a: u16,
+    b: u16,
+    c: u16,
+    d: u16,
+}
+
+struct NoTraceOuter {
+    a: NoTraceInner,
+    b: usize,
+    c: NoTraceInner
+}
+
+struct NoTraceOuter2 {
+    a: NoTraceInner,
+    c: NoTraceInner
+}
+
+struct ZST {}
+
 fn main() {
     assert_eq!(size_of::<SmallAlign>(), 4);
     assert_eq!(size_of::<ShuffledFields>(), 16);
@@ -76,6 +96,7 @@ fn main() {
     assert_eq!(size_of::<BigAlign>(), 40);
     assert_eq!(size_of::<BigAlignNoTrace>(), 40);
 
+    unsafe {
                                                        // Bitmap,   Size (words)
     assert_eq!(gc_layout::<SmallAlign>(),              (0x0000000000000000, 0));
     assert_eq!(gc_layout::<ShuffledFields>(),          (0xFFFFFFFFFFFFFFFD, 2));
@@ -85,4 +106,12 @@ fn main() {
     assert_eq!(gc_layout::<MultiFields>(),             (0xFFFFFFFFFFFFFFF9, 3));
     assert_eq!(gc_layout::<BigAlign>(),                (0xFFFFFFFFFFFFFFFF, 5));
     assert_eq!(gc_layout::<BigAlignNoTrace>(),         (0xFFFFFFFFFFFFFFE3, 5));
+
+    assert_eq!(gc_layout::<NoTraceInner>(),            (0x0000000000000000, 0));
+    assert_eq!(gc_layout::<NoTraceOuter>(),            (0xFFFFFFFFFFFFFFF9, 3));
+    assert_eq!(gc_layout::<NoTraceOuter2>(),           (0x0000000000000000, 0));
+
+    assert_eq!(gc_layout::<ZST>(),                     (0x0000000000000000, 0));
+
+    }
 }

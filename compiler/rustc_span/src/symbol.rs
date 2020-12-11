@@ -749,6 +749,7 @@ symbols! {
         nostack,
         not,
         note,
+        notrace,
         object_safe_for_dispatch,
         of,
         offset,

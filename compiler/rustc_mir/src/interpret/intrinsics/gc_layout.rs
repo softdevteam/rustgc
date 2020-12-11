@@ -2,6 +2,7 @@ use rustc_middle::mir::interpret::Allocation;
 use rustc_middle::ty::layout::LayoutCx;
 use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
 use rustc_span::symbol::sym;
+use rustc_span::DUMMY_SP;
 use rustc_target::abi::{Align, Size};
 use std::mem::size_of;
 
@@ -10,7 +11,7 @@ fn gc_layout(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, param_env: ParamEnv<'tcx>) -> Vec<
     let w_size = Size::from_bytes(size_of::<usize>());
     let w_align = Align::from_bytes(w_size.bytes()).unwrap();
 
-    if layout.align.abi.bytes() < (w_size.bytes()) {
+    if layout.align.abi.bytes() < (w_size.bytes()) || ty.is_no_trace(tcx.at(DUMMY_SP), param_env) {
         // If an ADT is aligned to a size smaller than 1 word, then it
         // contains no fields large enough to represent a GC pointer.
         //
@@ -29,9 +30,9 @@ fn gc_layout(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, param_env: ParamEnv<'tcx>) -> Vec<
         let target_offset = layout.fields.offset(usize::from(i));
 
         let layout_cx = LayoutCx { tcx, param_env };
-        let field_size = layout.field(&layout_cx, i).unwrap().size;
+        let field = layout.field(&layout_cx, i).unwrap();
 
-        if field_size < w_size {
+        if field.size < w_size {
             // If a field is smaller than a word, it will either be shuffled
             // around in the struct or padded to the min alignment with
             // uninitialized memory. Whatever the case, the word it lives in is
@@ -43,9 +44,11 @@ fn gc_layout(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, param_env: ParamEnv<'tcx>) -> Vec<
             bitmap &= !(1 << mask);
         }
 
-        if tcx.has_attr(src_field_iter.clone().nth(i).unwrap().did, sym::no_trace) {
+        let no_trace = field.ty.is_no_trace(tcx.at(DUMMY_SP), param_env);
+
+        if no_trace || tcx.has_attr(src_field_iter.clone().nth(i).unwrap().did, sym::no_trace) {
             let start = target_offset.bytes() / w_align.bytes();
-            let end = start + (field_size.bytes() / w_align.bytes());
+            let end = start + (field.size.bytes() / w_align.bytes());
             for n in start..end {
                 bitmap &= !(1 << n);
             }

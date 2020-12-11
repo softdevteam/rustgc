@@ -18,6 +18,10 @@ fn is_freeze_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>
     is_item_raw(tcx, query, LangItem::Freeze)
 }
 
+fn is_no_trace_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+    is_item_raw(tcx, query, LangItem::NoTrace)
+}
+
 fn is_no_finalize_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
     is_item_raw(tcx, query, LangItem::NoFinalize)
 }
@@ -45,6 +49,7 @@ pub(crate) fn provide(providers: &mut ty::query::Providers) {
         is_copy_raw,
         is_sized_raw,
         is_freeze_raw,
+        is_no_trace_raw,
         is_no_finalize_raw,
         ..*providers
     };
