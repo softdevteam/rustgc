@@ -106,6 +106,8 @@ macro_rules! define_Conf {
 
 pub use self::helpers::Conf;
 define_Conf! {
+    /// Lint: MANUAL_NON_EXHAUSTIVE, MANUAL_STRIP, OPTION_AS_REF_DEREF, MATCH_LIKE_MATCHES_MACRO. The minimum rust version that the project supports
+    (msrv, "msrv": Option<String>, None),
     /// Lint: BLACKLISTED_NAME. The list of blacklisted names to lint about. NB: `bar` is not here since it has legitimate uses
     (blacklisted_names, "blacklisted_names": Vec<String>, ["foo", "baz", "quux"].iter().map(ToString::to_string).collect()),
     /// Lint: COGNITIVE_COMPLEXITY. The maximum cognitive complexity a function can have
@@ -150,6 +152,8 @@ define_Conf! {
     (literal_representation_threshold, "literal_representation_threshold": u64, 16384),
     /// Lint: TRIVIALLY_COPY_PASS_BY_REF. The maximum size (in bytes) to consider a `Copy` type for passing by value instead of by reference.
     (trivial_copy_size_limit, "trivial_copy_size_limit": Option<u64>, None),
+    /// Lint: LARGE_TYPE_PASS_BY_MOVE. The minimum size (in bytes) to consider a type for passing by reference instead of by value.
+    (pass_by_value_size_limit, "pass_by_value_size_limit": u64, 256),
     /// Lint: TOO_MANY_LINES. The maximum number of lines a function or method can have
     (too_many_lines_threshold, "too_many_lines_threshold": u64, 100),
     /// Lint: LARGE_STACK_ARRAYS, LARGE_CONST_ARRAYS. The maximum allowed size for arrays on the stack
@@ -166,6 +170,8 @@ define_Conf! {
     (warn_on_all_wildcard_imports, "warn_on_all_wildcard_imports": bool, false),
     /// Lint: DISALLOWED_METHOD. The list of blacklisted methods to lint about. NB: `bar` is not here since it has legitimate uses
     (disallowed_methods, "disallowed_methods": Vec<String>, Vec::<String>::new()),
+    /// Lint: UNREADABLE_LITERAL. Should the fraction of a decimal be linted to include separators.
+    (unreadable_literal_lint_fractions, "unreadable_literal_lint_fractions": bool, true),
 }
 
 impl Default for Conf {

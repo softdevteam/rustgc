@@ -22,7 +22,7 @@ use rustc_middle::ty::cast::CastTy;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::{self, List, TyCtxt, TypeFoldable};
 use rustc_span::symbol::sym;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::Span;
 
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_target::spec::abi::Abi;
@@ -301,17 +301,6 @@ impl std::ops::Deref for Validator<'a, 'tcx> {
 struct Unpromotable;
 
 impl<'tcx> Validator<'_, 'tcx> {
-    /// Determines if this code could be executed at runtime and thus is subject to codegen.
-    /// That means even unused constants need to be evaluated.
-    ///
-    /// `const_kind` should not be used in this file other than through this method!
-    fn maybe_runtime(&self) -> bool {
-        match self.const_kind {
-            None | Some(hir::ConstContext::ConstFn) => true,
-            Some(hir::ConstContext::Static(_) | hir::ConstContext::Const) => false,
-        }
-    }
-
     fn validate_candidate(&self, candidate: Candidate) -> Result<(), Unpromotable> {
         match candidate {
             Candidate::Ref(loc) => {
@@ -337,39 +326,14 @@ impl<'tcx> Validator<'_, 'tcx> {
                         if place.projection.contains(&ProjectionElem::Deref) {
                             return Err(Unpromotable);
                         }
-
-                        let mut has_mut_interior =
-                            self.qualif_local::<qualifs::HasMutInterior>(place.local);
-                        // HACK(eddyb) this should compute the same thing as
-                        // `<HasMutInterior as Qualif>::in_projection` from
-                        // `check_consts::qualifs` but without recursion.
-                        if has_mut_interior {
-                            // This allows borrowing fields which don't have
-                            // `HasMutInterior`, from a type that does, e.g.:
-                            // `let _: &'static _ = &(Cell::new(1), 2).1;`
-                            let mut place_projection = &place.projection[..];
-                            // FIXME(eddyb) use a forward loop instead of a reverse one.
-                            while let &[ref proj_base @ .., elem] = place_projection {
-                                // FIXME(eddyb) this is probably excessive, with
-                                // the exception of `union` member accesses.
-                                let ty =
-                                    Place::ty_from(place.local, proj_base, self.body, self.tcx)
-                                        .projection_ty(self.tcx, elem)
-                                        .ty;
-                                if ty.is_freeze(self.tcx.at(DUMMY_SP), self.param_env) {
-                                    has_mut_interior = false;
-                                    break;
-                                }
-
-                                place_projection = proj_base;
-                            }
+                        if self.qualif_local::<qualifs::NeedsDrop>(place.local) {
+                            return Err(Unpromotable);
                         }
 
                         // FIXME(eddyb) this duplicates part of `validate_rvalue`.
+                        let has_mut_interior =
+                            self.qualif_local::<qualifs::HasMutInterior>(place.local);
                         if has_mut_interior {
-                            return Err(Unpromotable);
-                        }
-                        if self.qualif_local::<qualifs::NeedsDrop>(place.local) {
                             return Err(Unpromotable);
                         }
 
@@ -562,14 +526,12 @@ impl<'tcx> Validator<'_, 'tcx> {
                     }
 
                     ProjectionElem::Field(..) => {
-                        if self.maybe_runtime() {
-                            let base_ty =
-                                Place::ty_from(place.local, proj_base, self.body, self.tcx).ty;
-                            if let Some(def) = base_ty.ty_adt_def() {
-                                // No promotion of union field accesses.
-                                if def.is_union() {
-                                    return Err(Unpromotable);
-                                }
+                        let base_ty =
+                            Place::ty_from(place.local, proj_base, self.body, self.tcx).ty;
+                        if let Some(def) = base_ty.ty_adt_def() {
+                            // No promotion of union field accesses.
+                            if def.is_union() {
+                                return Err(Unpromotable);
                             }
                         }
                     }
@@ -705,28 +667,7 @@ impl<'tcx> Validator<'_, 'tcx> {
 
                 self.validate_place(place)?;
 
-                // HACK(eddyb) this should compute the same thing as
-                // `<HasMutInterior as Qualif>::in_projection` from
-                // `check_consts::qualifs` but without recursion.
-                let mut has_mut_interior =
-                    self.qualif_local::<qualifs::HasMutInterior>(place.local);
-                if has_mut_interior {
-                    let mut place_projection = place.projection;
-                    // FIXME(eddyb) use a forward loop instead of a reverse one.
-                    while let &[ref proj_base @ .., elem] = place_projection {
-                        // FIXME(eddyb) this is probably excessive, with
-                        // the exception of `union` member accesses.
-                        let ty = Place::ty_from(place.local, proj_base, self.body, self.tcx)
-                            .projection_ty(self.tcx, elem)
-                            .ty;
-                        if ty.is_freeze(self.tcx.at(DUMMY_SP), self.param_env) {
-                            has_mut_interior = false;
-                            break;
-                        }
-
-                        place_projection = proj_base;
-                    }
-                }
+                let has_mut_interior = self.qualif_local::<qualifs::HasMutInterior>(place.local);
                 if has_mut_interior {
                     return Err(Unpromotable);
                 }
@@ -751,7 +692,14 @@ impl<'tcx> Validator<'_, 'tcx> {
     ) -> Result<(), Unpromotable> {
         let fn_ty = callee.ty(self.body, self.tcx);
 
-        if !self.explicit && self.maybe_runtime() {
+        // When doing explicit promotion and inside const/static items, we promote all (eligible) function calls.
+        // Everywhere else, we require `#[rustc_promotable]` on the callee.
+        let promote_all_const_fn = self.explicit
+            || matches!(
+                self.const_kind,
+                Some(hir::ConstContext::Static(_) | hir::ConstContext::Const)
+            );
+        if !promote_all_const_fn {
             if let ty::FnDef(def_id, _) = *fn_ty.kind() {
                 // Never promote runtime `const fn` calls of
                 // functions without `#[rustc_promotable]`.
@@ -1176,7 +1124,7 @@ pub fn promote_candidates<'tcx>(
         let mut scope = body.source_scopes[candidate.source_info(body).scope].clone();
         scope.parent_scope = None;
 
-        let mut promoted = Body::new(
+        let promoted = Body::new(
             body.source, // `promoted` gets filled in below
             IndexVec::new(),
             IndexVec::from_elem_n(scope, 1),
@@ -1187,7 +1135,6 @@ pub fn promote_candidates<'tcx>(
             body.span,
             body.generator_kind,
         );
-        promoted.ignore_interior_mut_in_const_validation = true;
 
         let promoter = Promoter {
             promoted,

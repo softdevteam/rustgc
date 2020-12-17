@@ -606,7 +606,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                 // Uncertain or unimplemented.
                 Ok(None) => {
                     if trait_pred.def_id() == unsize_did {
-                        let trait_pred = self.resolve_vars_if_possible(&trait_pred);
+                        let trait_pred = self.resolve_vars_if_possible(trait_pred);
                         let self_ty = trait_pred.skip_binder().self_ty();
                         let unsize_ty = trait_pred.skip_binder().trait_ref.substs[1].expect_ty();
                         debug!("coerce_unsized: ambiguous unsize case for {:?}", trait_pred);
@@ -732,7 +732,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                 }
 
                 let InferOk { value: a_sig, mut obligations } =
-                    self.normalize_associated_types_in_as_infer_ok(self.cause.span, &a_sig);
+                    self.normalize_associated_types_in_as_infer_ok(self.cause.span, a_sig);
 
                 let a_fn_pointer = self.tcx.mk_fn_ptr(a_sig);
                 let InferOk { value, obligations: o2 } = self.coerce_from_safe_fn(
@@ -973,8 +973,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
         if let (Some(a_sig), Some(b_sig)) = (a_sig, b_sig) {
             // The signature must match.
-            let a_sig = self.normalize_associated_types_in(new.span, &a_sig);
-            let b_sig = self.normalize_associated_types_in(new.span, &b_sig);
+            let a_sig = self.normalize_associated_types_in(new.span, a_sig);
+            let b_sig = self.normalize_associated_types_in(new.span, b_sig);
             let sig = self
                 .at(cause, self.param_env)
                 .trace(prev_ty, new_ty)
@@ -1475,6 +1475,28 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
         if let (Some(sp), Some(fn_output)) = (fcx.ret_coercion_span.borrow().as_ref(), fn_output) {
             self.add_impl_trait_explanation(&mut err, cause, fcx, expected, *sp, fn_output);
         }
+
+        if let Some(sp) = fcx.ret_coercion_span.borrow().as_ref() {
+            // If the closure has an explicit return type annotation,
+            // then a type error may occur at the first return expression we
+            // see in the closure (if it conflicts with the declared
+            // return type). Skip adding a note in this case, since it
+            // would be incorrect.
+            if !err.span.primary_spans().iter().any(|span| span == sp) {
+                let hir = fcx.tcx.hir();
+                let body_owner = hir.body_owned_by(hir.enclosing_body_owner(fcx.body_id));
+                if fcx.tcx.is_closure(hir.body_owner_def_id(body_owner).to_def_id()) {
+                    err.span_note(
+                        *sp,
+                        &format!(
+                            "return type inferred to be `{}` here",
+                            fcx.resolve_vars_if_possible(expected)
+                        ),
+                    );
+                }
+            }
+        }
+
         err
     }
 

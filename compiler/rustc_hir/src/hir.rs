@@ -272,10 +272,7 @@ impl GenericArg<'_> {
     }
 
     pub fn is_const(&self) -> bool {
-        match self {
-            GenericArg::Const(_) => true,
-            _ => false,
-        }
+        matches!(self, GenericArg::Const(_))
     }
 
     pub fn descr(&self) -> &'static str {
@@ -283,6 +280,14 @@ impl GenericArg<'_> {
             GenericArg::Lifetime(_) => "lifetime",
             GenericArg::Type(_) => "type",
             GenericArg::Const(_) => "constant",
+        }
+    }
+
+    pub fn short_descr(&self) -> &'static str {
+        match self {
+            GenericArg::Lifetime(_) => "lifetime",
+            GenericArg::Type(_) => "type",
+            GenericArg::Const(_) => "const",
         }
     }
 }
@@ -486,6 +491,8 @@ impl Generics<'hir> {
 #[derive(HashStable_Generic)]
 pub enum SyntheticTyParamKind {
     ImplTrait,
+    // Created by the `#[rustc_synthetic]` attribute.
+    FromAttr,
 }
 
 /// A where-clause in a definition.
@@ -572,6 +579,7 @@ pub struct ModuleItems {
     pub items: BTreeSet<HirId>,
     pub trait_items: BTreeSet<TraitItemId>,
     pub impl_items: BTreeSet<ImplItemId>,
+    pub foreign_items: BTreeSet<ForeignItemId>,
 }
 
 /// A type representing only the top-level module.
@@ -605,6 +613,7 @@ pub struct Crate<'hir> {
 
     pub trait_items: BTreeMap<TraitItemId, TraitItem<'hir>>,
     pub impl_items: BTreeMap<ImplItemId, ImplItem<'hir>>,
+    pub foreign_items: BTreeMap<ForeignItemId, ForeignItem<'hir>>,
     pub bodies: BTreeMap<BodyId, Body<'hir>>,
     pub trait_impls: BTreeMap<DefId, Vec<HirId>>,
 
@@ -637,6 +646,10 @@ impl Crate<'hir> {
         &self.impl_items[&id]
     }
 
+    pub fn foreign_item(&self, id: ForeignItemId) -> &ForeignItem<'hir> {
+        &self.foreign_items[&id]
+    }
+
     pub fn body(&self, id: BodyId) -> &Body<'hir> {
         &self.bodies[&id]
     }
@@ -666,6 +679,10 @@ impl Crate<'_> {
         for impl_item in self.impl_items.values() {
             visitor.visit_impl_item(impl_item);
         }
+
+        for foreign_item in self.foreign_items.values() {
+            visitor.visit_foreign_item(foreign_item);
+        }
     }
 
     /// A parallel version of `visit_all_item_likes`.
@@ -687,6 +704,11 @@ impl Crate<'_> {
             {
                 par_for_each_in(&self.impl_items, |(_, impl_item)| {
                     visitor.visit_impl_item(impl_item);
+                });
+            },
+            {
+                par_for_each_in(&self.foreign_items, |(_, foreign_item)| {
+                    visitor.visit_foreign_item(foreign_item);
                 });
             }
         );
@@ -733,6 +755,9 @@ pub struct Pat<'hir> {
     pub hir_id: HirId,
     pub kind: PatKind<'hir>,
     pub span: Span,
+    // Whether to use default binding modes.
+    // At present, this is false only for destructuring assignment.
+    pub default_binding_modes: bool,
 }
 
 impl Pat<'_> {
@@ -978,17 +1003,11 @@ impl BinOpKind {
     }
 
     pub fn is_lazy(self) -> bool {
-        match self {
-            BinOpKind::And | BinOpKind::Or => true,
-            _ => false,
-        }
+        matches!(self, BinOpKind::And | BinOpKind::Or)
     }
 
     pub fn is_shift(self) -> bool {
-        match self {
-            BinOpKind::Shl | BinOpKind::Shr => true,
-            _ => false,
-        }
+        matches!(self, BinOpKind::Shl | BinOpKind::Shr)
     }
 
     pub fn is_comparison(self) -> bool {
@@ -1068,10 +1087,7 @@ impl UnOp {
 
     /// Returns `true` if the unary operator takes its argument by value.
     pub fn is_by_value(self) -> bool {
-        match self {
-            Self::UnNeg | Self::UnNot => true,
-            _ => false,
-        }
+        matches!(self, Self::UnNeg | Self::UnNot)
     }
 }
 
@@ -1099,11 +1115,11 @@ pub enum StmtKind<'hir> {
     Semi(&'hir Expr<'hir>),
 }
 
-impl StmtKind<'hir> {
-    pub fn attrs(&self) -> &'hir [Attribute] {
+impl<'hir> StmtKind<'hir> {
+    pub fn attrs(&self, get_item: impl FnOnce(ItemId) -> &'hir Item<'hir>) -> &'hir [Attribute] {
         match *self {
             StmtKind::Local(ref l) => &l.attrs,
-            StmtKind::Item(_) => &[],
+            StmtKind::Item(ref item_id) => &get_item(*item_id).attrs,
             StmtKind::Expr(ref e) | StmtKind::Semi(ref e) => &e.attrs,
         }
     }
@@ -1407,10 +1423,9 @@ impl Expr<'_> {
     /// on the given expression should be considered a place expression.
     pub fn is_place_expr(&self, mut allow_projections_from: impl FnMut(&Self) -> bool) -> bool {
         match self.kind {
-            ExprKind::Path(QPath::Resolved(_, ref path)) => match path.res {
-                Res::Local(..) | Res::Def(DefKind::Static, _) | Res::Err => true,
-                _ => false,
-            },
+            ExprKind::Path(QPath::Resolved(_, ref path)) => {
+                matches!(path.res, Res::Local(..) | Res::Def(DefKind::Static, _) | Res::Err)
+            }
 
             // Type ascription inherits its place expression kind from its
             // operand. See:
@@ -1691,6 +1706,9 @@ pub enum LocalSource {
     AsyncFn,
     /// A desugared `<expr>.await`.
     AwaitDesugar,
+    /// A desugared `expr = expr`, where the LHS is a tuple, struct or array.
+    /// The span is that of the `=` sign.
+    AssignDesugar(Span),
 }
 
 /// Hints at the original code for a `match _ { .. }`.
@@ -1837,7 +1855,7 @@ pub struct FnSig<'hir> {
 }
 
 // The bodies for items are stored "out of line", in a separate
-// hashmap in the `Crate`. Here we just record the node-id of the item
+// hashmap in the `Crate`. Here we just record the hir-id of the item
 // so it can fetched later.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Encodable, Debug)]
 pub struct TraitItemId {
@@ -1881,7 +1899,7 @@ pub enum TraitItemKind<'hir> {
 }
 
 // The bodies for items are stored "out of line", in a separate
-// hashmap in the `Crate`. Here we just record the node-id of the item
+// hashmap in the `Crate`. Here we just record the hir-id of the item
 // so it can fetched later.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Encodable, Debug)]
 pub struct ImplItemId {
@@ -2125,7 +2143,7 @@ impl<'hir> InlineAsmOperand<'hir> {
 #[derive(Debug, HashStable_Generic)]
 pub struct InlineAsm<'hir> {
     pub template: &'hir [InlineAsmTemplatePiece],
-    pub operands: &'hir [InlineAsmOperand<'hir>],
+    pub operands: &'hir [(InlineAsmOperand<'hir>, Span)],
     pub options: InlineAsmOptions,
     pub line_spans: &'hir [Span],
 }
@@ -2202,10 +2220,7 @@ pub enum ImplicitSelfKind {
 impl ImplicitSelfKind {
     /// Does this represent an implicit self?
     pub fn has_implicit_self(&self) -> bool {
-        match *self {
-            ImplicitSelfKind::None => false,
-            _ => true,
-        }
+        !matches!(*self, ImplicitSelfKind::None)
     }
 }
 
@@ -2235,10 +2250,7 @@ impl Defaultness {
     }
 
     pub fn is_default(&self) -> bool {
-        match *self {
-            Defaultness::Default { .. } => true,
-            _ => false,
-        }
+        matches!(*self, Defaultness::Default { .. })
     }
 }
 
@@ -2270,12 +2282,6 @@ pub struct Mod<'hir> {
     /// to the last token in the external file.
     pub inner: Span,
     pub item_ids: &'hir [ItemId],
-}
-
-#[derive(Debug, HashStable_Generic)]
-pub struct ForeignMod<'hir> {
-    pub abi: Abi,
-    pub items: &'hir [ForeignItem<'hir>],
 }
 
 #[derive(Encodable, Debug, HashStable_Generic)]
@@ -2369,10 +2375,7 @@ pub enum VisibilityKind<'hir> {
 
 impl VisibilityKind<'_> {
     pub fn is_pub(&self) -> bool {
-        match *self {
-            VisibilityKind::Public => true,
-            _ => false,
-        }
+        matches!(*self, VisibilityKind::Public)
     }
 
     pub fn is_pub_restricted(&self) -> bool {
@@ -2398,7 +2401,7 @@ impl StructField<'_> {
     // Still necessary in couple of places
     pub fn is_positional(&self) -> bool {
         let first = self.ident.as_str().as_bytes()[0];
-        first >= b'0' && first <= b'9'
+        (b'0'..=b'9').contains(&first)
     }
 }
 
@@ -2438,7 +2441,7 @@ impl VariantData<'hir> {
 }
 
 // The bodies for items are stored "out of line", in a separate
-// hashmap in the `Crate`. Here we just record the node-id of the item
+// hashmap in the `Crate`. Here we just record the hir-id of the item
 // so it can fetched later.
 #[derive(Copy, Clone, Encodable, Debug)]
 pub struct ItemId {
@@ -2500,10 +2503,7 @@ pub struct FnHeader {
 
 impl FnHeader {
     pub fn is_const(&self) -> bool {
-        match &self.constness {
-            Constness::Const => true,
-            _ => false,
-        }
+        matches!(&self.constness, Constness::Const)
     }
 }
 
@@ -2530,7 +2530,7 @@ pub enum ItemKind<'hir> {
     /// A module.
     Mod(Mod<'hir>),
     /// An external module, e.g. `extern { .. }`.
-    ForeignMod(ForeignMod<'hir>),
+    ForeignMod { abi: Abi, items: &'hir [ForeignItemRef<'hir>] },
     /// Module-level inline assembly (from `global_asm!`).
     GlobalAsm(&'hir GlobalAsm),
     /// A type alias, e.g., `type Foo = Bar<u8>`.
@@ -2623,6 +2623,29 @@ pub enum AssocItemKind {
     Type,
 }
 
+// The bodies for items are stored "out of line", in a separate
+// hashmap in the `Crate`. Here we just record the hir-id of the item
+// so it can fetched later.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Encodable, Debug)]
+pub struct ForeignItemId {
+    pub hir_id: HirId,
+}
+
+/// A reference from a foreign block to one of its items. This
+/// contains the item's ID, naturally, but also the item's name and
+/// some other high-level details (like whether it is an associated
+/// type or method, and whether it is public). This allows other
+/// passes to find the impl they want without loading the ID (which
+/// means fewer edges in the incremental compilation graph).
+#[derive(Debug, HashStable_Generic)]
+pub struct ForeignItemRef<'hir> {
+    pub id: ForeignItemId,
+    #[stable_hasher(project(name))]
+    pub ident: Ident,
+    pub span: Span,
+    pub vis: Visibility<'hir>,
+}
+
 #[derive(Debug, HashStable_Generic)]
 pub struct ForeignItem<'hir> {
     #[stable_hasher(project(name))]
@@ -2700,6 +2723,9 @@ impl<'hir> Node<'hir> {
             Node::TraitItem(TraitItem { ident, .. })
             | Node::ImplItem(ImplItem { ident, .. })
             | Node::ForeignItem(ForeignItem { ident, .. })
+            | Node::Field(StructField { ident, .. })
+            | Node::Variant(Variant { ident, .. })
+            | Node::MacroDef(MacroDef { ident, .. })
             | Node::Item(Item { ident, .. }) => Some(*ident),
             _ => None,
         }

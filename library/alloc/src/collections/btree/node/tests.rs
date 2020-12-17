@@ -5,79 +5,21 @@ use crate::string::String;
 use core::cmp::Ordering::*;
 
 impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> {
+    // Asserts that the back pointer in each reachable node points to its parent.
     pub fn assert_back_pointers(self) {
-        match self.force() {
-            ForceResult::Leaf(_) => {}
-            ForceResult::Internal(node) => {
-                for idx in 0..=node.len() {
-                    let edge = unsafe { Handle::new_edge(node, idx) };
-                    let child = edge.descend();
-                    assert!(child.ascend().ok() == Some(edge));
-                    child.assert_back_pointers();
-                }
+        if let ForceResult::Internal(node) = self.force() {
+            for idx in 0..=node.len() {
+                let edge = unsafe { Handle::new_edge(node, idx) };
+                let child = edge.descend();
+                assert!(child.ascend().ok() == Some(edge));
+                child.assert_back_pointers();
             }
         }
     }
 
-    pub fn assert_ascending(self)
-    where
-        K: Copy + Debug + Ord,
-    {
-        struct SeriesChecker<T> {
-            previous: Option<T>,
-        }
-        impl<T: Copy + Debug + Ord> SeriesChecker<T> {
-            fn is_ascending(&mut self, next: T) {
-                if let Some(previous) = self.previous {
-                    assert!(previous < next, "{:?} >= {:?}", previous, next);
-                }
-                self.previous = Some(next);
-            }
-        }
-
-        let mut checker = SeriesChecker { previous: None };
-        self.visit_nodes_in_order(|pos| match pos {
-            navigate::Position::Leaf(node) => {
-                for idx in 0..node.len() {
-                    let key = *unsafe { node.key_at(idx) };
-                    checker.is_ascending(key);
-                }
-            }
-            navigate::Position::InternalKV(kv) => {
-                let key = *kv.into_kv().0;
-                checker.is_ascending(key);
-            }
-            navigate::Position::Internal(_) => {}
-        });
-    }
-
-    pub fn assert_and_add_lengths(self) -> usize {
-        let mut internal_length = 0;
-        let mut internal_kv_count = 0;
-        let mut leaf_length = 0;
-        self.visit_nodes_in_order(|pos| match pos {
-            navigate::Position::Leaf(node) => {
-                let is_root = self.height() == 0;
-                let min_len = if is_root { 0 } else { MIN_LEN };
-                assert!(node.len() >= min_len, "{} < {}", node.len(), min_len);
-                leaf_length += node.len();
-            }
-            navigate::Position::Internal(node) => {
-                let is_root = self.height() == node.height();
-                let min_len = if is_root { 1 } else { MIN_LEN };
-                assert!(node.len() >= min_len, "{} < {}", node.len(), min_len);
-                internal_length += node.len();
-            }
-            navigate::Position::InternalKV(_) => {
-                internal_kv_count += 1;
-            }
-        });
-        assert_eq!(internal_length, internal_kv_count);
-        let total = internal_length + leaf_length;
-        assert_eq!(self.calc_length(), total);
-        total
-    }
-
+    // Renders a multi-line display of the keys in order and in tree hierarchy,
+    // picturing the tree growing sideways from its root on the left to its
+    // leaves on the right.
     pub fn dump_keys(self) -> String
     where
         K: Debug,
@@ -115,33 +57,36 @@ fn test_splitpoint() {
         let mut left_len = middle_kv_idx;
         let mut right_len = CAPACITY - middle_kv_idx - 1;
         match insertion {
-            InsertionPlace::Left(edge_idx) => {
+            LeftOrRight::Left(edge_idx) => {
                 assert!(edge_idx <= left_len);
                 left_len += 1;
             }
-            InsertionPlace::Right(edge_idx) => {
+            LeftOrRight::Right(edge_idx) => {
                 assert!(edge_idx <= right_len);
                 right_len += 1;
             }
         }
-        assert!(left_len >= MIN_LEN);
-        assert!(right_len >= MIN_LEN);
+        assert!(left_len >= MIN_LEN_AFTER_SPLIT);
+        assert!(right_len >= MIN_LEN_AFTER_SPLIT);
         assert!(left_len + right_len == CAPACITY);
     }
 }
 
 #[test]
 fn test_partial_cmp_eq() {
-    let mut root1: Root<i32, ()> = Root::new_leaf();
-    let mut leaf1 = unsafe { root1.leaf_node_as_mut() };
+    let mut root1 = NodeRef::new_leaf();
+    let mut leaf1 = root1.borrow_mut();
     leaf1.push(1, ());
+    let mut root1 = root1.forget_type();
     root1.push_internal_level();
-    let root2: Root<i32, ()> = Root::new_leaf();
+    let root2 = Root::new();
+    root1.reborrow().assert_back_pointers();
+    root2.reborrow().assert_back_pointers();
 
-    let leaf_edge_1a = root1.node_as_ref().first_leaf_edge().forget_node_type();
-    let leaf_edge_1b = root1.node_as_ref().last_leaf_edge().forget_node_type();
-    let top_edge_1 = root1.node_as_ref().first_edge();
-    let top_edge_2 = root2.node_as_ref().first_edge();
+    let leaf_edge_1a = root1.reborrow().first_leaf_edge().forget_node_type();
+    let leaf_edge_1b = root1.reborrow().last_leaf_edge().forget_node_type();
+    let top_edge_1 = root1.reborrow().first_edge();
+    let top_edge_2 = root2.reborrow().first_edge();
 
     assert!(leaf_edge_1a == leaf_edge_1a);
     assert!(leaf_edge_1a != leaf_edge_1b);
@@ -158,8 +103,8 @@ fn test_partial_cmp_eq() {
     assert_eq!(top_edge_1.partial_cmp(&top_edge_2), None);
 
     root1.pop_internal_level();
-    unsafe { root1.into_ref().deallocate_and_ascend() };
-    unsafe { root2.into_ref().deallocate_and_ascend() };
+    unsafe { root1.deallocate_and_ascend() };
+    unsafe { root2.deallocate_and_ascend() };
 }
 
 #[test]

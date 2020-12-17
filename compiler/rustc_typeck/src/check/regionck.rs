@@ -229,7 +229,7 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
     /// of b will be `&<R0>.i32` and then `*b` will require that `<R0>` be bigger than the let and
     /// the `*b` expression, so we will effectively resolve `<R0>` to be the block B.
     pub fn resolve_type(&self, unresolved_ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.resolve_vars_if_possible(&unresolved_ty)
+        self.resolve_vars_if_possible(unresolved_ty)
     }
 
     /// Try to resolve the type for the given node.
@@ -577,7 +577,7 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
     fn link_pattern(&self, discr_cmt: PlaceWithHirId<'tcx>, root_pat: &hir::Pat<'_>) {
         debug!("link_pattern(discr_cmt={:?}, root_pat={:?})", discr_cmt, root_pat);
         ignore_err!(self.with_mc(|mc| {
-            mc.cat_pattern(discr_cmt, root_pat, |sub_cmt, hir::Pat { kind, span, hir_id }| {
+            mc.cat_pattern(discr_cmt, root_pat, |sub_cmt, hir::Pat { kind, span, hir_id, .. }| {
                 // `ref x` pattern
                 if let PatKind::Binding(..) = kind {
                     if let Some(ty::BindByReference(mutbl)) =

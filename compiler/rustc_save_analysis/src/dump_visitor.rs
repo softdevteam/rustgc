@@ -320,6 +320,15 @@ impl<'tcx> DumpVisitor<'tcx> {
         for param in generics.params {
             match param.kind {
                 hir::GenericParamKind::Lifetime { .. } => {}
+                hir::GenericParamKind::Type {
+                    synthetic: Some(hir::SyntheticTyParamKind::ImplTrait),
+                    ..
+                } => {
+                    return self
+                        .nest_typeck_results(self.tcx.hir().local_def_id(param.hir_id), |this| {
+                            this.visit_generics(generics)
+                        });
+                }
                 hir::GenericParamKind::Type { .. } => {
                     let param_ss = param.name.ident().span;
                     let name = escape(self.span.snippet(param_ss));
@@ -351,7 +360,8 @@ impl<'tcx> DumpVisitor<'tcx> {
                 hir::GenericParamKind::Const { .. } => {}
             }
         }
-        self.visit_generics(generics);
+
+        self.visit_generics(generics)
     }
 
     fn process_fn(
@@ -806,7 +816,7 @@ impl<'tcx> DumpVisitor<'tcx> {
         path: &'tcx hir::QPath<'tcx>,
         fields: &'tcx [hir::Field<'tcx>],
         variant: &'tcx ty::VariantDef,
-        base: Option<&'tcx hir::Expr<'tcx>>,
+        rest: Option<&'tcx hir::Expr<'tcx>>,
     ) {
         if let Some(struct_lit_data) = self.save_ctxt.get_expr_data(ex) {
             if let hir::QPath::Resolved(_, path) = path {
@@ -826,7 +836,9 @@ impl<'tcx> DumpVisitor<'tcx> {
             }
         }
 
-        walk_list!(self, visit_expr, base);
+        if let Some(base) = rest {
+            self.visit_expr(&base);
+        }
     }
 
     fn process_method_call(
@@ -1389,7 +1401,7 @@ impl<'tcx> Visitor<'tcx> for DumpVisitor<'tcx> {
         debug!("visit_expr {:?}", ex.kind);
         self.process_macro_use(ex.span);
         match ex.kind {
-            hir::ExprKind::Struct(ref path, ref fields, ref base) => {
+            hir::ExprKind::Struct(ref path, ref fields, ref rest) => {
                 let hir_expr = self.save_ctxt.tcx.hir().expect_expr(ex.hir_id);
                 let adt = match self.save_ctxt.typeck_results().expr_ty_opt(&hir_expr) {
                     Some(ty) if ty.ty_adt_def().is_some() => ty.ty_adt_def().unwrap(),
@@ -1399,7 +1411,7 @@ impl<'tcx> Visitor<'tcx> for DumpVisitor<'tcx> {
                     }
                 };
                 let res = self.save_ctxt.get_path_res(hir_expr.hir_id);
-                self.process_struct_lit(ex, path, fields, adt.variant_of_res(res), *base)
+                self.process_struct_lit(ex, path, fields, adt.variant_of_res(res), *rest)
             }
             hir::ExprKind::MethodCall(ref seg, _, args, _) => {
                 self.process_method_call(ex, seg, args)

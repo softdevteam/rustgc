@@ -198,7 +198,7 @@ mod prim_bool {}
 /// words, they can't return `!` from every code path. As an example, this code doesn't compile:
 ///
 /// ```compile_fail
-/// use core::ops::Add;
+/// use std::ops::Add;
 ///
 /// fn foo() -> impl Add<u32> {
 ///     unimplemented!()
@@ -208,7 +208,7 @@ mod prim_bool {}
 /// But this code does:
 ///
 /// ```
-/// use core::ops::Add;
+/// use std::ops::Add;
 ///
 /// fn foo() -> impl Add<u32> {
 ///     if true {
@@ -389,7 +389,7 @@ mod prim_unit {}
 //
 /// Raw, unsafe pointers, `*const T`, and `*mut T`.
 ///
-/// *[See also the `std::ptr` module][`ptr`].*
+/// *[See also the `std::ptr` module](ptr).*
 ///
 /// Working with raw pointers in Rust is uncommon, typically limited to a few patterns.
 /// Raw pointers can be unaligned or [`null`]. However, when a raw pointer is
@@ -489,8 +489,14 @@ mod prim_pointer {}
 /// * A repeat expression `[x; N]`, which produces an array with `N` copies of `x`.
 ///   The type of `x` must be [`Copy`].
 ///
+/// Note that `[expr; 0]` is allowed, and produces an empty array.
+/// This will still evaluate `expr`, however, and immediately drop the resulting value, so
+/// be mindful of side effects.
+///
 /// Arrays of *any* size implement the following traits if the element type allows it:
 ///
+/// - [`Copy`]
+/// - [`Clone`]
 /// - [`Debug`]
 /// - [`IntoIterator`] (implemented for `&[T; N]` and `&mut [T; N]`)
 /// - [`PartialEq`], [`PartialOrd`], [`Eq`], [`Ord`]
@@ -498,14 +504,9 @@ mod prim_pointer {}
 /// - [`AsRef`], [`AsMut`]
 /// - [`Borrow`], [`BorrowMut`]
 ///
-/// Arrays of sizes from 0 to 32 (inclusive) implement [`Default`] trait
+/// Arrays of sizes from 0 to 32 (inclusive) implement the [`Default`] trait
 /// if the element type allows it. As a stopgap, trait implementations are
 /// statically generated up to size 32.
-///
-/// Arrays of *any* size are [`Copy`] if the element type is [`Copy`]
-/// and [`Clone`] if the element type is [`Clone`]. This works
-/// because [`Copy`] and [`Clone`] traits are specially known
-/// to the compiler.
 ///
 /// Arrays coerce to [slices (`[T]`)][slice], so a slice method may be called on
 /// an array. Indeed, this provides most of the API for working with arrays.
@@ -580,7 +581,7 @@ mod prim_array {}
 /// means that elements are laid out so that every element is the same
 /// distance from its neighbors.
 ///
-/// *[See also the `std::slice` module][`crate::slice`].*
+/// *[See also the `std::slice` module](crate::slice).*
 ///
 /// Slices are a view into a block of memory represented as a pointer and a
 /// length.
@@ -625,7 +626,7 @@ mod prim_slice {}
 //
 /// String slices.
 ///
-/// *[See also the `std::str` module][`crate::str`].*
+/// *[See also the `std::str` module](crate::str).*
 ///
 /// The `str` type, also called a 'string slice', is the most primitive string
 /// type. It is usually seen in its borrowed form, `&str`. It is also the type
@@ -800,7 +801,7 @@ mod prim_tuple {}
 /// calculation with floats round to a nearby representable number. For example,
 /// `5.0` and `1.0` can be exactly represented as `f32`, but `1.0 / 5.0` results
 /// in `0.20000000298023223876953125` since `0.2` cannot be exactly represented
-/// as `f32`. Note however, that printing floats with `println` and friends will
+/// as `f32`. Note, however, that printing floats with `println` and friends will
 /// often discard insignificant digits: `println!("{}", 1.0f32 / 5.0f32)` will
 /// print `0.2`.
 ///
@@ -820,7 +821,7 @@ mod prim_tuple {}
 ///
 /// For more information on floating point numbers, see [Wikipedia][wikipedia].
 ///
-/// *[See also the `std::f32::consts` module][`crate::f32::consts`].*
+/// *[See also the `std::f32::consts` module](crate::f32::consts).*
 ///
 /// [wikipedia]: https://en.wikipedia.org/wiki/Single-precision_floating-point_format
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -834,7 +835,7 @@ mod prim_f32 {}
 /// `f32`][`f32`] or [Wikipedia on double precision
 /// values][wikipedia] for more information.
 ///
-/// *[See also the `std::f64::consts` module][`crate::f64::consts`].*
+/// *[See also the `std::f64::consts` module](crate::f64::consts).*
 ///
 /// [`f32`]: prim@f32
 /// [wikipedia]: https://en.wikipedia.org/wiki/Double-precision_floating-point_format

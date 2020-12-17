@@ -1,6 +1,7 @@
 use crate::utils::{match_def_path, paths, span_lint, trait_ref_of_method};
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty::TypeFoldable;
 use rustc_middle::ty::{Adt, Array, RawPtr, Ref, Slice, Tuple, Ty, TypeAndMut};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Span;
@@ -88,11 +89,7 @@ fn check_sig<'tcx>(cx: &LateContext<'tcx>, item_hir_id: hir::HirId, decl: &hir::
     for (hir_ty, ty) in decl.inputs.iter().zip(fn_sig.inputs().skip_binder().iter()) {
         check_ty(cx, hir_ty.span, ty);
     }
-    check_ty(
-        cx,
-        decl.output.span(),
-        cx.tcx.erase_late_bound_regions(&fn_sig.output()),
-    );
+    check_ty(cx, decl.output.span(), cx.tcx.erase_late_bound_regions(fn_sig.output()));
 }
 
 // We want to lint 1. sets or maps with 2. not immutable key types and 3. no unerased
@@ -120,7 +117,11 @@ fn is_mutable_type<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, span: Span) -> bo
             size.try_eval_usize(cx.tcx, cx.param_env).map_or(true, |u| u != 0) && is_mutable_type(cx, inner_ty, span)
         },
         Tuple(..) => ty.tuple_fields().any(|ty| is_mutable_type(cx, ty, span)),
-        Adt(..) => cx.tcx.layout_of(cx.param_env.and(ty)).is_ok() && !ty.is_freeze(cx.tcx.at(span), cx.param_env),
+        Adt(..) => {
+            cx.tcx.layout_of(cx.param_env.and(ty)).is_ok()
+                && !ty.has_escaping_bound_vars()
+                && !ty.is_freeze(cx.tcx.at(span), cx.param_env)
+        },
         _ => false,
     }
 }

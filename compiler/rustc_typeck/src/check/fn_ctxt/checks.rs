@@ -20,7 +20,7 @@ use rustc_middle::ty::{self, Ty};
 use rustc_session::Session;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::{self, MultiSpan, Span};
-use rustc_trait_selection::traits::{self, ObligationCauseCode};
+use rustc_trait_selection::traits::{self, ObligationCauseCode, StatementAsExpression};
 
 use std::mem::replace;
 use std::slice;
@@ -261,9 +261,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         } else {
             // is the missing argument of type `()`?
             let sugg_unit = if expected_arg_tys.len() == 1 && supplied_arg_count == 0 {
-                self.resolve_vars_if_possible(&expected_arg_tys[0]).is_unit()
+                self.resolve_vars_if_possible(expected_arg_tys[0]).is_unit()
             } else if fn_inputs.len() == 1 && supplied_arg_count == 0 {
-                self.resolve_vars_if_possible(&fn_inputs[0]).is_unit()
+                self.resolve_vars_if_possible(fn_inputs[0]).is_unit()
             } else {
                 false
             };
@@ -384,7 +384,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                     ty::FnDef(..) => {
                         let ptr_ty = self.tcx.mk_fn_ptr(arg_ty.fn_sig(self.tcx));
-                        let ptr_ty = self.resolve_vars_if_possible(&ptr_ty);
+                        let ptr_ty = self.resolve_vars_if_possible(ptr_ty);
                         variadic_error(tcx.sess, arg.span, arg_ty, &ptr_ty.to_string());
                     }
                     _ => {}
@@ -758,13 +758,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_ty: Ty<'tcx>,
         err: &mut DiagnosticBuilder<'_>,
     ) {
-        if let Some(span_semi) = self.could_remove_semicolon(blk, expected_ty) {
-            err.span_suggestion(
-                span_semi,
-                "consider removing this semicolon",
-                String::new(),
-                Applicability::MachineApplicable,
-            );
+        if let Some((span_semi, boxed)) = self.could_remove_semicolon(blk, expected_ty) {
+            if let StatementAsExpression::NeedsBoxing = boxed {
+                err.span_suggestion_verbose(
+                    span_semi,
+                    "consider removing this semicolon and boxing the expression",
+                    String::new(),
+                    Applicability::HasPlaceholders,
+                );
+            } else {
+                err.span_suggestion_short(
+                    span_semi,
+                    "consider removing this semicolon",
+                    String::new(),
+                    Applicability::MachineApplicable,
+                );
+            }
         }
     }
 
@@ -918,7 +927,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .map(|&(i, checked_ty, _)| (i, checked_ty))
                     .chain(final_arg_types.iter().map(|&(i, _, coerced_ty)| (i, coerced_ty)))
                     .flat_map(|(i, ty)| {
-                        let ty = self.resolve_vars_if_possible(&ty);
+                        let ty = self.resolve_vars_if_possible(ty);
                         // We walk the argument type because the argument's type could have
                         // been `Option<T>`, but the `FulfillmentError` references `T`.
                         if ty.walk().any(|arg| arg == predicate.self_ty().into()) {
@@ -980,7 +989,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                         // from `typeck-default-trait-impl-assoc-type.rs`.
                                     } else {
                                         let ty = AstConv::ast_ty_to_ty(self, hir_ty);
-                                        let ty = self.resolve_vars_if_possible(&ty);
+                                        let ty = self.resolve_vars_if_possible(ty);
                                         if ty == predicate.self_ty() {
                                             error.obligation.cause.make_mut().span = hir_ty.span;
                                         }

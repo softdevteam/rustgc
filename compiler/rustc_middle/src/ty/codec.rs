@@ -162,7 +162,8 @@ encodable_via_deref! {
     ty::Region<'tcx>,
     &'tcx mir::Body<'tcx>,
     &'tcx mir::UnsafetyCheckResult,
-    &'tcx mir::BorrowCheckResult<'tcx>
+    &'tcx mir::BorrowCheckResult<'tcx>,
+    &'tcx mir::coverage::CodeRegion
 }
 
 pub trait TyDecoder<'tcx>: Decoder {
@@ -278,7 +279,7 @@ impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for ty::Region<'tcx> {
 impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for CanonicalVarInfos<'tcx> {
     fn decode(decoder: &mut D) -> Result<Self, D::Error> {
         let len = decoder.read_usize()?;
-        let interned: Result<Vec<CanonicalVarInfo>, _> =
+        let interned: Result<Vec<CanonicalVarInfo<'tcx>>, _> =
             (0..len).map(|_| Decodable::decode(decoder)).collect();
         Ok(decoder.tcx().intern_canonical_var_infos(interned?.as_slice()))
     }
@@ -376,7 +377,8 @@ impl_decodable_via_ref! {
     &'tcx Allocation,
     &'tcx mir::Body<'tcx>,
     &'tcx mir::UnsafetyCheckResult,
-    &'tcx mir::BorrowCheckResult<'tcx>
+    &'tcx mir::BorrowCheckResult<'tcx>,
+    &'tcx mir::coverage::CodeRegion
 }
 
 #[macro_export]

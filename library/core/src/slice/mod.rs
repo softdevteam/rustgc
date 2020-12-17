@@ -88,7 +88,7 @@ impl<T> [T] {
     #[rustc_const_stable(feature = "const_slice_len", since = "1.32.0")]
     #[inline]
     // SAFETY: const sound because we transmute out the length field as a usize (which it must be)
-    #[allow_internal_unstable(const_fn_union)]
+    #[rustc_allow_const_fn_unstable(const_fn_union)]
     pub const fn len(&self) -> usize {
         // SAFETY: this is safe because `&[T]` and `FatPtr<T>` have the same layout.
         // Only `std` can make this guarantee.
@@ -604,8 +604,9 @@ impl<T> [T] {
                 //     many bytes away from the end of `self`.
                 //   - Any initialized memory is valid `usize`.
                 unsafe {
-                    let pa: *mut T = self.get_unchecked_mut(i);
-                    let pb: *mut T = self.get_unchecked_mut(ln - i - chunk);
+                    let ptr = self.as_mut_ptr();
+                    let pa = ptr.add(i);
+                    let pb = ptr.add(ln - i - chunk);
                     let va = ptr::read_unaligned(pa as *mut usize);
                     let vb = ptr::read_unaligned(pb as *mut usize);
                     ptr::write_unaligned(pa as *mut usize, vb.swap_bytes());
@@ -634,8 +635,9 @@ impl<T> [T] {
                 // always respected, ensuring the `pb` pointer can be used
                 // safely.
                 unsafe {
-                    let pa: *mut T = self.get_unchecked_mut(i);
-                    let pb: *mut T = self.get_unchecked_mut(ln - i - chunk);
+                    let ptr = self.as_mut_ptr();
+                    let pa = ptr.add(i);
+                    let pb = ptr.add(ln - i - chunk);
                     let va = ptr::read_unaligned(pa as *mut u32);
                     let vb = ptr::read_unaligned(pb as *mut u32);
                     ptr::write_unaligned(pa as *mut u32, vb.rotate_left(16));
@@ -653,8 +655,9 @@ impl<T> [T] {
             // aligned, and can be read from and written to.
             unsafe {
                 // Unsafe swap to avoid the bounds check in safe swap.
-                let pa: *mut T = self.get_unchecked_mut(i);
-                let pb: *mut T = self.get_unchecked_mut(ln - i - 1);
+                let ptr = self.as_mut_ptr();
+                let pa = ptr.add(i);
+                let pb = ptr.add(ln - i - 1);
                 ptr::swap(pa, pb);
             }
             i += 1;
@@ -881,6 +884,36 @@ impl<T> [T] {
         ChunksExactMut::new(self, chunk_size)
     }
 
+    /// Splits the slice into a slice of `N`-element arrays,
+    /// starting at the beginning of the slice,
+    /// and a remainder slice with length strictly less than `N`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is 0. This check will most probably get changed to a compile time
+    /// error before this method gets stabilized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let slice = ['l', 'o', 'r', 'e', 'm'];
+    /// let (chunks, remainder) = slice.as_chunks();
+    /// assert_eq!(chunks, &[['l', 'o'], ['r', 'e']]);
+    /// assert_eq!(remainder, &['m']);
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub fn as_chunks<const N: usize>(&self) -> (&[[T; N]], &[T]) {
+        assert_ne!(N, 0);
+        let len = self.len() / N;
+        let (multiple_of_n, remainder) = self.split_at(len * N);
+        // SAFETY: We cast a slice of `len * N` elements into
+        // a slice of `len` many `N` elements chunks.
+        let array_slice: &[[T; N]] = unsafe { from_raw_parts(multiple_of_n.as_ptr().cast(), len) };
+        (array_slice, remainder)
+    }
+
     /// Returns an iterator over `N` elements of the slice at a time, starting at the
     /// beginning of the slice.
     ///
@@ -913,6 +946,43 @@ impl<T> [T] {
     pub fn array_chunks<const N: usize>(&self) -> ArrayChunks<'_, T, N> {
         assert_ne!(N, 0);
         ArrayChunks::new(self)
+    }
+
+    /// Splits the slice into a slice of `N`-element arrays,
+    /// starting at the beginning of the slice,
+    /// and a remainder slice with length strictly less than `N`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is 0. This check will most probably get changed to a compile time
+    /// error before this method gets stabilized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let v = &mut [0, 0, 0, 0, 0];
+    /// let mut count = 1;
+    ///
+    /// let (chunks, remainder) = v.as_chunks_mut();
+    /// remainder[0] = 9;
+    /// for chunk in chunks {
+    ///     *chunk = [count; 2];
+    ///     count += 1;
+    /// }
+    /// assert_eq!(v, &[1, 1, 2, 2, 9]);
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub fn as_chunks_mut<const N: usize>(&mut self) -> (&mut [[T; N]], &mut [T]) {
+        assert_ne!(N, 0);
+        let len = self.len() / N;
+        let (multiple_of_n, remainder) = self.split_at_mut(len * N);
+        let array_slice: &mut [[T; N]] =
+            // SAFETY: We cast a slice of `len * N` elements into
+            // a slice of `len` many `N` elements chunks.
+            unsafe { from_raw_parts_mut(multiple_of_n.as_mut_ptr().cast(), len) };
+        (array_slice, remainder)
     }
 
     /// Returns an iterator over `N` elements of the slice at a time, starting at the
@@ -1700,8 +1770,10 @@ impl<T> [T] {
 
     /// Returns a subslice with the prefix removed.
     ///
-    /// This method returns [`None`] if slice does not start with `prefix`.
-    /// Also it returns the original slice if `prefix` is an empty slice.
+    /// If the slice starts with `prefix`, returns the subslice after the prefix, wrapped in `Some`.
+    /// If `prefix` is empty, simply returns the original slice.
+    ///
+    /// If the slice does not start with `prefix`, returns `None`.
     ///
     /// # Examples
     ///
@@ -1731,8 +1803,10 @@ impl<T> [T] {
 
     /// Returns a subslice with the suffix removed.
     ///
-    /// This method returns [`None`] if slice does not end with `suffix`.
-    /// Also it returns the original slice if `suffix` is an empty slice
+    /// If the slice ends with `suffix`, returns the subslice before the suffix, wrapped in `Some`.
+    /// If `suffix` is empty, simply returns the original slice.
+    ///
+    /// If the slice does not end with `suffix`, returns `None`.
     ///
     /// # Examples
     ///
@@ -1886,10 +1960,10 @@ impl<T> [T] {
     ///          (1, 2), (2, 3), (4, 5), (5, 8), (3, 13),
     ///          (1, 21), (2, 34), (4, 55)];
     ///
-    /// assert_eq!(s.binary_search_by_key(&13, |&(a,b)| b),  Ok(9));
-    /// assert_eq!(s.binary_search_by_key(&4, |&(a,b)| b),   Err(7));
-    /// assert_eq!(s.binary_search_by_key(&100, |&(a,b)| b), Err(13));
-    /// let r = s.binary_search_by_key(&1, |&(a,b)| b);
+    /// assert_eq!(s.binary_search_by_key(&13, |&(a, b)| b),  Ok(9));
+    /// assert_eq!(s.binary_search_by_key(&4, |&(a, b)| b),   Err(7));
+    /// assert_eq!(s.binary_search_by_key(&100, |&(a, b)| b), Err(13));
+    /// let r = s.binary_search_by_key(&1, |&(a, b)| b);
     /// assert!(match r { Ok(1..=4) => true, _ => false, });
     /// ```
     #[stable(feature = "slice_binary_search_by_key", since = "1.10.0")]
@@ -1945,10 +2019,10 @@ impl<T> [T] {
     ///
     /// The comparator function must define a total ordering for the elements in the slice. If
     /// the ordering is not total, the order of the elements is unspecified. An order is a
-    /// total order if it is (for all a, b and c):
+    /// total order if it is (for all `a`, `b` and `c`):
     ///
-    /// * total and antisymmetric: exactly one of a < b, a == b or a > b is true; and
-    /// * transitive, a < b and b < c implies a < c. The same must hold for both == and >.
+    /// * total and antisymmetric: exactly one of `a < b`, `a == b` or `a > b` is true, and
+    /// * transitive, `a < b` and `b < c` implies `a < c`. The same must hold for both `==` and `>`.
     ///
     /// For example, while [`f64`] doesn't implement [`Ord`] because `NaN != NaN`, we can use
     /// `partial_cmp` as our sort function when we know the slice doesn't contain a `NaN`.
@@ -2513,6 +2587,7 @@ impl<T> [T] {
     /// buf.fill(1);
     /// assert_eq!(buf, vec![1; 10]);
     /// ```
+    #[doc(alias = "memset")]
     #[unstable(feature = "slice_fill", issue = "70758")]
     pub fn fill(&mut self, value: T)
     where
@@ -2524,6 +2599,34 @@ impl<T> [T] {
             }
 
             *last = value
+        }
+    }
+
+    /// Fills `self` with elements returned by calling a closure repeatedly.
+    ///
+    /// This method uses a closure to create new values. If you'd rather
+    /// [`Clone`] a given value, use [`fill`]. If you want to use the [`Default`]
+    /// trait to generate values, you can pass [`Default::default`] as the
+    /// argument.
+    ///
+    /// [`fill`]: #method.fill
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_fill_with)]
+    ///
+    /// let mut buf = vec![1; 10];
+    /// buf.fill_with(Default::default);
+    /// assert_eq!(buf, vec![0; 10]);
+    /// ```
+    #[unstable(feature = "slice_fill_with", issue = "79221")]
+    pub fn fill_with<F>(&mut self, mut f: F)
+    where
+        F: FnMut() -> T,
+    {
+        for el in self {
+            *el = f();
         }
     }
 
@@ -2652,6 +2755,7 @@ impl<T> [T] {
     ///
     /// [`clone_from_slice`]: #method.clone_from_slice
     /// [`split_at_mut`]: #method.split_at_mut
+    #[doc(alias = "memcpy")]
     #[stable(feature = "copy_from_slice", since = "1.9.0")]
     pub fn copy_from_slice(&mut self, src: &[T])
     where

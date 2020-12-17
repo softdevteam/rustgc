@@ -73,10 +73,9 @@ pub fn got_symlink_permission(tmpdir: &TempDir) -> bool {
     let link = tmpdir.join("some_hopefully_unique_link_name");
 
     match symlink_file(r"nonexisting_target", link) {
-        Ok(_) => true,
         // ERROR_PRIVILEGE_NOT_HELD = 1314
         Err(ref err) if err.raw_os_error() == Some(1314) => false,
-        Err(_) => true,
+        Ok(_) | Err(_) => true,
     }
 }
 
@@ -1336,4 +1335,58 @@ fn metadata_access_times() {
             }
         }
     }
+}
+
+/// Test creating hard links to symlinks.
+#[test]
+fn symlink_hard_link() {
+    let tmpdir = tmpdir();
+    if !got_symlink_permission(&tmpdir) {
+        return;
+    };
+
+    // Create "file", a file.
+    check!(fs::File::create(tmpdir.join("file")));
+
+    // Create "symlink", a symlink to "file".
+    check!(symlink_file("file", tmpdir.join("symlink")));
+
+    // Create "hard_link", a hard link to "symlink".
+    check!(fs::hard_link(tmpdir.join("symlink"), tmpdir.join("hard_link")));
+
+    // "hard_link" should appear as a symlink.
+    assert!(check!(fs::symlink_metadata(tmpdir.join("hard_link"))).file_type().is_symlink());
+
+    // We sould be able to open "file" via any of the above names.
+    let _ = check!(fs::File::open(tmpdir.join("file")));
+    assert!(fs::File::open(tmpdir.join("file.renamed")).is_err());
+    let _ = check!(fs::File::open(tmpdir.join("symlink")));
+    let _ = check!(fs::File::open(tmpdir.join("hard_link")));
+
+    // Rename "file" to "file.renamed".
+    check!(fs::rename(tmpdir.join("file"), tmpdir.join("file.renamed")));
+
+    // Now, the symlink and the hard link should be dangling.
+    assert!(fs::File::open(tmpdir.join("file")).is_err());
+    let _ = check!(fs::File::open(tmpdir.join("file.renamed")));
+    assert!(fs::File::open(tmpdir.join("symlink")).is_err());
+    assert!(fs::File::open(tmpdir.join("hard_link")).is_err());
+
+    // The symlink and the hard link should both still point to "file".
+    assert!(fs::read_link(tmpdir.join("file")).is_err());
+    assert!(fs::read_link(tmpdir.join("file.renamed")).is_err());
+    assert_eq!(check!(fs::read_link(tmpdir.join("symlink"))), Path::new("file"));
+    assert_eq!(check!(fs::read_link(tmpdir.join("hard_link"))), Path::new("file"));
+
+    // Remove "file.renamed".
+    check!(fs::remove_file(tmpdir.join("file.renamed")));
+
+    // Now, we can't open the file by any name.
+    assert!(fs::File::open(tmpdir.join("file")).is_err());
+    assert!(fs::File::open(tmpdir.join("file.renamed")).is_err());
+    assert!(fs::File::open(tmpdir.join("symlink")).is_err());
+    assert!(fs::File::open(tmpdir.join("hard_link")).is_err());
+
+    // "hard_link" should still appear as a symlink.
+    assert!(check!(fs::symlink_metadata(tmpdir.join("hard_link"))).file_type().is_symlink());
 }

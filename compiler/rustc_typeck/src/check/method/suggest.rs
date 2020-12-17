@@ -2,7 +2,6 @@
 //! found or is otherwise invalid.
 
 use crate::check::FnCtxt;
-use rustc_ast::util::lev_distance;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_errors::{pluralize, struct_span_err, Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
@@ -17,11 +16,11 @@ use rustc_middle::ty::print::with_crate_prefix;
 use rustc_middle::ty::{
     self, ToPolyTraitRef, ToPredicate, Ty, TyCtxt, TypeFoldable, WithConstness,
 };
+use rustc_span::lev_distance;
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{source_map, FileName, Span};
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 use rustc_trait_selection::traits::Obligation;
-use rustc_trait_selection::traits::SelectionContext;
 
 use std::cmp::Ordering;
 
@@ -249,7 +248,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }) => {
                 let tcx = self.tcx;
 
-                let actual = self.resolve_vars_if_possible(&rcvr_ty);
+                let actual = self.resolve_vars_if_possible(rcvr_ty);
                 let ty_str = self.ty_to_string(actual);
                 let is_method = mode == Mode::MethodCall;
                 let item_kind = if is_method {
@@ -745,7 +744,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if actual.is_enum() {
                     let adt_def = actual.ty_adt_def().expect("enum is not an ADT");
                     if let Some(suggestion) = lev_distance::find_best_match_for_name(
-                        adt_def.variants.iter().map(|s| &s.ident.name),
+                        &adt_def.variants.iter().map(|s| s.ident.name).collect::<Vec<_>>(),
                         item_name.name,
                         None,
                     ) {
@@ -870,46 +869,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         call: &hir::Expr<'_>,
         span: Span,
     ) {
-        if let ty::Opaque(def_id, _) = *ty.kind() {
-            let future_trait = self.tcx.require_lang_item(LangItem::Future, None);
-            // Future::Output
-            let item_def_id = self
-                .tcx
-                .associated_items(future_trait)
-                .in_definition_order()
-                .next()
-                .unwrap()
-                .def_id;
-
-            let projection_ty = self.tcx.projection_ty_from_predicates((def_id, item_def_id));
-            let cause = self.misc(span);
-            let mut selcx = SelectionContext::new(&self.infcx);
-            let mut obligations = vec![];
-            if let Some(projection_ty) = projection_ty {
-                let normalized_ty = rustc_trait_selection::traits::normalize_projection_type(
-                    &mut selcx,
-                    self.param_env,
-                    projection_ty,
-                    cause,
-                    0,
-                    &mut obligations,
-                );
-                debug!(
-                    "suggest_await_before_method: normalized_ty={:?}, ty_kind={:?}",
-                    self.resolve_vars_if_possible(&normalized_ty),
-                    normalized_ty.kind(),
-                );
-                let method_exists = self.method_exists(item_name, normalized_ty, call.hir_id, true);
-                debug!("suggest_await_before_method: is_method_exist={}", method_exists);
-                if method_exists {
-                    err.span_suggestion_verbose(
-                        span.shrink_to_lo(),
-                        "consider awaiting before this method call",
-                        "await.".to_string(),
-                        Applicability::MaybeIncorrect,
-                    );
-                }
-            }
+        let output_ty = match self.infcx.get_impl_future_output_ty(ty) {
+            Some(output_ty) => self.resolve_vars_if_possible(output_ty),
+            _ => return,
+        };
+        let method_exists = self.method_exists(item_name, output_ty, call.hir_id, true);
+        debug!("suggest_await_before_method: is_method_exist={}", method_exists);
+        if method_exists {
+            err.span_suggestion_verbose(
+                span.shrink_to_lo(),
+                "consider `await`ing on the `Future` and calling the method on its `Output`",
+                "await.".to_string(),
+                Applicability::MaybeIncorrect,
+            );
         }
     }
 
@@ -1336,6 +1308,8 @@ fn compute_all_traits(tcx: TyCtxt<'_>) -> Vec<DefId> {
         fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem<'_>) {}
 
         fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem<'_>) {}
+
+        fn visit_foreign_item(&mut self, _foreign_item: &hir::ForeignItem<'_>) {}
     }
 
     tcx.hir().krate().visit_all_item_likes(&mut Visitor { map: &tcx.hir(), traits: &mut traits });

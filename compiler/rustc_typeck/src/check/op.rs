@@ -19,6 +19,8 @@ use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
 use rustc_trait_selection::infer::InferCtxtExt;
 
+use std::ops::ControlFlow;
+
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Checks a `a <op>= b`
     pub fn check_binop_assign(
@@ -658,7 +660,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 method.sig.output()
             }
             Err(()) => {
-                let actual = self.resolve_vars_if_possible(&operand_ty);
+                let actual = self.resolve_vars_if_possible(operand_ty);
                 if !actual.references_error() {
                     let mut err = struct_span_err!(
                         self.tcx.sess,
@@ -981,7 +983,7 @@ fn suggest_constraining_param(
 struct TypeParamVisitor<'tcx>(Vec<Ty<'tcx>>);
 
 impl<'tcx> TypeVisitor<'tcx> for TypeParamVisitor<'tcx> {
-    fn visit_ty(&mut self, ty: Ty<'tcx>) -> bool {
+    fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
         if let ty::Param(_) = ty.kind() {
             self.0.push(ty);
         }

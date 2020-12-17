@@ -1,21 +1,23 @@
 //! The main parser interface.
 
-#![feature(bool_to_option)]
 #![feature(crate_visibility_modifier)]
 #![feature(bindings_after_at)]
 #![feature(iter_order_by)]
 #![feature(or_patterns)]
 
 use rustc_ast as ast;
+use rustc_ast::attr::HasAttrs;
 use rustc_ast::token::{self, DelimToken, Nonterminal, Token, TokenKind};
 use rustc_ast::tokenstream::{self, LazyTokenStream, TokenStream, TokenTree};
 use rustc_ast_pretty::pprust;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{Diagnostic, FatalError, Level, PResult};
 use rustc_session::parse::ParseSess;
 use rustc_span::{symbol::kw, FileName, SourceFile, Span, DUMMY_SP};
 
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::mem;
 use std::path::Path;
 use std::str;
@@ -249,39 +251,51 @@ pub fn nt_to_tokenstream(nt: &Nonterminal, sess: &ParseSess, span: Span) -> Toke
     // came from. Here we attempt to extract these lossless token streams
     // before we fall back to the stringification.
 
-    let convert_tokens = |tokens: Option<LazyTokenStream>| tokens.map(|t| t.into_token_stream());
+    let convert_tokens =
+        |tokens: Option<&LazyTokenStream>| tokens.as_ref().map(|t| t.create_token_stream());
 
     let tokens = match *nt {
-        Nonterminal::NtItem(ref item) => {
-            prepend_attrs(sess, &item.attrs, item.tokens.as_ref(), span)
-        }
-        Nonterminal::NtBlock(ref block) => convert_tokens(block.tokens.clone()),
-        Nonterminal::NtStmt(ref stmt) => {
-            // FIXME: We currently only collect tokens for `:stmt`
-            // matchers in `macro_rules!` macros. When we start collecting
-            // tokens for attributes on statements, we will need to prepend
-            // attributes here
-            convert_tokens(stmt.tokens.clone())
-        }
-        Nonterminal::NtPat(ref pat) => convert_tokens(pat.tokens.clone()),
-        Nonterminal::NtTy(ref ty) => convert_tokens(ty.tokens.clone()),
+        Nonterminal::NtItem(ref item) => prepend_attrs(&item.attrs, item.tokens.as_ref()),
+        Nonterminal::NtBlock(ref block) => convert_tokens(block.tokens.as_ref()),
+        Nonterminal::NtStmt(ref stmt) => prepend_attrs(stmt.attrs(), stmt.tokens()),
+        Nonterminal::NtPat(ref pat) => convert_tokens(pat.tokens.as_ref()),
+        Nonterminal::NtTy(ref ty) => convert_tokens(ty.tokens.as_ref()),
         Nonterminal::NtIdent(ident, is_raw) => {
             Some(tokenstream::TokenTree::token(token::Ident(ident.name, is_raw), ident.span).into())
         }
         Nonterminal::NtLifetime(ident) => {
             Some(tokenstream::TokenTree::token(token::Lifetime(ident.name), ident.span).into())
         }
-        Nonterminal::NtMeta(ref attr) => convert_tokens(attr.tokens.clone()),
-        Nonterminal::NtPath(ref path) => convert_tokens(path.tokens.clone()),
-        Nonterminal::NtVis(ref vis) => convert_tokens(vis.tokens.clone()),
+        Nonterminal::NtMeta(ref attr) => convert_tokens(attr.tokens.as_ref()),
+        Nonterminal::NtPath(ref path) => convert_tokens(path.tokens.as_ref()),
+        Nonterminal::NtVis(ref vis) => convert_tokens(vis.tokens.as_ref()),
         Nonterminal::NtTT(ref tt) => Some(tt.clone().into()),
         Nonterminal::NtExpr(ref expr) | Nonterminal::NtLiteral(ref expr) => {
             if expr.tokens.is_none() {
                 debug!("missing tokens for expr {:?}", expr);
             }
-            prepend_attrs(sess, &expr.attrs, expr.tokens.as_ref(), span)
+            prepend_attrs(&expr.attrs, expr.tokens.as_ref())
         }
     };
+
+    // Caches the stringification of 'good' `TokenStreams` which passed
+    // `tokenstream_probably_equal_for_proc_macro`. This allows us to avoid
+    // repeatedly stringifying and comparing the same `TokenStream` for deeply
+    // nested nonterminals.
+    //
+    // We cache by the strinification instead of the `TokenStream` to avoid
+    // needing to implement `Hash` for `TokenStream`. Note that it's possible to
+    // have two distinct `TokenStream`s that stringify to the same result
+    // (e.g. if they differ only in hygiene information). However, any
+    // information lost during the stringification process is also intentionally
+    // ignored by `tokenstream_probably_equal_for_proc_macro`, so it's fine
+    // that a single cache entry may 'map' to multiple distinct `TokenStream`s.
+    //
+    // This is a temporary hack to prevent compilation blowup on certain inputs.
+    // The entire pretty-print/retokenize process will be removed soon.
+    thread_local! {
+        static GOOD_TOKEN_CACHE: RefCell<FxHashSet<String>> = Default::default();
+    }
 
     // FIXME(#43081): Avoid this pretty-print + reparse hack
     // Pretty-print the AST struct without inserting any parenthesis
@@ -290,7 +304,7 @@ pub fn nt_to_tokenstream(nt: &Nonterminal, sess: &ParseSess, span: Span) -> Toke
     // ever used for a comparison against the capture tokenstream.
     let source = pprust::nonterminal_to_string_no_extra_parens(nt);
     let filename = FileName::macro_expansion_source_code(&source);
-    let reparsed_tokens = parse_stream_from_source_str(filename, source, sess, Some(span));
+    let reparsed_tokens = parse_stream_from_source_str(filename, source.clone(), sess, Some(span));
 
     // During early phases of the compiler the AST could get modified
     // directly (e.g., attributes added or removed) and the internal cache
@@ -316,8 +330,13 @@ pub fn nt_to_tokenstream(nt: &Nonterminal, sess: &ParseSess, span: Span) -> Toke
     // modifications, including adding/removing typically non-semantic
     // tokens such as extra braces and commas, don't happen.
     if let Some(tokens) = tokens {
+        if GOOD_TOKEN_CACHE.with(|cache| cache.borrow().contains(&source)) {
+            return tokens;
+        }
+
         // Compare with a non-relaxed delim match to start.
         if tokenstream_probably_equal_for_proc_macro(&tokens, &reparsed_tokens, sess, false) {
+            GOOD_TOKEN_CACHE.with(|cache| cache.borrow_mut().insert(source.clone()));
             return tokens;
         }
 
@@ -326,6 +345,11 @@ pub fn nt_to_tokenstream(nt: &Nonterminal, sess: &ParseSess, span: Span) -> Toke
         // token stream to match up with inserted parenthesis in the reparsed stream.
         let source_with_parens = pprust::nonterminal_to_string(nt);
         let filename_with_parens = FileName::macro_expansion_source_code(&source_with_parens);
+
+        if GOOD_TOKEN_CACHE.with(|cache| cache.borrow().contains(&source_with_parens)) {
+            return tokens;
+        }
+
         let reparsed_tokens_with_parens = parse_stream_from_source_str(
             filename_with_parens,
             source_with_parens,
@@ -341,6 +365,7 @@ pub fn nt_to_tokenstream(nt: &Nonterminal, sess: &ParseSess, span: Span) -> Toke
             sess,
             true,
         ) {
+            GOOD_TOKEN_CACHE.with(|cache| cache.borrow_mut().insert(source.clone()));
             return tokens;
         }
 
@@ -420,9 +445,9 @@ pub fn tokenstream_probably_equal_for_proc_macro(
         // to iterate breaking tokens mutliple times. For example:
         // '[BinOpEq(Shr)] => [Gt, Ge] -> [Gt, Gt, Eq]'
         let mut token_trees: SmallVec<[_; 2]>;
-        if let TokenTree::Token(token) = &tree {
+        if let TokenTree::Token(token) = tree {
             let mut out = SmallVec::<[_; 2]>::new();
-            out.push(token.clone());
+            out.push(token);
             // Iterate to fixpoint:
             // * We start off with 'out' containing our initial token, and `temp` empty
             // * If we are able to break any tokens in `out`, then `out` will have
@@ -603,64 +628,22 @@ fn token_probably_equal_for_proc_macro(first: &Token, other: &Token) -> bool {
 }
 
 fn prepend_attrs(
-    sess: &ParseSess,
     attrs: &[ast::Attribute],
     tokens: Option<&tokenstream::LazyTokenStream>,
-    span: rustc_span::Span,
 ) -> Option<tokenstream::TokenStream> {
-    let tokens = tokens?.clone().into_token_stream();
+    let tokens = tokens?.create_token_stream();
     if attrs.is_empty() {
-        return Some(tokens.clone());
+        return Some(tokens);
     }
     let mut builder = tokenstream::TokenStreamBuilder::new();
     for attr in attrs {
-        assert_eq!(
-            attr.style,
-            ast::AttrStyle::Outer,
-            "inner attributes should prevent cached tokens from existing"
-        );
-
-        let source = pprust::attribute_to_string(attr);
-        let macro_filename = FileName::macro_expansion_source_code(&source);
-
-        let item = match attr.kind {
-            ast::AttrKind::Normal(ref item) => item,
-            ast::AttrKind::DocComment(..) => {
-                let stream = parse_stream_from_source_str(macro_filename, source, sess, Some(span));
-                builder.push(stream);
-                continue;
-            }
-        };
-
-        // synthesize # [ $path $tokens ] manually here
-        let mut brackets = tokenstream::TokenStreamBuilder::new();
-
-        // For simple paths, push the identifier directly
-        if item.path.segments.len() == 1 && item.path.segments[0].args.is_none() {
-            let ident = item.path.segments[0].ident;
-            let token = token::Ident(ident.name, ident.as_str().starts_with("r#"));
-            brackets.push(tokenstream::TokenTree::token(token, ident.span));
-
-        // ... and for more complicated paths, fall back to a reparse hack that
-        // should eventually be removed.
-        } else {
-            let stream = parse_stream_from_source_str(macro_filename, source, sess, Some(span));
-            brackets.push(stream);
+        // FIXME: Correctly handle tokens for inner attributes.
+        // For now, we fall back to reparsing the original AST node
+        if attr.style == ast::AttrStyle::Inner {
+            return None;
         }
-
-        brackets.push(item.args.outer_tokens());
-
-        // The span we list here for `#` and for `[ ... ]` are both wrong in
-        // that it encompasses more than each token, but it hopefully is "good
-        // enough" for now at least.
-        builder.push(tokenstream::TokenTree::token(token::Pound, attr.span));
-        let delim_span = tokenstream::DelimSpan::from_single(attr.span);
-        builder.push(tokenstream::TokenTree::Delimited(
-            delim_span,
-            token::DelimToken::Bracket,
-            brackets.build(),
-        ));
+        builder.push(attr.tokens());
     }
-    builder.push(tokens.clone());
+    builder.push(tokens);
     Some(builder.build())
 }

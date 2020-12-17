@@ -16,6 +16,7 @@ use crate::ty::{self, AdtKind, Ty, TyCtxt};
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
+use rustc_hir::Constness;
 use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
 use smallvec::SmallVec;
@@ -70,7 +71,7 @@ pub enum Reveal {
     /// be observable directly by the user, `Reveal::All`
     /// should not be used by checks which may expose
     /// type equality or type contents to the user.
-    /// There are some exceptions, e.g., around OIBITS and
+    /// There are some exceptions, e.g., around auto traits and
     /// transmute-checking, which expose some details, but
     /// not the whole concrete type of the `impl Trait`.
     All,
@@ -340,10 +341,24 @@ impl ObligationCauseCode<'_> {
 #[cfg(target_arch = "x86_64")]
 static_assert_size!(ObligationCauseCode<'_>, 32);
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StatementAsExpression {
+    CorrectType,
+    NeedsBoxing,
+}
+
+impl<'tcx> ty::Lift<'tcx> for StatementAsExpression {
+    type Lifted = StatementAsExpression;
+    fn lift_to_tcx(self, _tcx: TyCtxt<'tcx>) -> Option<StatementAsExpression> {
+        Some(self)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Lift)]
 pub struct MatchExpressionArmCause<'tcx> {
     pub arm_span: Span,
-    pub semi_span: Option<Span>,
+    pub scrut_span: Span,
+    pub semi_span: Option<(Span, StatementAsExpression)>,
     pub source: hir::MatchSource,
     pub prior_arms: Vec<Span>,
     pub last_ty: Ty<'tcx>,
@@ -356,7 +371,7 @@ pub struct IfExpressionCause {
     pub then: Span,
     pub else_sp: Span,
     pub outer: Option<Span>,
-    pub semicolon: Option<Span>,
+    pub semicolon: Option<(Span, StatementAsExpression)>,
     pub opt_suggest_box_span: Option<Span>,
 }
 
@@ -443,7 +458,7 @@ pub enum ImplSource<'tcx, N> {
     /// for some type parameter. The `Vec<N>` represents the
     /// obligations incurred from normalizing the where-clause (if
     /// any).
-    Param(Vec<N>),
+    Param(Vec<N>, Constness),
 
     /// Virtual calls through an object.
     Object(ImplSourceObjectData<'tcx, N>),
@@ -473,7 +488,7 @@ impl<'tcx, N> ImplSource<'tcx, N> {
     pub fn nested_obligations(self) -> Vec<N> {
         match self {
             ImplSource::UserDefined(i) => i.nested,
-            ImplSource::Param(n) => n,
+            ImplSource::Param(n, _) => n,
             ImplSource::Builtin(i) => i.nested,
             ImplSource::AutoImpl(d) => d.nested,
             ImplSource::Closure(c) => c.nested,
@@ -488,7 +503,7 @@ impl<'tcx, N> ImplSource<'tcx, N> {
     pub fn borrow_nested_obligations(&self) -> &[N] {
         match &self {
             ImplSource::UserDefined(i) => &i.nested[..],
-            ImplSource::Param(n) => &n[..],
+            ImplSource::Param(n, _) => &n[..],
             ImplSource::Builtin(i) => &i.nested[..],
             ImplSource::AutoImpl(d) => &d.nested[..],
             ImplSource::Closure(c) => &c.nested[..],
@@ -510,7 +525,7 @@ impl<'tcx, N> ImplSource<'tcx, N> {
                 substs: i.substs,
                 nested: i.nested.into_iter().map(f).collect(),
             }),
-            ImplSource::Param(n) => ImplSource::Param(n.into_iter().map(f).collect()),
+            ImplSource::Param(n, ct) => ImplSource::Param(n.into_iter().map(f).collect(), ct),
             ImplSource::Builtin(i) => ImplSource::Builtin(ImplSourceBuiltinData {
                 nested: i.nested.into_iter().map(f).collect(),
             }),

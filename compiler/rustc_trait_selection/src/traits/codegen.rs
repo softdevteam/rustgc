@@ -25,7 +25,7 @@ pub fn codegen_fulfill_obligation<'tcx>(
     (param_env, trait_ref): (ty::ParamEnv<'tcx>, ty::PolyTraitRef<'tcx>),
 ) -> Result<ImplSource<'tcx, ()>, ErrorReported> {
     // Remove any references to regions; this helps improve caching.
-    let trait_ref = tcx.erase_regions(&trait_ref);
+    let trait_ref = tcx.erase_regions(trait_ref);
     // We expect the input to be fully normalized.
     debug_assert_eq!(trait_ref, tcx.normalize_erasing_regions(param_env, trait_ref));
     debug!(
@@ -89,7 +89,7 @@ pub fn codegen_fulfill_obligation<'tcx>(
             debug!("fulfill_obligation: register_predicate_obligation {:?}", predicate);
             fulfill_cx.register_predicate_obligation(&infcx, predicate);
         });
-        let impl_source = drain_fulfillment_cx_or_panic(&infcx, &mut fulfill_cx, &impl_source);
+        let impl_source = drain_fulfillment_cx_or_panic(&infcx, &mut fulfill_cx, impl_source);
 
         info!("Cache miss: {:?} => {:?}", trait_ref, impl_source);
         Ok(impl_source)
@@ -110,7 +110,7 @@ pub fn codegen_fulfill_obligation<'tcx>(
 fn drain_fulfillment_cx_or_panic<T>(
     infcx: &InferCtxt<'_, 'tcx>,
     fulfill_cx: &mut FulfillmentContext<'tcx>,
-    result: &T,
+    result: T,
 ) -> T
 where
     T: TypeFoldable<'tcx>,
@@ -121,9 +121,12 @@ where
     // contains unbound type parameters. It could be a slight
     // optimization to stop iterating early.
     if let Err(errors) = fulfill_cx.select_all_or_error(infcx) {
-        bug!("Encountered errors `{:?}` resolving bounds after type-checking", errors);
+        infcx.tcx.sess.delay_span_bug(
+            rustc_span::DUMMY_SP,
+            &format!("Encountered errors `{:?}` resolving bounds after type-checking", errors),
+        );
     }
 
     let result = infcx.resolve_vars_if_possible(result);
-    infcx.tcx.erase_regions(&result)
+    infcx.tcx.erase_regions(result)
 }

@@ -36,6 +36,7 @@ pub enum Nested {
     Item(hir::ItemId),
     TraitItem(hir::TraitItemId),
     ImplItem(hir::ImplItemId),
+    ForeignItem(hir::ForeignItemId),
     Body(hir::BodyId),
     BodyParamPat(hir::BodyId, usize),
 }
@@ -56,6 +57,7 @@ impl PpAnn for hir::Crate<'_> {
             Nested::Item(id) => state.print_item(self.item(id.id)),
             Nested::TraitItem(id) => state.print_trait_item(self.trait_item(id)),
             Nested::ImplItem(id) => state.print_impl_item(self.impl_item(id)),
+            Nested::ForeignItem(id) => state.print_foreign_item(self.foreign_item(id)),
             Nested::Body(id) => state.print_expr(&self.body(id).value),
             Nested::BodyParamPat(id, i) => state.print_pat(&self.body(id).params[i].pat),
         }
@@ -70,6 +72,7 @@ impl PpAnn for &dyn rustc_hir::intravisit::Map<'_> {
             Nested::Item(id) => state.print_item(self.item(id.id)),
             Nested::TraitItem(id) => state.print_trait_item(self.trait_item(id)),
             Nested::ImplItem(id) => state.print_impl_item(self.impl_item(id)),
+            Nested::ForeignItem(id) => state.print_foreign_item(self.foreign_item(id)),
             Nested::Body(id) => state.print_expr(&self.body(id).value),
             Nested::BodyParamPat(id, i) => state.print_pat(&self.body(id).params[i].pat),
         }
@@ -299,13 +302,11 @@ impl<'a> State<'a> {
     pub fn break_offset_if_not_bol(&mut self, n: usize, off: isize) {
         if !self.s.is_beginning_of_line() {
             self.s.break_offset(n, off)
-        } else {
-            if off != 0 && self.s.last_token().is_hardbreak_tok() {
-                // We do something pretty sketchy here: tuck the nonzero
-                // offset-adjustment we were going to deposit along with the
-                // break into the previous hardbreak.
-                self.s.replace_last_token(pp::Printer::hardbreak_tok_offset(off));
-            }
+        } else if off != 0 && self.s.last_token().is_hardbreak_tok() {
+            // We do something pretty sketchy here: tuck the nonzero
+            // offset-adjustment we were going to deposit along with the
+            // break into the previous hardbreak.
+            self.s.replace_last_token(pp::Printer::hardbreak_tok_offset(off));
         }
     }
 
@@ -348,13 +349,6 @@ impl<'a> State<'a> {
         self.print_inner_attributes(attrs);
         for &item_id in _mod.item_ids {
             self.ann.nested(self, Nested::Item(item_id));
-        }
-    }
-
-    pub fn print_foreign_mod(&mut self, nmod: &hir::ForeignMod<'_>, attrs: &[ast::Attribute]) {
-        self.print_inner_attributes(attrs);
-        for item in nmod.items {
-            self.print_foreign_item(item);
         }
     }
 
@@ -646,11 +640,14 @@ impl<'a> State<'a> {
                 self.print_mod(_mod, &item.attrs);
                 self.bclose(item.span);
             }
-            hir::ItemKind::ForeignMod(ref nmod) => {
+            hir::ItemKind::ForeignMod { abi, items } => {
                 self.head("extern");
-                self.word_nbsp(nmod.abi.to_string());
+                self.word_nbsp(abi.to_string());
                 self.bopen();
-                self.print_foreign_mod(nmod, &item.attrs);
+                self.print_inner_attributes(item.attrs);
+                for item in items {
+                    self.ann.nested(self, Nested::ForeignItem(item.id));
+                }
                 self.bclose(item.span);
             }
             hir::ItemKind::GlobalAsm(ref ga) => {
@@ -1465,7 +1462,7 @@ impl<'a> State<'a> {
 
                 let mut args = vec![];
                 args.push(AsmArg::Template(ast::InlineAsmTemplatePiece::to_string(&a.template)));
-                args.extend(a.operands.iter().map(|o| AsmArg::Operand(o)));
+                args.extend(a.operands.iter().map(|(o, _)| AsmArg::Operand(o)));
                 if !a.options.is_empty() {
                     args.push(AsmArg::Options(a.options));
                 }
@@ -1921,10 +1918,7 @@ impl<'a> State<'a> {
                 self.pclose();
             }
             PatKind::Box(ref inner) => {
-                let is_range_inner = match inner.kind {
-                    PatKind::Range(..) => true,
-                    _ => false,
-                };
+                let is_range_inner = matches!(inner.kind, PatKind::Range(..));
                 self.s.word("box ");
                 if is_range_inner {
                     self.popen();
@@ -1935,10 +1929,7 @@ impl<'a> State<'a> {
                 }
             }
             PatKind::Ref(ref inner, mutbl) => {
-                let is_range_inner = match inner.kind {
-                    PatKind::Range(..) => true,
-                    _ => false,
-                };
+                let is_range_inner = matches!(inner.kind, PatKind::Range(..));
                 self.s.word("&");
                 self.s.word(mutbl.prefix_str());
                 if is_range_inner {
@@ -2435,10 +2426,7 @@ impl<'a> State<'a> {
 //
 // Duplicated from `parse::classify`, but adapted for the HIR.
 fn expr_requires_semi_to_be_stmt(e: &hir::Expr<'_>) -> bool {
-    match e.kind {
-        hir::ExprKind::Match(..) | hir::ExprKind::Block(..) | hir::ExprKind::Loop(..) => false,
-        _ => true,
-    }
+    !matches!(e.kind, hir::ExprKind::Match(..) | hir::ExprKind::Block(..) | hir::ExprKind::Loop(..))
 }
 
 /// This statement requires a semicolon after it.

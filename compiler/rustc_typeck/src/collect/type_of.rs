@@ -79,7 +79,13 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                         let _tables = tcx.typeck(body_owner);
                         &*path
                     }
-                    _ => span_bug!(DUMMY_SP, "unexpected const parent path {:?}", parent_node),
+                    _ => {
+                        tcx.sess.delay_span_bug(
+                            tcx.def_span(def_id),
+                            &format!("unexpected const parent path {:?}", parent_node),
+                        );
+                        return None;
+                    }
                 };
 
                 // We've encountered an `AnonConst` in some path, so we need to
@@ -253,7 +259,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 ItemKind::Trait(..)
                 | ItemKind::TraitAlias(..)
                 | ItemKind::Mod(..)
-                | ItemKind::ForeignMod(..)
+                | ItemKind::ForeignMod { .. }
                 | ItemKind::GlobalAsm(..)
                 | ItemKind::ExternCrate(..)
                 | ItemKind::Use(..) => {
@@ -631,7 +637,7 @@ fn infer_placeholder_type(
     }
 
     // Typeck doesn't expect erased regions to be returned from `type_of`.
-    tcx.fold_regions(&ty, &mut false, |r, _| match r {
+    tcx.fold_regions(ty, &mut false, |r, _| match r {
         ty::ReErased => tcx.lifetimes.re_static,
         _ => r,
     })

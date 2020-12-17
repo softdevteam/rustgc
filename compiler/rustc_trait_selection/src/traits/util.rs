@@ -125,7 +125,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
         let items = predicates.predicates.iter().rev().filter_map(|(pred, span)| {
             pred.subst_supertrait(tcx, &trait_ref)
                 .to_opt_poly_trait_ref()
-                .map(|trait_ref| item.clone_and_push(trait_ref, *span))
+                .map(|trait_ref| item.clone_and_push(trait_ref.value, *span))
         });
         debug!("expand_trait_aliases: items={:?}", items.clone());
 
@@ -182,7 +182,7 @@ impl Iterator for SupertraitDefIds<'tcx> {
                 .predicates
                 .iter()
                 .filter_map(|(pred, _)| pred.to_opt_poly_trait_ref())
-                .map(|trait_ref| trait_ref.def_id())
+                .map(|trait_ref| trait_ref.value.def_id())
                 .filter(|&super_def_id| visited.insert(super_def_id)),
         );
         Some(def_id)
@@ -205,12 +205,12 @@ pub fn impl_trait_ref_and_oblig<'a, 'tcx>(
     let impl_trait_ref = selcx.tcx().impl_trait_ref(impl_def_id).unwrap();
     let impl_trait_ref = impl_trait_ref.subst(selcx.tcx(), impl_substs);
     let Normalized { value: impl_trait_ref, obligations: normalization_obligations1 } =
-        super::normalize(selcx, param_env, ObligationCause::dummy(), &impl_trait_ref);
+        super::normalize(selcx, param_env, ObligationCause::dummy(), impl_trait_ref);
 
     let predicates = selcx.tcx().predicates_of(impl_def_id);
     let predicates = predicates.instantiate(selcx.tcx(), impl_substs);
     let Normalized { value: predicates, obligations: normalization_obligations2 } =
-        super::normalize(selcx, param_env, ObligationCause::dummy(), &predicates);
+        super::normalize(selcx, param_env, ObligationCause::dummy(), predicates);
     let impl_obligations =
         predicates_for_generics(ObligationCause::dummy(), 0, param_env, predicates);
 

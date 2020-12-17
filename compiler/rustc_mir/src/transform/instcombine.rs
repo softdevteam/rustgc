@@ -39,13 +39,21 @@ pub struct InstCombineVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
 }
 
+impl<'tcx> InstCombineVisitor<'tcx> {
+    fn should_combine(&self, rvalue: &Rvalue<'tcx>, location: Location) -> bool {
+        self.tcx.consider_optimizing(|| {
+            format!("InstCombine - Rvalue: {:?} Location: {:?}", rvalue, location)
+        })
+    }
+}
+
 impl<'tcx> MutVisitor<'tcx> for InstCombineVisitor<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
     fn visit_rvalue(&mut self, rvalue: &mut Rvalue<'tcx>, location: Location) {
-        if self.optimizations.and_stars.remove(&location) {
+        if self.optimizations.and_stars.remove(&location) && self.should_combine(rvalue, location) {
             debug!("replacing `&*`: {:?}", rvalue);
             let new_place = match rvalue {
                 Rvalue::Ref(_, _, place) => {
@@ -67,18 +75,24 @@ impl<'tcx> MutVisitor<'tcx> for InstCombineVisitor<'tcx> {
         }
 
         if let Some(constant) = self.optimizations.arrays_lengths.remove(&location) {
-            debug!("replacing `Len([_; N])`: {:?}", rvalue);
-            *rvalue = Rvalue::Use(Operand::Constant(box constant));
+            if self.should_combine(rvalue, location) {
+                debug!("replacing `Len([_; N])`: {:?}", rvalue);
+                *rvalue = Rvalue::Use(Operand::Constant(box constant));
+            }
         }
 
         if let Some(operand) = self.optimizations.unneeded_equality_comparison.remove(&location) {
-            debug!("replacing {:?} with {:?}", rvalue, operand);
-            *rvalue = Rvalue::Use(operand);
+            if self.should_combine(rvalue, location) {
+                debug!("replacing {:?} with {:?}", rvalue, operand);
+                *rvalue = Rvalue::Use(operand);
+            }
         }
 
         if let Some(place) = self.optimizations.unneeded_deref.remove(&location) {
-            debug!("unneeded_deref: replacing {:?} with {:?}", rvalue, place);
-            *rvalue = Rvalue::Use(Operand::Copy(place));
+            if self.should_combine(rvalue, location) {
+                debug!("unneeded_deref: replacing {:?} with {:?}", rvalue, place);
+                *rvalue = Rvalue::Use(Operand::Copy(place));
+            }
         }
 
         self.super_rvalue(rvalue, location)
@@ -137,6 +151,8 @@ impl OptimizationFinder<'b, 'tcx> {
                 _ => None,
             }?;
 
+            let mut dead_locals_seen = vec![];
+
             let stmt_index = location.statement_index;
             // Look behind for statement that assigns the local from a address of operator.
             // 6 is chosen as a heuristic determined by seeing the number of times
@@ -160,6 +176,11 @@ impl OptimizationFinder<'b, 'tcx> {
                                 BorrowKind::Shared,
                                 place_taken_address_of,
                             ) => {
+                                // Make sure that the place has not been marked dead
+                                if dead_locals_seen.contains(&place_taken_address_of.local) {
+                                    return None;
+                                }
+
                                 self.optimizations
                                     .unneeded_deref
                                     .insert(location, *place_taken_address_of);
@@ -178,13 +199,19 @@ impl OptimizationFinder<'b, 'tcx> {
                     // Inline asm can do anything, so bail out of the optimization.
                     rustc_middle::mir::StatementKind::LlvmInlineAsm(_) => return None,
 
+                    // Remember `StorageDead`s, as the local being marked dead could be the
+                    // place RHS we are looking for, in which case we need to abort to avoid UB
+                    // using an uninitialized place
+                    rustc_middle::mir::StatementKind::StorageDead(dead) => {
+                        dead_locals_seen.push(*dead)
+                    }
+
                     // Check that `local_being_deref` is not being used in a mutating way which can cause misoptimization.
                     rustc_middle::mir::StatementKind::Assign(box (_, _))
                     | rustc_middle::mir::StatementKind::Coverage(_)
                     | rustc_middle::mir::StatementKind::Nop
                     | rustc_middle::mir::StatementKind::FakeRead(_, _)
                     | rustc_middle::mir::StatementKind::StorageLive(_)
-                    | rustc_middle::mir::StatementKind::StorageDead(_)
                     | rustc_middle::mir::StatementKind::Retag(_, _)
                     | rustc_middle::mir::StatementKind::AscribeUserType(_, _)
                     | rustc_middle::mir::StatementKind::SetDiscriminant { .. } => {

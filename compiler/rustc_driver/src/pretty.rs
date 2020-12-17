@@ -32,9 +32,6 @@ use crate::abort_on_err;
 // Note that since the `&PrinterSupport` is freshly constructed on each
 // call, it would not make sense to try to attach the lifetime of `self`
 // to the lifetime of the `&PrinterObject`.
-//
-// (The `use_once_payload` is working around the current lack of once
-// functions in the compiler.)
 
 /// Constructs a `PrinterSupport` object and passes it to `f`.
 fn call_with_pp_support<'tcx, A, F>(
@@ -407,7 +404,6 @@ pub fn print_after_parsing(
                 annotation.pp_ann(),
                 false,
                 parse.edition,
-                parse.injected_crate_name.get().is_some(),
             )
         })
     } else {
@@ -449,7 +445,6 @@ pub fn print_after_hir_lowering<'tcx>(
                     annotation.pp_ann(),
                     true,
                     parse.edition,
-                    parse.injected_crate_name.get().is_some(),
                 )
             })
         }

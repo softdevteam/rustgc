@@ -8,7 +8,10 @@
 #![feature(bound_cloned)]
 #![feature(box_syntax)]
 #![feature(cell_update)]
+#![feature(cfg_target_has_atomic)]
 #![feature(const_assume)]
+#![feature(const_cell_into_inner)]
+#![feature(const_maybe_uninit_assume_init)]
 #![feature(core_intrinsics)]
 #![feature(core_private_bignum)]
 #![feature(core_private_diy_float)]
@@ -55,10 +58,14 @@
 #![feature(unwrap_infallible)]
 #![feature(option_unwrap_none)]
 #![feature(peekable_next_if)]
+#![feature(peekable_peek_mut)]
 #![feature(partition_point)]
 #![feature(once_cell)]
 #![feature(unsafe_block_in_unsafe_fn)]
 #![feature(int_bits_const)]
+#![feature(nonzero_leading_trailing_zeros)]
+#![feature(const_option)]
+#![feature(integer_atomics)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate test;
@@ -78,6 +85,7 @@ mod hash;
 mod intrinsics;
 mod iter;
 mod lazy;
+mod macros;
 mod manually_drop;
 mod mem;
 mod nonzero;
@@ -91,5 +99,7 @@ mod result;
 mod slice;
 mod str;
 mod str_lossy;
+mod task;
 mod time;
 mod tuple;
+mod unicode;

@@ -400,7 +400,7 @@ impl<'a> AstValidator<'a> {
         if let Defaultness::Default(def_span) = defaultness {
             let span = self.session.source_map().guess_head_span(span);
             self.err_handler()
-                .struct_span_err(span, "`default` is only allowed on items in `impl` definitions")
+                .struct_span_err(span, "`default` is only allowed on items in trait impls")
                 .span_label(def_span, "`default` because of this")
                 .emit();
         }
@@ -516,13 +516,13 @@ impl<'a> AstValidator<'a> {
         self.session.source_map().guess_head_span(self.extern_mod.unwrap().span)
     }
 
-    /// An `fn` in `extern { ... }` cannot have qualfiers, e.g. `async fn`.
+    /// An `fn` in `extern { ... }` cannot have qualifiers, e.g. `async fn`.
     fn check_foreign_fn_headerless(&self, ident: Ident, span: Span, header: FnHeader) {
         if header.has_qualifiers() {
             self.err_handler()
                 .struct_span_err(ident.span, "functions in `extern` blocks cannot have qualifiers")
                 .span_label(self.current_extern_span(), "in this `extern` block")
-                .span_suggestion(
+                .span_suggestion_verbose(
                     span.until(ident.span.shrink_to_lo()),
                     "remove the qualifiers",
                     "fn ".to_string(),
@@ -796,7 +796,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         match &expr.kind {
-            ExprKind::LlvmInlineAsm(..) if !self.session.target.options.allow_asm => {
+            ExprKind::LlvmInlineAsm(..) if !self.session.target.allow_asm => {
                 struct_span_err!(
                     self.session,
                     expr.span,
@@ -1372,16 +1372,18 @@ fn deny_equality_constraints(
                         if param.ident == *ident {
                             let param = ident;
                             match &full_path.segments[qself.position..] {
-                                [PathSegment { ident, .. }] => {
+                                [PathSegment { ident, args, .. }] => {
                                     // Make a new `Path` from `foo::Bar` to `Foo<Bar = RhsTy>`.
                                     let mut assoc_path = full_path.clone();
                                     // Remove `Bar` from `Foo::Bar`.
                                     assoc_path.segments.pop();
                                     let len = assoc_path.segments.len() - 1;
+                                    let gen_args = args.as_ref().map(|p| (**p).clone());
                                     // Build `<Bar = RhsTy>`.
                                     let arg = AngleBracketedArg::Constraint(AssocTyConstraint {
                                         id: rustc_ast::node_id::DUMMY_NODE_ID,
                                         ident: *ident,
+                                        gen_args,
                                         kind: AssocTyConstraintKind::Equality {
                                             ty: predicate.rhs_ty.clone(),
                                         },

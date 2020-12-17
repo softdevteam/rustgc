@@ -124,9 +124,7 @@ extern "C" LLVMValueRef LLVMRustGetOrInsertFunction(LLVMModuleRef M,
   return wrap(unwrap(M)
                   ->getOrInsertFunction(StringRef(Name, NameLen),
                                         unwrap<FunctionType>(FunctionTy))
-#if LLVM_VERSION_GE(9, 0)
                   .getCallee()
-#endif
   );
 }
 
@@ -251,11 +249,7 @@ extern "C" void LLVMRustAddDereferenceableOrNullCallSiteAttr(LLVMValueRef Instr,
 extern "C" void LLVMRustAddByValCallSiteAttr(LLVMValueRef Instr, unsigned Index,
                                              LLVMTypeRef Ty) {
   CallBase *Call = unwrap<CallBase>(Instr);
-#if LLVM_VERSION_GE(9, 0)
   Attribute Attr = Attribute::getWithByValType(Call->getContext(), unwrap(Ty));
-#else
-  Attribute Attr = Attribute::get(Call->getContext(), Attribute::ByVal);
-#endif
   Call->addAttribute(Index, Attr);
 }
 
@@ -296,11 +290,7 @@ extern "C" void LLVMRustAddDereferenceableOrNullAttr(LLVMValueRef Fn,
 extern "C" void LLVMRustAddByValAttr(LLVMValueRef Fn, unsigned Index,
                                      LLVMTypeRef Ty) {
   Function *F = unwrap<Function>(Fn);
-#if LLVM_VERSION_GE(9, 0)
   Attribute Attr = Attribute::getWithByValType(F->getContext(), unwrap(Ty));
-#else
-  Attribute Attr = Attribute::get(F->getContext(), Attribute::ByVal);
-#endif
   F->addAttribute(Index, Attr);
 }
 
@@ -616,11 +606,9 @@ static DISubprogram::DISPFlags fromRust(LLVMRustDISPFlags SPFlags) {
   if (isSet(SPFlags & LLVMRustDISPFlags::SPFlagOptimized)) {
     Result |= DISubprogram::DISPFlags::SPFlagOptimized;
   }
-#if LLVM_VERSION_GE(9, 0)
   if (isSet(SPFlags & LLVMRustDISPFlags::SPFlagMainSubprogram)) {
     Result |= DISubprogram::DISPFlags::SPFlagMainSubprogram;
   }
-#endif
 
   return Result;
 }
@@ -648,6 +636,7 @@ enum class LLVMRustChecksumKind {
   None,
   MD5,
   SHA1,
+  SHA256,
 };
 
 static Optional<DIFile::ChecksumKind> fromRust(LLVMRustChecksumKind Kind) {
@@ -658,6 +647,10 @@ static Optional<DIFile::ChecksumKind> fromRust(LLVMRustChecksumKind Kind) {
     return DIFile::ChecksumKind::CSK_MD5;
   case LLVMRustChecksumKind::SHA1:
     return DIFile::ChecksumKind::CSK_SHA1;
+#if (LLVM_VERSION_MAJOR >= 11)
+  case LLVMRustChecksumKind::SHA256:
+    return DIFile::ChecksumKind::CSK_SHA256;
+#endif
   default:
     report_fatal_error("bad ChecksumKind.");
   }
@@ -733,16 +726,12 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateFunction(
     const char *LinkageName, size_t LinkageNameLen,
     LLVMMetadataRef File, unsigned LineNo,
     LLVMMetadataRef Ty, unsigned ScopeLine, LLVMRustDIFlags Flags,
-    LLVMRustDISPFlags SPFlags, LLVMValueRef Fn, LLVMMetadataRef TParam,
+    LLVMRustDISPFlags SPFlags, LLVMValueRef MaybeFn, LLVMMetadataRef TParam,
     LLVMMetadataRef Decl) {
   DITemplateParameterArray TParams =
       DITemplateParameterArray(unwrap<MDTuple>(TParam));
   DISubprogram::DISPFlags llvmSPFlags = fromRust(SPFlags);
   DINode::DIFlags llvmFlags = fromRust(Flags);
-#if LLVM_VERSION_LT(9, 0)
-  if (isSet(SPFlags & LLVMRustDISPFlags::SPFlagMainSubprogram))
-    llvmFlags |= DINode::DIFlags::FlagMainSubprogram;
-#endif
   DISubprogram *Sub = Builder->createFunction(
       unwrapDI<DIScope>(Scope),
       StringRef(Name, NameLen),
@@ -750,7 +739,8 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateFunction(
       unwrapDI<DIFile>(File), LineNo,
       unwrapDI<DISubroutineType>(Ty), ScopeLine, llvmFlags,
       llvmSPFlags, TParams, unwrapDIPtr<DISubprogram>(Decl));
-  unwrap<Function>(Fn)->setSubprogram(Sub);
+  if (MaybeFn)
+    unwrap<Function>(MaybeFn)->setSubprogram(Sub);
   return wrap(Sub);
 }
 
@@ -765,7 +755,7 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateTypedef(
     LLVMMetadataRef File, unsigned LineNo, LLVMMetadataRef Scope) {
   return wrap(Builder->createTypedef(
     unwrap<DIType>(Type), StringRef(Name, NameLen), unwrap<DIFile>(File),
-    LineNo, unwrap<DIScope>(Scope)));
+    LineNo, unwrapDIPtr<DIScope>(Scope)));
 }
 
 extern "C" LLVMMetadataRef LLVMRustDIBuilderCreatePointerType(
@@ -930,12 +920,12 @@ LLVMRustDIBuilderGetOrCreateArray(LLVMRustDIBuilderRef Builder,
 
 extern "C" LLVMValueRef LLVMRustDIBuilderInsertDeclareAtEnd(
     LLVMRustDIBuilderRef Builder, LLVMValueRef V, LLVMMetadataRef VarInfo,
-    int64_t *AddrOps, unsigned AddrOpsCount, LLVMValueRef DL,
+    int64_t *AddrOps, unsigned AddrOpsCount, LLVMMetadataRef DL,
     LLVMBasicBlockRef InsertAtEnd) {
   return wrap(Builder->insertDeclare(
       unwrap(V), unwrap<DILocalVariable>(VarInfo),
       Builder->createExpression(llvm::ArrayRef<int64_t>(AddrOps, AddrOpsCount)),
-      DebugLoc(cast<MDNode>(unwrap<MetadataAsValue>(DL)->getMetadata())),
+      DebugLoc(cast<MDNode>(unwrap(DL))),
       unwrap(InsertAtEnd)));
 }
 
@@ -1002,7 +992,7 @@ LLVMRustDICompositeTypeReplaceArrays(LLVMRustDIBuilderRef Builder,
                          DINodeArray(unwrap<MDTuple>(Params)));
 }
 
-extern "C" LLVMValueRef
+extern "C" LLVMMetadataRef
 LLVMRustDIBuilderCreateDebugLocation(LLVMContextRef ContextRef, unsigned Line,
                                      unsigned Column, LLVMMetadataRef Scope,
                                      LLVMMetadataRef InlinedAt) {
@@ -1011,7 +1001,7 @@ LLVMRustDIBuilderCreateDebugLocation(LLVMContextRef ContextRef, unsigned Line,
   DebugLoc debug_loc = DebugLoc::get(Line, Column, unwrapDIPtr<MDNode>(Scope),
                                      unwrapDIPtr<MDNode>(InlinedAt));
 
-  return wrap(MetadataAsValue::get(Context, debug_loc.getAsMDNode()));
+  return wrap(debug_loc.getAsMDNode());
 }
 
 extern "C" int64_t LLVMRustDIBuilderCreateOpDeref() {
@@ -1472,7 +1462,7 @@ extern "C" void LLVMRustSetComdat(LLVMModuleRef M, LLVMValueRef V,
                                   const char *Name, size_t NameLen) {
   Triple TargetTriple(unwrap(M)->getTargetTriple());
   GlobalObject *GV = unwrap<GlobalObject>(V);
-  if (!TargetTriple.isOSBinFormatMachO()) {
+  if (TargetTriple.supportsCOMDAT()) {
     StringRef NameRef(Name, NameLen);
     GV->setComdat(unwrap(M)->getOrInsertComdat(NameRef));
   }

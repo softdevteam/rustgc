@@ -292,10 +292,8 @@ impl<K: DepKind> DepGraph<K> {
                 );
 
                 data.colors.insert(prev_index, color);
-            } else {
-                if print_status {
-                    eprintln!("[task::new] {:?}", key);
-                }
+            } else if print_status {
+                eprintln!("[task::new] {:?}", key);
             }
 
             (result, dep_node_index)
@@ -556,7 +554,7 @@ impl<K: DepKind> DepGraph<K> {
         // We never try to mark eval_always nodes as green
         debug_assert!(!dep_node.kind.is_eval_always());
 
-        debug_assert_eq!(data.previous.index_to_node(prev_dep_node_index), *dep_node);
+        data.previous.debug_assert_eq(prev_dep_node_index, *dep_node);
 
         let prev_deps = data.previous.edge_targets_from(prev_dep_node_index);
 
@@ -574,7 +572,7 @@ impl<K: DepKind> DepGraph<K> {
                         "try_mark_previous_green({:?}) --- found dependency {:?} to \
                             be immediately green",
                         dep_node,
-                        data.previous.index_to_node(dep_dep_node_index)
+                        data.previous.debug_dep_node(dep_dep_node_index),
                     );
                     current_deps.push(node_index);
                 }
@@ -587,20 +585,20 @@ impl<K: DepKind> DepGraph<K> {
                         "try_mark_previous_green({:?}) - END - dependency {:?} was \
                             immediately red",
                         dep_node,
-                        data.previous.index_to_node(dep_dep_node_index)
+                        data.previous.debug_dep_node(dep_dep_node_index)
                     );
                     return None;
                 }
                 None => {
-                    let dep_dep_node = &data.previous.index_to_node(dep_dep_node_index);
+                    let dep_dep_node = &data.previous.index_to_node(dep_dep_node_index, tcx);
 
                     // We don't know the state of this dependency. If it isn't
                     // an eval_always node, let's try to mark it green recursively.
                     if !dep_dep_node.kind.is_eval_always() {
                         debug!(
-                            "try_mark_previous_green({:?}) --- state of dependency {:?} \
+                            "try_mark_previous_green({:?}) --- state of dependency {:?} ({}) \
                                  is unknown, trying to mark it green",
-                            dep_node, dep_dep_node
+                            dep_node, dep_dep_node, dep_dep_node.hash,
                         );
 
                         let node_index = self.try_mark_previous_green(
@@ -803,7 +801,7 @@ impl<K: DepKind> DepGraph<K> {
         for prev_index in data.colors.values.indices() {
             match data.colors.get(prev_index) {
                 Some(DepNodeColor::Green(_)) => {
-                    let dep_node = data.previous.index_to_node(prev_index);
+                    let dep_node = data.previous.index_to_node(prev_index, tcx);
                     tcx.try_load_from_on_disk_cache(&dep_node);
                 }
                 None | Some(DepNodeColor::Red) => {
@@ -978,7 +976,7 @@ impl<K: DepKind> CurrentDepGraph<K> {
             // Fingerprint::combine() is faster than sending Fingerprint
             // through the StableHasher (at least as long as StableHasher
             // is so slow).
-            hash: self.anon_id_seed.combine(hasher.finish()),
+            hash: self.anon_id_seed.combine(hasher.finish()).into(),
         };
 
         self.intern_node(target_dep_node, task_deps.reads, Fingerprint::ZERO)

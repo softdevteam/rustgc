@@ -20,6 +20,7 @@ pub enum ConstEvalErrKind {
     ModifiedGlobal,
     AssertFailure(AssertKind<ConstInt>),
     Panic { msg: Symbol, line: u32, col: u32, file: Symbol },
+    Abort(String),
 }
 
 // The errors become `MachineStop` with plain strings when being raised.
@@ -46,6 +47,7 @@ impl fmt::Display for ConstEvalErrKind {
             Panic { msg, line, col, file } => {
                 write!(f, "the evaluated program panicked at '{}', {}:{}:{}", msg, file, line, col)
             }
+            Abort(ref msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -141,7 +143,7 @@ impl<'tcx> ConstEvalErr<'tcx> {
             err_inval!(Layout(LayoutError::Unknown(_))) | err_inval!(TooGeneric) => {
                 return ErrorHandled::TooGeneric;
             }
-            err_inval!(TypeckError(error_reported)) => {
+            err_inval!(AlreadyReported(error_reported)) => {
                 return ErrorHandled::Reported(error_reported);
             }
             // We must *always* hard error on these, even if the caller wants just a lint.

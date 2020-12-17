@@ -46,6 +46,10 @@ impl<'tcx> MirPass<'tcx> for EarlyOtherwiseBranch {
         let should_cleanup = !opts_to_apply.is_empty();
 
         for opt_to_apply in opts_to_apply {
+            if !tcx.consider_optimizing(|| format!("EarlyOtherwiseBranch {:?}", &opt_to_apply)) {
+                break;
+            }
+
             trace!("SUCCESS: found optimization possibility to apply: {:?}", &opt_to_apply);
 
             let statements_before =
@@ -212,9 +216,10 @@ impl<'a, 'tcx> Helper<'a, 'tcx> {
         let discr = self.find_switch_discriminant_info(bb, switch)?;
 
         // go through each target, finding a discriminant read, and a switch
-        let results = discr.targets_with_values.iter().map(|(value, target)| {
-            self.find_discriminant_switch_pairing(&discr, target.clone(), value.clone())
-        });
+        let results = discr
+            .targets_with_values
+            .iter()
+            .map(|(value, target)| self.find_discriminant_switch_pairing(&discr, *target, *value));
 
         // if the optimization did not apply for one of the targets, then abort
         if results.clone().any(|x| x.is_none()) || results.len() == 0 {

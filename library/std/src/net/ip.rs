@@ -263,8 +263,9 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 6)).is_ipv4(), true);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)).is_ipv4(), false);
     /// ```
+    #[rustc_const_stable(feature = "const_ip", since = "1.50.0")]
     #[stable(feature = "ipaddr_checker", since = "1.16.0")]
-    pub fn is_ipv4(&self) -> bool {
+    pub const fn is_ipv4(&self) -> bool {
         matches!(self, IpAddr::V4(_))
     }
 
@@ -281,8 +282,9 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 6)).is_ipv6(), false);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)).is_ipv6(), true);
     /// ```
+    #[rustc_const_stable(feature = "const_ip", since = "1.50.0")]
     #[stable(feature = "ipaddr_checker", since = "1.16.0")]
-    pub fn is_ipv6(&self) -> bool {
+    pub const fn is_ipv6(&self) -> bool {
         matches!(self, IpAddr::V6(_))
     }
 }
@@ -1043,7 +1045,7 @@ impl Ipv6Addr {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_ipv6", since = "1.32.0")]
-    #[allow_internal_unstable(const_fn_transmute)]
+    #[rustc_allow_const_fn_unstable(const_fn_transmute)]
     pub const fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
         let addr16 = [
             a.to_be(),

@@ -303,6 +303,13 @@ impl TokenKind {
             _ => None,
         }
     }
+
+    pub fn should_end_const_arg(&self) -> bool {
+        match self {
+            Gt | Ge | BinOp(Shr) | BinOpEq(Shr) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Token {
@@ -778,13 +785,20 @@ impl Nonterminal {
     /// See issue #73345 for more details.
     /// FIXME(#73933): Remove this eventually.
     pub fn pretty_printing_compatibility_hack(&self) -> bool {
-        if let NtItem(item) = self {
-            let name = item.ident.name;
-            if name == sym::ProceduralMasqueradeDummyType || name == sym::ProcMacroHack {
-                if let ast::ItemKind::Enum(enum_def, _) = &item.kind {
-                    if let [variant] = &*enum_def.variants {
-                        return variant.ident.name == sym::Input;
-                    }
+        let item = match self {
+            NtItem(item) => item,
+            NtStmt(stmt) => match &stmt.kind {
+                ast::StmtKind::Item(item) => item,
+                _ => return false,
+            },
+            _ => return false,
+        };
+
+        let name = item.ident.name;
+        if name == sym::ProceduralMasqueradeDummyType || name == sym::ProcMacroHack {
+            if let ast::ItemKind::Enum(enum_def, _) = &item.kind {
+                if let [variant] = &*enum_def.variants {
+                    return variant.ident.name == sym::Input;
                 }
             }
         }

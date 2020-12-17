@@ -3,7 +3,7 @@ use crate::ops::Try;
 /// Used to make try_fold closures more like normal loops
 #[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ControlFlow<C, B> {
+pub enum ControlFlow<B, C = ()> {
     /// Continue in the loop, using the given value for the next iteration
     Continue(C),
     /// Exit the loop, yielding the given value
@@ -11,7 +11,7 @@ pub enum ControlFlow<C, B> {
 }
 
 #[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
-impl<C, B> Try for ControlFlow<C, B> {
+impl<B, C> Try for ControlFlow<B, C> {
     type Ok = C;
     type Error = B;
     #[inline]
@@ -31,7 +31,7 @@ impl<C, B> Try for ControlFlow<C, B> {
     }
 }
 
-impl<C, B> ControlFlow<C, B> {
+impl<B, C> ControlFlow<B, C> {
     /// Returns `true` if this is a `Break` variant.
     #[inline]
     #[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
@@ -56,9 +56,23 @@ impl<C, B> ControlFlow<C, B> {
             ControlFlow::Break(x) => Some(x),
         }
     }
+
+    /// Maps `ControlFlow<B, C>` to `ControlFlow<T, C>` by applying a function
+    /// to the break value in case it exists.
+    #[inline]
+    #[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
+    pub fn map_break<T, F>(self, f: F) -> ControlFlow<T, C>
+    where
+        F: FnOnce(B) -> T,
+    {
+        match self {
+            ControlFlow::Continue(x) => ControlFlow::Continue(x),
+            ControlFlow::Break(x) => ControlFlow::Break(f(x)),
+        }
+    }
 }
 
-impl<R: Try> ControlFlow<R::Ok, R> {
+impl<R: Try> ControlFlow<R, R::Ok> {
     /// Create a `ControlFlow` from any type implementing `Try`.
     #[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
     #[inline]
@@ -80,7 +94,7 @@ impl<R: Try> ControlFlow<R::Ok, R> {
     }
 }
 
-impl<B> ControlFlow<(), B> {
+impl<B> ControlFlow<B, ()> {
     /// It's frequently the case that there's no value needed with `Continue`,
     /// so this provides a way to avoid typing `(())`, if you prefer it.
     ///
@@ -102,7 +116,7 @@ impl<B> ControlFlow<(), B> {
     pub const CONTINUE: Self = ControlFlow::Continue(());
 }
 
-impl<C> ControlFlow<C, ()> {
+impl<C> ControlFlow<(), C> {
     /// APIs like `try_for_each` don't need values with `Break`,
     /// so this provides a way to avoid typing `(())`, if you prefer it.
     ///

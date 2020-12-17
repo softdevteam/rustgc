@@ -1,6 +1,7 @@
 #![feature(crate_visibility_modifier)]
 #![feature(once_cell)]
 #![feature(or_patterns)]
+#![feature(str_split_once)]
 
 #[macro_use]
 extern crate bitflags;
@@ -9,8 +10,8 @@ extern crate rustc_macros;
 
 pub mod cgu_reuse_tracker;
 pub mod utils;
-#[macro_use]
-pub mod lint;
+pub use lint::{declare_lint, declare_lint_pass, declare_tool_lint, impl_lint_pass};
+pub use rustc_lint_defs as lint;
 pub mod parse;
 
 mod code_stats;

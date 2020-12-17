@@ -97,7 +97,7 @@
 #![stable(feature = "process", since = "1.0.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(all(test, not(any(target_os = "cloudabi", target_os = "emscripten", target_env = "sgx"))))]
+#[cfg(all(test, not(any(target_os = "emscripten", target_env = "sgx"))))]
 mod tests;
 
 use crate::io::prelude::*;
@@ -557,6 +557,11 @@ impl Command {
     ///
     /// [`args`]: Command::args
     ///
+    /// Note that the argument is not passed through a shell, but given
+    /// literally to the program. This means that shell syntax like quotes,
+    /// escaped characters, word splitting, glob patterns, substitution, etc.
+    /// have no effect.
+    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -581,6 +586,11 @@ impl Command {
     /// To pass a single argument see [`arg`].
     ///
     /// [`arg`]: Command::arg
+    ///
+    /// Note that the arguments are not passed through a shell, but given
+    /// literally to the program. This means that shell syntax like quotes,
+    /// escaped characters, word splitting, glob patterns, substitution, etc.
+    /// have no effect.
     ///
     /// # Examples
     ///
@@ -1769,6 +1779,7 @@ pub fn exit(code: i32) -> ! {
 ///
 /// [panic hook]: crate::panic::set_hook
 #[stable(feature = "process_abort", since = "1.17.0")]
+#[cold]
 pub fn abort() -> ! {
     crate::sys::abort_internal();
 }

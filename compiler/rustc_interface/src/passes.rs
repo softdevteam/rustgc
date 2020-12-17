@@ -6,6 +6,7 @@ use rustc_ast::mut_visit::MutVisitor;
 use rustc_ast::{self as ast, visit};
 use rustc_codegen_ssa::back::link::emit_metadata;
 use rustc_codegen_ssa::traits::CodegenBackend;
+use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{par_iter, Lrc, OnceCell, ParallelIterator, WorkerLocal};
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_data_structures::{box_region_allow_access, declare_box_region_type, parallel};
@@ -20,7 +21,6 @@ use rustc_middle::dep_graph::DepGraph;
 use rustc_middle::middle;
 use rustc_middle::middle::cstore::{CrateStore, MetadataLoader, MetadataLoaderDyn};
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::steal::Steal;
 use rustc_middle::ty::{self, GlobalCtxt, ResolverOutputs, TyCtxt};
 use rustc_mir as mir;
 use rustc_mir_build as mir_build;
@@ -204,7 +204,10 @@ pub fn register_plugins<'a>(
         }
     });
 
-    Ok((krate, Lrc::new(lint_store)))
+    let lint_store = Lrc::new(lint_store);
+    sess.init_lint_store(lint_store.clone());
+
+    Ok((krate, lint_store))
 }
 
 fn pre_expansion_lint(sess: &Session, lint_store: &LintStore, krate: &ast::Crate) {
@@ -236,16 +239,12 @@ fn configure_and_expand_inner<'a>(
 
     krate = sess.time("crate_injection", || {
         let alt_std_name = sess.opts.alt_std_name.as_ref().map(|s| Symbol::intern(s));
-        let (krate, name) = rustc_builtin_macros::standard_library_imports::inject(
+        rustc_builtin_macros::standard_library_imports::inject(
             krate,
             &mut resolver,
             &sess,
             alt_std_name,
-        );
-        if let Some(name) = name {
-            sess.parse_sess.injected_crate_name.set(name).expect("not yet initialized");
-        }
-        krate
+        )
     });
 
     util::check_attr_crate_type(&sess, &krate.attrs, &mut resolver.lint_buffer());
@@ -700,7 +699,7 @@ pub static DEFAULT_QUERY_PROVIDERS: SyncLazy<Providers> = SyncLazy::new(|| {
     rustc_passes::provide(providers);
     rustc_resolve::provide(providers);
     rustc_traits::provide(providers);
-    rustc_ty::provide(providers);
+    rustc_ty_utils::provide(providers);
     rustc_metadata::provide(providers);
     rustc_lint::provide(providers);
     rustc_symbol_mangling::provide(providers);
@@ -748,7 +747,7 @@ pub fn create_global_ctxt<'tcx>(
         Definitions::new(crate_name, sess.local_crate_disambiguator()),
     ));
 
-    let query_result_on_disk_cache = rustc_incremental::load_query_result_cache(sess);
+    let query_result_on_disk_cache = rustc_incremental::load_query_result_cache(sess, defs);
 
     let codegen_backend = compiler.codegen_backend();
     let mut local_providers = *DEFAULT_QUERY_PROVIDERS;
@@ -817,6 +816,7 @@ fn analysis(tcx: TyCtxt<'_>, cnum: CrateNum) -> Result<()> {
                     let local_def_id = tcx.hir().local_def_id(module);
                     tcx.ensure().check_mod_loops(local_def_id);
                     tcx.ensure().check_mod_attrs(local_def_id);
+                    tcx.ensure().check_mod_naked_functions(local_def_id);
                     tcx.ensure().check_mod_unstable_api_usage(local_def_id);
                     tcx.ensure().check_mod_const_bodies(local_def_id);
                 });

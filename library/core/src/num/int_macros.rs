@@ -274,7 +274,8 @@ assert_eq!(m, ", $swapped, ");
         }
 
         doc_comment! {
-            concat!("Reverses the bit pattern of the integer.
+            concat!("Reverses the order of bits in the integer. The least significant bit becomes the most significant bit,
+                second least-significant bit becomes second most-significant bit, etc.
 
 # Examples
 
@@ -285,6 +286,7 @@ let n = ", $swap_op, stringify!($SelfT), ";
 let m = n.reverse_bits();
 
 assert_eq!(m, ", $reversed, ");
+assert_eq!(0, 0", stringify!($SelfT), ".reverse_bits());
 ```"),
             #[stable(feature = "reverse_bits", since = "1.37.0")]
             #[rustc_const_stable(feature = "const_int_methods", since = "1.32.0")]
@@ -789,7 +791,7 @@ $EndFeature, "
 ```"),
 
             #[stable(feature = "no_panic_pow", since = "1.34.0")]
-            #[rustc_const_unstable(feature = "const_int_pow", issue = "53718")]
+            #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]
             #[must_use = "this returns the result of the operation, \
                           without modifying the original"]
             #[inline]
@@ -972,7 +974,7 @@ assert_eq!(", stringify!($SelfT), "::MIN.saturating_pow(3), ", stringify!($SelfT
 $EndFeature, "
 ```"),
             #[stable(feature = "no_panic_pow", since = "1.34.0")]
-            #[rustc_const_unstable(feature = "const_int_pow", issue = "53718")]
+            #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]
             #[must_use = "this returns the result of the operation, \
                           without modifying the original"]
             #[inline]
@@ -1209,7 +1211,7 @@ any high-order bits of `rhs` that would cause the shift to exceed the bitwidth o
 
 Note that this is *not* the same as a rotate-left; the RHS of a wrapping shift-left is restricted to
 the range of the type, rather than the bits shifted out of the LHS being returned to the other end.
-The primitive integer types all implement a `[`rotate_left`](#method.rotate_left) function,
+The primitive integer types all implement a [`rotate_left`](#method.rotate_left) function,
 which may be what you want instead.
 
 # Examples
@@ -1338,7 +1340,7 @@ assert_eq!(3i8.wrapping_pow(6), -39);",
 $EndFeature, "
 ```"),
             #[stable(feature = "no_panic_pow", since = "1.34.0")]
-            #[rustc_const_unstable(feature = "const_int_pow", issue = "53718")]
+            #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]
             #[must_use = "this returns the result of the operation, \
                           without modifying the original"]
             #[inline]
@@ -1705,7 +1707,7 @@ assert_eq!(3i8.overflowing_pow(5), (-13, true));",
 $EndFeature, "
 ```"),
             #[stable(feature = "no_panic_pow", since = "1.34.0")]
-            #[rustc_const_unstable(feature = "const_int_pow", issue = "53718")]
+            #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]
             #[must_use = "this returns the result of the operation, \
                           without modifying the original"]
             #[inline]
@@ -1755,7 +1757,7 @@ assert_eq!(x.pow(5), 32);",
 $EndFeature, "
 ```"),
             #[stable(feature = "rust1", since = "1.0.0")]
-            #[rustc_const_unstable(feature = "const_int_pow", issue = "53718")]
+            #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]
             #[must_use = "this returns the result of the operation, \
                           without modifying the original"]
             #[inline]
@@ -2045,7 +2047,7 @@ assert_eq!(
             #[rustc_const_stable(feature = "const_int_conversion", since = "1.44.0")]
             // SAFETY: const sound because integers are plain old datatypes so we can always
             // transmute them to arrays of bytes
-            #[allow_internal_unstable(const_fn_transmute)]
+            #[rustc_allow_const_fn_unstable(const_fn_transmute)]
             #[inline]
             pub const fn to_ne_bytes(self) -> [u8; mem::size_of::<Self>()] {
                 // SAFETY: integers are plain old datatypes so we can always transmute them to
@@ -2193,7 +2195,7 @@ fn read_ne_", stringify!($SelfT), "(input: &mut &[u8]) -> ", stringify!($SelfT),
             #[rustc_const_stable(feature = "const_int_conversion", since = "1.44.0")]
             // SAFETY: const sound because integers are plain old datatypes so we can always
             // transmute to them
-            #[allow_internal_unstable(const_fn_transmute)]
+            #[rustc_allow_const_fn_unstable(const_fn_transmute)]
             #[inline]
             pub const fn from_ne_bytes(bytes: [u8; mem::size_of::<Self>()]) -> Self {
                 // SAFETY: integers are plain old datatypes so we can always transmute to them

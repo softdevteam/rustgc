@@ -10,6 +10,7 @@ pub enum Arch {
     I386,
     X86_64,
     X86_64_macabi,
+    Arm64_macabi,
 }
 
 fn target_cpu(arch: Arch) -> String {
@@ -20,6 +21,7 @@ fn target_cpu(arch: Arch) -> String {
         I386 => "yonah",
         X86_64 => "core2",
         X86_64_macabi => "core2",
+        Arm64_macabi => "apple-a12",
     }
     .to_string()
 }
@@ -27,17 +29,18 @@ fn target_cpu(arch: Arch) -> String {
 fn link_env_remove(arch: Arch) -> Vec<String> {
     match arch {
         Armv7 | Armv7s | Arm64 | I386 | X86_64 => vec!["MACOSX_DEPLOYMENT_TARGET".to_string()],
-        X86_64_macabi => vec!["IPHONEOS_DEPLOYMENT_TARGET".to_string()],
+        X86_64_macabi | Arm64_macabi => vec!["IPHONEOS_DEPLOYMENT_TARGET".to_string()],
     }
 }
 
-pub fn opts(arch: Arch) -> TargetOptions {
+pub fn opts(os: &str, arch: Arch) -> TargetOptions {
     TargetOptions {
         cpu: target_cpu(arch),
+        dynamic_linking: false,
         executables: true,
         link_env_remove: link_env_remove(arch),
         has_elf_tls: false,
         eliminate_frame_pointer: false,
-        ..super::apple_base::opts()
+        ..super::apple_base::opts(os)
     }
 }

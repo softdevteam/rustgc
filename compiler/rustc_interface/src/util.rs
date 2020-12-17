@@ -1,6 +1,5 @@
 use rustc_ast::mut_visit::{visit_clobber, MutVisitor, *};
 use rustc_ast::ptr::P;
-use rustc_ast::util::lev_distance::find_best_match_for_name;
 use rustc_ast::{self as ast, AttrVec, BlockCheckMode};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::fingerprint::Fingerprint;
@@ -20,15 +19,18 @@ use rustc_session::parse::CrateConfig;
 use rustc_session::CrateDisambiguator;
 use rustc_session::{early_error, filesearch, output, DiagnosticOutput, Session};
 use rustc_span::edition::Edition;
+use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::FileLoader;
 use rustc_span::symbol::{sym, Symbol};
 use smallvec::SmallVec;
 use std::env;
-use std::io::{self, Write};
+use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+use std::io;
 use std::lazy::SyncOnceCell;
 use std::mem;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 #[cfg(not(parallel_compiler))]
 use std::{panic, thread};
@@ -104,16 +106,6 @@ fn get_stack_size() -> Option<usize> {
     env::var_os("RUST_MIN_STACK").is_none().then_some(STACK_SIZE)
 }
 
-struct Sink(Arc<Mutex<Vec<u8>>>);
-impl Write for Sink {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        Write::write(&mut *self.0.lock().unwrap(), data)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Like a `thread::Builder::spawn` followed by a `join()`, but avoids the need
 /// for `'static` bounds.
 #[cfg(not(parallel_compiler))]
@@ -156,9 +148,7 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
 
     let main_handler = move || {
         rustc_span::with_session_globals(edition, || {
-            if let Some(stderr) = stderr {
-                io::set_panic(Some(box Sink(stderr.clone())));
-            }
+            io::set_output_capture(stderr.clone());
             f()
         })
     };
@@ -196,9 +186,7 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
             // on the new threads.
             let main_handler = move |thread: rayon::ThreadBuilder| {
                 rustc_span::SESSION_GLOBALS.set(session_globals, || {
-                    if let Some(stderr) = stderr {
-                        io::set_panic(Some(box Sink(stderr.clone())));
-                    }
+                    io::set_output_capture(stderr.clone());
                     thread.run()
                 })
             };
@@ -238,7 +226,19 @@ pub fn get_codegen_backend(sopts: &config::Options) -> Box<dyn CodegenBackend> {
     static mut LOAD: fn() -> Box<dyn CodegenBackend> = || unreachable!();
 
     INIT.call_once(|| {
-        let codegen_name = sopts.debugging_opts.codegen_backend.as_deref().unwrap_or("llvm");
+        #[cfg(feature = "llvm")]
+        const DEFAULT_CODEGEN_BACKEND: &str = "llvm";
+
+        #[cfg(not(feature = "llvm"))]
+        const DEFAULT_CODEGEN_BACKEND: &str = "cranelift";
+
+        let codegen_name = sopts
+            .debugging_opts
+            .codegen_backend
+            .as_ref()
+            .map(|name| &name[..])
+            .unwrap_or(DEFAULT_CODEGEN_BACKEND);
+
         let backend = match codegen_name {
             filename if filename.contains('.') => load_backend_from_dylib(filename.as_ref()),
             codegen_name => get_builtin_codegen_backend(codegen_name),
@@ -367,15 +367,101 @@ fn sysroot_candidates() -> Vec<PathBuf> {
 }
 
 pub fn get_builtin_codegen_backend(backend_name: &str) -> fn() -> Box<dyn CodegenBackend> {
-    #[cfg(feature = "llvm")]
-    {
-        if backend_name == "llvm" {
-            return rustc_codegen_llvm::LlvmCodegenBackend::new;
+    match backend_name {
+        #[cfg(feature = "llvm")]
+        "llvm" => rustc_codegen_llvm::LlvmCodegenBackend::new,
+        _ => get_codegen_sysroot(backend_name),
+    }
+}
+
+pub fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<dyn CodegenBackend> {
+    // For now we only allow this function to be called once as it'll dlopen a
+    // few things, which seems to work best if we only do that once. In
+    // general this assertion never trips due to the once guard in `get_codegen_backend`,
+    // but there's a few manual calls to this function in this file we protect
+    // against.
+    static LOADED: AtomicBool = AtomicBool::new(false);
+    assert!(
+        !LOADED.fetch_or(true, Ordering::SeqCst),
+        "cannot load the default codegen backend twice"
+    );
+
+    let target = session::config::host_triple();
+    let sysroot_candidates = sysroot_candidates();
+
+    let sysroot = sysroot_candidates
+        .iter()
+        .map(|sysroot| {
+            let libdir = filesearch::relative_target_lib_path(&sysroot, &target);
+            sysroot.join(libdir).with_file_name("codegen-backends")
+        })
+        .find(|f| {
+            info!("codegen backend candidate: {}", f.display());
+            f.exists()
+        });
+    let sysroot = sysroot.unwrap_or_else(|| {
+        let candidates = sysroot_candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n* ");
+        let err = format!(
+            "failed to find a `codegen-backends` folder \
+                           in the sysroot candidates:\n* {}",
+            candidates
+        );
+        early_error(ErrorOutputType::default(), &err);
+    });
+    info!("probing {} for a codegen backend", sysroot.display());
+
+    let d = sysroot.read_dir().unwrap_or_else(|e| {
+        let err = format!(
+            "failed to load default codegen backend, couldn't \
+                           read `{}`: {}",
+            sysroot.display(),
+            e
+        );
+        early_error(ErrorOutputType::default(), &err);
+    });
+
+    let mut file: Option<PathBuf> = None;
+
+    let expected_name =
+        format!("rustc_codegen_{}-{}", backend_name, release_str().expect("CFG_RELEASE"));
+    for entry in d.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let filename = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if !(filename.starts_with(DLL_PREFIX) && filename.ends_with(DLL_SUFFIX)) {
+            continue;
         }
+        let name = &filename[DLL_PREFIX.len()..filename.len() - DLL_SUFFIX.len()];
+        if name != expected_name {
+            continue;
+        }
+        if let Some(ref prev) = file {
+            let err = format!(
+                "duplicate codegen backends found\n\
+                               first:  {}\n\
+                               second: {}\n\
+            ",
+                prev.display(),
+                path.display()
+            );
+            early_error(ErrorOutputType::default(), &err);
+        }
+        file = Some(path.clone());
     }
 
-    let err = format!("unsupported builtin codegen backend `{}`", backend_name);
-    early_error(ErrorOutputType::default(), &err);
+    match file {
+        Some(ref s) => load_backend_from_dylib(s),
+        None => {
+            let err = format!("unsupported builtin codegen backend `{}`", backend_name);
+            early_error(ErrorOutputType::default(), &err);
+        }
+    }
 }
 
 pub(crate) fn compute_crate_disambiguator(session: &Session) -> CrateDisambiguator {
@@ -426,8 +512,11 @@ pub(crate) fn check_attr_crate_type(
 
                 if let ast::MetaItemKind::NameValue(spanned) = a.meta().unwrap().kind {
                     let span = spanned.span;
-                    let lev_candidate =
-                        find_best_match_for_name(CRATE_TYPES.iter().map(|(k, _)| k), n, None);
+                    let lev_candidate = find_best_match_for_name(
+                        &CRATE_TYPES.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+                        n,
+                        None,
+                    );
                     if let Some(candidate) = lev_candidate {
                         lint_buffer.buffer_lint_with_diagnostic(
                             lint::builtin::UNKNOWN_CRATE_TYPES,
@@ -721,7 +810,6 @@ impl<'a> MutVisitor for ReplaceBodyWithLoop<'a, '_> {
                 id: resolver.next_node_id(),
                 kind: ast::StmtKind::Expr(expr),
                 span: rustc_span::DUMMY_SP,
-                tokens: None,
             }
         }
 
@@ -738,7 +826,6 @@ impl<'a> MutVisitor for ReplaceBodyWithLoop<'a, '_> {
             id: self.resolver.next_node_id(),
             span: rustc_span::DUMMY_SP,
             kind: ast::StmtKind::Expr(loop_expr),
-            tokens: None,
         };
 
         if self.within_static_or_const {
@@ -775,10 +862,24 @@ impl<'a> MutVisitor for ReplaceBodyWithLoop<'a, '_> {
             })
         }
     }
+}
 
-    // in general the pretty printer processes unexpanded code, so
-    // we override the default `visit_mac` method which panics.
-    fn visit_mac(&mut self, mac: &mut ast::MacCall) {
-        noop_visit_mac(mac, self)
-    }
+/// Returns a version string such as "rustc 1.46.0 (04488afe3 2020-08-24)"
+pub fn version_str() -> Option<&'static str> {
+    option_env!("CFG_VERSION")
+}
+
+/// Returns a version string such as "0.12.0-dev".
+pub fn release_str() -> Option<&'static str> {
+    option_env!("CFG_RELEASE")
+}
+
+/// Returns the full SHA1 hash of HEAD of the Git repo from which rustc was built.
+pub fn commit_hash_str() -> Option<&'static str> {
+    option_env!("CFG_VER_HASH")
+}
+
+/// Returns the "commit date" of HEAD of the Git repo from which rustc was built as a static string.
+pub fn commit_date_str() -> Option<&'static str> {
+    option_env!("CFG_VER_DATE")
 }

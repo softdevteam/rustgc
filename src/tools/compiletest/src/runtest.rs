@@ -2,7 +2,7 @@
 
 use crate::common::{expected_output_path, UI_EXTENSIONS, UI_FIXED, UI_STDERR, UI_STDOUT};
 use crate::common::{output_base_dir, output_base_name, output_testname_unique};
-use crate::common::{Assembly, Incremental, JsDocTest, MirOpt, RunMake, Ui};
+use crate::common::{Assembly, Incremental, JsDocTest, MirOpt, RunMake, RustdocJson, Ui};
 use crate::common::{Codegen, CodegenUnits, DebugInfo, Debugger, Rustdoc};
 use crate::common::{CompareMode, FailMode, PassMode};
 use crate::common::{CompileFail, Pretty, RunFail, RunPassValgrind};
@@ -287,6 +287,7 @@ pub fn compute_stamp_hash(config: &Config) -> String {
     format!("{:x}", hash.finish())
 }
 
+#[derive(Copy, Clone)]
 struct TestCx<'test> {
     config: &'test Config,
     props: &'test TestProps,
@@ -341,6 +342,7 @@ impl<'test> TestCx<'test> {
             DebugInfo => self.run_debuginfo_test(),
             Codegen => self.run_codegen_test(),
             Rustdoc => self.run_rustdoc_test(),
+            RustdocJson => self.run_rustdoc_json_test(),
             CodegenUnits => self.run_codegen_units_test(),
             Incremental => self.run_incremental_test(),
             RunMake => self.run_rmake_test(),
@@ -977,7 +979,8 @@ impl<'test> TestCx<'test> {
             script_str.push_str("set print pretty off\n");
 
             // Add the pretty printer directory to GDB's source-file search path
-            script_str.push_str(&format!("directory {}\n", rust_pp_module_abs_path));
+            script_str
+                .push_str(&format!("directory {}\n", rust_pp_module_abs_path.replace(r"\", r"\\")));
 
             // Load the target executable
             script_str
@@ -1166,6 +1169,7 @@ impl<'test> TestCx<'test> {
                 .arg(&lldb_script_path)
                 .arg(test_executable)
                 .arg(debugger_script)
+                .env("PYTHONUNBUFFERED", "1") // Help debugging #78665
                 .env("PYTHONPATH", self.config.lldb_python_dir.as_ref().unwrap()),
         )
     }
@@ -1597,6 +1601,10 @@ impl<'test> TestCx<'test> {
             .arg(&self.testpaths.file)
             .args(&self.props.compile_flags);
 
+        if self.config.mode == RustdocJson {
+            rustdoc.arg("--output-format").arg("json");
+        }
+
         if let Some(ref linker) = self.config.linker {
             rustdoc.arg(format!("-Clinker={}", linker));
         }
@@ -1727,7 +1735,7 @@ impl<'test> TestCx<'test> {
         self.config.target.contains("vxworks") && !self.is_vxworks_pure_static()
     }
 
-    fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
+    fn build_all_auxiliary(&self, rustc: &mut Command) -> PathBuf {
         let aux_dir = self.aux_output_dir_name();
 
         if !self.props.aux_builds.is_empty() {
@@ -1746,6 +1754,11 @@ impl<'test> TestCx<'test> {
             rustc.arg("--extern").arg(format!("{}={}/{}", aux_name, aux_dir.display(), lib_name));
         }
 
+        aux_dir
+    }
+
+    fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
+        let aux_dir = self.build_all_auxiliary(&mut rustc);
         self.props.unset_rustc_env.clone().iter().fold(&mut rustc, |rustc, v| rustc.env_remove(v));
         rustc.envs(self.props.rustc_env.clone());
         self.compose_and_run(
@@ -1775,10 +1788,14 @@ impl<'test> TestCx<'test> {
         let mut aux_rustc =
             aux_cx.make_compile_args(input_file, aux_output, EmitMetadata::No, AllowUnused::No);
 
+        for key in &aux_props.unset_rustc_env {
+            aux_rustc.env_remove(key);
+        }
+        aux_rustc.envs(aux_props.rustc_env.clone());
+
         let (dylib, crate_type) = if aux_props.no_prefer_dynamic {
             (true, None)
-        } else if self.config.target.contains("cloudabi")
-            || self.config.target.contains("emscripten")
+        } else if self.config.target.contains("emscripten")
             || (self.config.target.contains("musl")
                 && !aux_props.force_host
                 && !self.config.host.contains("musl"))
@@ -1875,7 +1892,9 @@ impl<'test> TestCx<'test> {
     }
 
     fn is_rustdoc(&self) -> bool {
-        self.config.src_base.ends_with("rustdoc-ui") || self.config.src_base.ends_with("rustdoc-js")
+        self.config.src_base.ends_with("rustdoc-ui")
+            || self.config.src_base.ends_with("rustdoc-js")
+            || self.config.src_base.ends_with("rustdoc-json")
     }
 
     fn make_compile_args(
@@ -1937,6 +1956,7 @@ impl<'test> TestCx<'test> {
                 }
                 rustc.arg("-Zui-testing");
                 rustc.arg("-Zdeduplicate-diagnostics=no");
+                rustc.arg("-Zemit-future-incompat-report");
             }
             MirOpt => {
                 rustc.args(&[
@@ -1955,8 +1975,8 @@ impl<'test> TestCx<'test> {
 
                 rustc.arg(dir_opt);
             }
-            RunFail | RunPassValgrind | Pretty | DebugInfo | Codegen | Rustdoc | RunMake
-            | CodegenUnits | JsDocTest | Assembly => {
+            RunFail | RunPassValgrind | Pretty | DebugInfo | Codegen | Rustdoc | RustdocJson
+            | RunMake | CodegenUnits | JsDocTest | Assembly => {
                 // do not use JSON output
             }
         }
@@ -2201,7 +2221,17 @@ impl<'test> TestCx<'test> {
 
     fn fatal_proc_rec(&self, err: &str, proc_res: &ProcRes) -> ! {
         self.error(err);
-        proc_res.fatal(None);
+        proc_res.fatal(None, || ());
+    }
+
+    fn fatal_proc_rec_with_ctx(
+        &self,
+        err: &str,
+        proc_res: &ProcRes,
+        on_failure: impl FnOnce(Self),
+    ) -> ! {
+        self.error(err);
+        proc_res.fatal(None, || on_failure(*self));
     }
 
     // codegen tests (using FileCheck)
@@ -2318,12 +2348,166 @@ impl<'test> TestCx<'test> {
             let res = self.cmd2procres(
                 Command::new(&self.config.docck_python)
                     .arg(root.join("src/etc/htmldocck.py"))
-                    .arg(out_dir)
+                    .arg(&out_dir)
                     .arg(&self.testpaths.file),
             );
             if !res.status.success() {
-                self.fatal_proc_rec("htmldocck failed!", &res);
+                self.fatal_proc_rec_with_ctx("htmldocck failed!", &res, |mut this| {
+                    this.compare_to_default_rustdoc(&out_dir)
+                });
             }
+        }
+    }
+
+    fn compare_to_default_rustdoc(&mut self, out_dir: &Path) {
+        println!("info: generating a diff against nightly rustdoc");
+
+        let suffix =
+            self.safe_revision().map_or("nightly".into(), |path| path.to_owned() + "-nightly");
+        let compare_dir = output_base_dir(self.config, self.testpaths, Some(&suffix));
+        // Don't give an error if the directory didn't already exist
+        let _ = fs::remove_dir_all(&compare_dir);
+        create_dir_all(&compare_dir).unwrap();
+
+        // We need to create a new struct for the lifetimes on `config` to work.
+        let new_rustdoc = TestCx {
+            config: &Config {
+                // FIXME: use beta or a user-specified rustdoc instead of
+                // hardcoding the default toolchain
+                rustdoc_path: Some("rustdoc".into()),
+                // Needed for building auxiliary docs below
+                rustc_path: "rustc".into(),
+                ..self.config.clone()
+            },
+            ..*self
+        };
+
+        let output_file = TargetLocation::ThisDirectory(new_rustdoc.aux_output_dir_name());
+        let mut rustc = new_rustdoc.make_compile_args(
+            &new_rustdoc.testpaths.file,
+            output_file,
+            EmitMetadata::No,
+            AllowUnused::Yes,
+        );
+        rustc.arg("-L").arg(&new_rustdoc.aux_output_dir_name());
+        new_rustdoc.build_all_auxiliary(&mut rustc);
+
+        let proc_res = new_rustdoc.document(&compare_dir);
+        if !proc_res.status.success() {
+            eprintln!("failed to run nightly rustdoc");
+            return;
+        }
+
+        #[rustfmt::skip]
+        let tidy_args = [
+            "--indent", "yes",
+            "--indent-spaces", "2",
+            "--wrap", "0",
+            "--show-warnings", "no",
+            "--markup", "yes",
+            "--quiet", "yes",
+            "-modify",
+        ];
+        let tidy_dir = |dir| {
+            for entry in walkdir::WalkDir::new(dir) {
+                let entry = entry.expect("failed to read file");
+                if entry.file_type().is_file()
+                    && entry.path().extension().and_then(|p| p.to_str()) == Some("html".into())
+                {
+                    let status =
+                        Command::new("tidy").args(&tidy_args).arg(entry.path()).status().unwrap();
+                    // `tidy` returns 1 if it modified the file.
+                    assert!(status.success() || status.code() == Some(1));
+                }
+            }
+        };
+        if self.config.has_tidy {
+            tidy_dir(out_dir);
+            tidy_dir(&compare_dir);
+        }
+
+        let pager = {
+            let output = Command::new("git").args(&["config", "--get", "core.pager"]).output().ok();
+            output.and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8(out.stdout).expect("invalid UTF8 in git pager"))
+                } else {
+                    None
+                }
+            })
+        };
+        let mut diff = Command::new("diff");
+        // diff recursively, showing context, and excluding .css files
+        diff.args(&["-u", "-r", "-x", "*.css"]).args(&[&compare_dir, out_dir]);
+
+        let output = if let Some(pager) = pager {
+            let diff_pid = diff.stdout(Stdio::piped()).spawn().expect("failed to run `diff`");
+            let pager = pager.trim();
+            if self.config.verbose {
+                eprintln!("using pager {}", pager);
+            }
+            let output = Command::new(pager)
+                // disable paging; we want this to be non-interactive
+                .env("PAGER", "")
+                .stdin(diff_pid.stdout.unwrap())
+                // Capture output and print it explicitly so it will in turn be
+                // captured by libtest.
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output
+        } else {
+            eprintln!("warning: no pager configured, falling back to `diff --color`");
+            eprintln!(
+                "help: try configuring a git pager (e.g. `delta`) with `git config --global core.pager delta`"
+            );
+            let output = diff.arg("--color").output().unwrap();
+            assert!(output.status.success() || output.status.code() == Some(1));
+            output
+        };
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    fn run_rustdoc_json_test(&self) {
+        //FIXME: Add bless option.
+
+        assert!(self.revision.is_none(), "revisions not relevant here");
+
+        let out_dir = self.output_base_dir();
+        let _ = fs::remove_dir_all(&out_dir);
+        create_dir_all(&out_dir).unwrap();
+
+        let proc_res = self.document(&out_dir);
+        if !proc_res.status.success() {
+            self.fatal_proc_rec("rustdoc failed!", &proc_res);
+        }
+
+        let root = self.config.find_rust_src_root().unwrap();
+        let mut json_out = out_dir.join(self.testpaths.file.file_stem().unwrap());
+        json_out.set_extension("json");
+        let res = self.cmd2procres(
+            Command::new(&self.config.docck_python)
+                .arg(root.join("src/test/rustdoc-json/check_missing_items.py"))
+                .arg(&json_out),
+        );
+
+        if !res.status.success() {
+            self.fatal_proc_rec("check_missing_items failed!", &res);
+        }
+
+        let mut expected = self.testpaths.file.clone();
+        expected.set_extension("expected");
+        let res = self.cmd2procres(
+            Command::new(&self.config.docck_python)
+                .arg(root.join("src/test/rustdoc-json/compare.py"))
+                .arg(&expected)
+                .arg(&json_out)
+                .arg(&expected.parent().unwrap()),
+        );
+
+        if !res.status.success() {
+            self.fatal_proc_rec("compare failed!", &res);
         }
     }
 
@@ -2973,6 +3157,7 @@ impl<'test> TestCx<'test> {
         self.prune_duplicate_outputs(&modes_to_prune);
 
         let mut errors = self.load_compare_outputs(&proc_res, TestOutput::Compile, explicit);
+        let rustfix_input = json::rustfix_diagnostics_only(&proc_res.stderr);
 
         if self.config.compare_mode.is_some() {
             // don't test rustfix with nll right now
@@ -2983,7 +3168,7 @@ impl<'test> TestCx<'test> {
             // This will return an empty `Vec` in case the executed test file has a
             // `compile-flags: --error-format=xxxx` header with a value other than `json`.
             let suggestions = get_suggestions_from_json(
-                &proc_res.stderr,
+                &rustfix_input,
                 &HashSet::new(),
                 Filter::MachineApplicableOnly,
             )
@@ -3010,7 +3195,7 @@ impl<'test> TestCx<'test> {
             // Apply suggestions from rustc to the code itself
             let unfixed_code = self.load_expected_output_from_path(&self.testpaths.file).unwrap();
             let suggestions = get_suggestions_from_json(
-                &proc_res.stderr,
+                &rustfix_input,
                 &HashSet::new(),
                 if self.props.rustfix_only_machine_applicable {
                     Filter::MachineApplicableOnly
@@ -3116,7 +3301,9 @@ impl<'test> TestCx<'test> {
                 self.fatal_proc_rec("failed to compile fixed code", &res);
             }
             if !res.stderr.is_empty() && !self.props.rustfix_only_machine_applicable {
-                self.fatal_proc_rec("fixed code is still producing diagnostics", &res);
+                if !json::rustfix_diagnostics_only(&res.stderr).is_empty() {
+                    self.fatal_proc_rec("fixed code is still producing diagnostics", &res);
+                }
             }
         }
     }
@@ -3580,7 +3767,7 @@ pub struct ProcRes {
 }
 
 impl ProcRes {
-    pub fn fatal(&self, err: Option<&str>) -> ! {
+    pub fn fatal(&self, err: Option<&str>, on_failure: impl FnOnce()) -> ! {
         if let Some(e) = err {
             println!("\nerror: {}", e);
         }
@@ -3602,6 +3789,7 @@ impl ProcRes {
             json::extract_rendered(&self.stdout),
             json::extract_rendered(&self.stderr),
         );
+        on_failure();
         // Use resume_unwind instead of panic!() to prevent a panic message + backtrace from
         // compiletest, which is unnecessary noise.
         std::panic::resume_unwind(Box::new(()));

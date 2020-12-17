@@ -1,7 +1,7 @@
 //! Type context book-keeping.
 
 use crate::arena::Arena;
-use crate::dep_graph::{self, DepConstructor, DepGraph};
+use crate::dep_graph::{self, DepGraph, DepKind, DepNode, DepNodeExt};
 use crate::hir::exports::ExportMap;
 use crate::ich::{NodeIdHashingMode, StableHashingContext};
 use crate::infer::canonical::{Canonical, CanonicalVarInfo, CanonicalVarInfos};
@@ -14,7 +14,6 @@ use crate::mir::interpret::{self, Allocation, ConstValue, Scalar};
 use crate::mir::{Body, Field, Local, Place, PlaceElem, ProjectionKind, Promoted};
 use crate::traits;
 use crate::ty::query::{self, TyCtxtAt};
-use crate::ty::steal::Steal;
 use crate::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef, UserSubsts};
 use crate::ty::TyKind::*;
 use crate::ty::{
@@ -33,16 +32,19 @@ use rustc_data_structures::sharded::{IntoPointer, ShardedHashMap};
 use rustc_data_structures::stable_hasher::{
     hash_stable_hashmap, HashStable, StableHasher, StableVec,
 };
+use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{self, Lock, Lrc, WorkerLocal};
-use rustc_data_structures::unhash::UnhashMap;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LOCAL_CRATE};
-use rustc_hir::definitions::{DefPathHash, Definitions};
+use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId};
+use rustc_hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE};
+use rustc_hir::definitions::Definitions;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{HirId, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet, Node, TraitCandidate};
+use rustc_hir::{
+    Constness, HirId, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet, Node, TraitCandidate,
+};
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_macros::HashStable;
 use rustc_session::config::{BorrowckMode, CrateType, OutputFilenames};
@@ -83,7 +85,7 @@ pub struct CtxtInterners<'tcx> {
     type_: InternedSet<'tcx, TyS<'tcx>>,
     type_list: InternedSet<'tcx, List<Ty<'tcx>>>,
     substs: InternedSet<'tcx, InternalSubsts<'tcx>>,
-    canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo>>,
+    canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo<'tcx>>>,
     region: InternedSet<'tcx, RegionKind>,
     existential_predicates: InternedSet<'tcx, List<ExistentialPredicate<'tcx>>>,
     predicate: InternedSet<'tcx, PredicateInner<'tcx>>,
@@ -368,7 +370,7 @@ pub struct TypeckResults<'tcx> {
     /// leads to a `vec![&&Option<i32>, &Option<i32>]`. Empty vectors are not stored.
     ///
     /// See:
-    /// https://github.com/rust-lang/rfcs/blob/master/text/2005-match-ergonomics.md#definitions
+    /// <https://github.com/rust-lang/rfcs/blob/master/text/2005-match-ergonomics.md#definitions>
     pat_adjustments: ItemLocalMap<Vec<Ty<'tcx>>>,
 
     /// Borrows
@@ -415,9 +417,19 @@ pub struct TypeckResults<'tcx> {
     /// entire variable.
     pub closure_captures: ty::UpvarListMap,
 
+    /// Tracks the minimum captures required for a closure;
+    /// see `MinCaptureInformationMap` for more details.
+    pub closure_min_captures: ty::MinCaptureInformationMap<'tcx>,
+
     /// Stores the type, expression, span and optional scope span of all types
     /// that are live across the yield of this generator (if a generator).
     pub generator_interior_types: Vec<GeneratorInteriorTypeCause<'tcx>>,
+
+    /// We sometimes treat byte string literals (which are of type `&[u8; N]`)
+    /// as `&[u8]`, depending on the pattern  in which they are used.
+    /// This hashset records all instances where we behave
+    /// like this to allow `const_to_pat` to reliably handle this situation.
+    pub treat_byte_string_as_slice: ItemLocalSet,
 }
 
 impl<'tcx> TypeckResults<'tcx> {
@@ -442,7 +454,9 @@ impl<'tcx> TypeckResults<'tcx> {
             tainted_by_errors: None,
             concrete_opaque_types: Default::default(),
             closure_captures: Default::default(),
+            closure_min_captures: Default::default(),
             generator_interior_types: Default::default(),
+            treat_byte_string_as_slice: Default::default(),
         }
     }
 
@@ -610,6 +624,19 @@ impl<'tcx> TypeckResults<'tcx> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.pat_adjustments }
     }
 
+    /// For a given closure, returns the iterator of `ty::CapturedPlace`s that are captured
+    /// by the closure.
+    pub fn closure_min_captures_flattened(
+        &self,
+        closure_def_id: DefId,
+    ) -> impl Iterator<Item = &ty::CapturedPlace<'tcx>> {
+        self.closure_min_captures
+            .get(&closure_def_id)
+            .map(|closure_min_captures| closure_min_captures.values().flat_map(|v| v.iter()))
+            .into_iter()
+            .flatten()
+    }
+
     pub fn upvar_capture(&self, upvar_id: ty::UpvarId) -> ty::UpvarCapture<'tcx> {
         self.upvar_capture_map[&upvar_id]
     }
@@ -676,7 +703,9 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for TypeckResults<'tcx> {
             tainted_by_errors,
             ref concrete_opaque_types,
             ref closure_captures,
+            ref closure_min_captures,
             ref generator_interior_types,
+            ref treat_byte_string_as_slice,
         } = *self;
 
         hcx.with_node_id_hashing_mode(NodeIdHashingMode::HashDefPath, |hcx| {
@@ -709,7 +738,9 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for TypeckResults<'tcx> {
             tainted_by_errors.hash_stable(hcx, hasher);
             concrete_opaque_types.hash_stable(hcx, hasher);
             closure_captures.hash_stable(hcx, hasher);
+            closure_min_captures.hash_stable(hcx, hasher);
             generator_interior_types.hash_stable(hcx, hasher);
+            treat_byte_string_as_slice.hash_stable(hcx, hasher);
         })
     }
 }
@@ -844,7 +875,7 @@ impl<'tcx> CommonConsts<'tcx> {
 
         CommonConsts {
             unit: mk_const(ty::Const {
-                val: ty::ConstKind::Value(ConstValue::Scalar(Scalar::zst())),
+                val: ty::ConstKind::Value(ConstValue::Scalar(Scalar::ZST)),
                 ty: types.unit,
             }),
         }
@@ -926,10 +957,6 @@ pub struct GlobalCtxt<'tcx> {
 
     pub(crate) untracked_crate: &'tcx hir::Crate<'tcx>,
     pub(crate) definitions: &'tcx Definitions,
-
-    /// A map from `DefPathHash` -> `DefId`. Includes `DefId`s from the local crate
-    /// as well as all upstream crates. Only populated in incremental mode.
-    pub def_path_hash_to_def_id: Option<UnhashMap<DefPathHash, DefId>>,
 
     pub queries: query::Queries<'tcx>,
 
@@ -1078,7 +1105,7 @@ impl<'tcx> TyCtxt<'tcx> {
         krate: &'tcx hir::Crate<'tcx>,
         definitions: &'tcx Definitions,
         dep_graph: DepGraph,
-        on_disk_query_result_cache: query::OnDiskCache<'tcx>,
+        on_disk_query_result_cache: Option<query::OnDiskCache<'tcx>>,
         crate_name: &str,
         output_filenames: &OutputFilenames,
     ) -> GlobalCtxt<'tcx> {
@@ -1094,21 +1121,6 @@ impl<'tcx> TyCtxt<'tcx> {
         let max_cnum = crates.iter().map(|c| c.as_usize()).max().unwrap_or(0);
         let mut providers = IndexVec::from_elem_n(extern_providers, max_cnum + 1);
         providers[LOCAL_CRATE] = local_providers;
-
-        let def_path_hash_to_def_id = if s.opts.build_dep_graph() {
-            let capacity = definitions.def_path_table().num_def_ids()
-                + crates.iter().map(|cnum| cstore.num_def_ids(*cnum)).sum::<usize>();
-            let mut map = UnhashMap::with_capacity_and_hasher(capacity, Default::default());
-
-            map.extend(definitions.def_path_table().all_def_path_hashes_and_def_ids(LOCAL_CRATE));
-            for cnum in &crates {
-                map.extend(cstore.all_def_path_hashes_and_def_ids(*cnum).into_iter());
-            }
-
-            Some(map)
-        } else {
-            None
-        };
 
         let mut trait_map: FxHashMap<_, FxHashMap<_, _>> = FxHashMap::default();
         for (hir_id, v) in krate.trait_map.iter() {
@@ -1137,7 +1149,6 @@ impl<'tcx> TyCtxt<'tcx> {
             extern_prelude: resolutions.extern_prelude,
             untracked_crate: krate,
             definitions,
-            def_path_hash_to_def_id,
             queries: query::Queries::new(providers, extern_providers, on_disk_query_result_cache),
             ty_rcache: Default::default(),
             pred_rcache: Default::default(),
@@ -1311,7 +1322,8 @@ impl<'tcx> TyCtxt<'tcx> {
         // We cannot use the query versions of crates() and crate_hash(), since
         // those would need the DepNodes that we are allocating here.
         for cnum in self.cstore.crates_untracked() {
-            let dep_node = DepConstructor::CrateMetadata(self, cnum);
+            let def_path_hash = self.def_path_hash(DefId { krate: cnum, index: CRATE_DEF_INDEX });
+            let dep_node = DepNode::from_def_path_hash(def_path_hash, DepKind::CrateMetadata);
             let crate_hash = self.cstore.crate_hash_untracked(cnum);
             self.dep_graph.with_task(
                 dep_node,
@@ -1327,7 +1339,7 @@ impl<'tcx> TyCtxt<'tcx> {
     where
         E: ty::codec::OpaqueEncoder,
     {
-        self.queries.on_disk_cache.serialize(self, encoder)
+        self.queries.on_disk_cache.as_ref().map(|c| c.serialize(self, encoder)).unwrap_or(Ok(()))
     }
 
     /// If `true`, we should use the MIR-based borrowck, but also
@@ -1495,7 +1507,7 @@ impl<'tcx> TyCtxt<'tcx> {
         match ret_ty.kind() {
             ty::FnDef(_, _) => {
                 let sig = ret_ty.fn_sig(self);
-                let output = self.erase_late_bound_regions(&sig.output());
+                let output = self.erase_late_bound_regions(sig.output());
                 if output.is_impl_trait() {
                     let fn_decl = self.hir().fn_decl_by_hir_id(hir_id).unwrap();
                     Some((output, fn_decl.output.span()))
@@ -1613,11 +1625,13 @@ nop_lift! {predicate; &'a PredicateInner<'a> => &'tcx PredicateInner<'tcx>}
 nop_list_lift! {type_list; Ty<'a> => Ty<'tcx>}
 nop_list_lift! {existential_predicates; ExistentialPredicate<'a> => ExistentialPredicate<'tcx>}
 nop_list_lift! {predicates; Predicate<'a> => Predicate<'tcx>}
-nop_list_lift! {canonical_var_infos; CanonicalVarInfo => CanonicalVarInfo}
+nop_list_lift! {canonical_var_infos; CanonicalVarInfo<'a> => CanonicalVarInfo<'tcx>}
 nop_list_lift! {projs; ProjectionKind => ProjectionKind}
 
 // This is the impl for `&'a InternalSubsts<'a>`.
 nop_list_lift! {substs; GenericArg<'a> => GenericArg<'tcx>}
+
+CloneLiftImpls! { for<'tcx> { Constness, } }
 
 pub mod tls {
     use super::{ptr_eq, GlobalCtxt, TyCtxt};
@@ -2036,20 +2050,20 @@ direct_interners! {
 
 macro_rules! slice_interners {
     ($($field:ident: $method:ident($ty:ty)),+ $(,)?) => (
-        $(impl<'tcx> TyCtxt<'tcx> {
-            pub fn $method(self, v: &[$ty]) -> &'tcx List<$ty> {
+        impl<'tcx> TyCtxt<'tcx> {
+            $(pub fn $method(self, v: &[$ty]) -> &'tcx List<$ty> {
                 self.interners.$field.intern_ref(v, || {
                     Interned(List::from_arena(&*self.arena, v))
                 }).0
-            }
-        })+
+            })+
+        }
     );
 }
 
 slice_interners!(
     type_list: _intern_type_list(Ty<'tcx>),
     substs: _intern_substs(GenericArg<'tcx>),
-    canonical_var_infos: _intern_canonical_var_infos(CanonicalVarInfo),
+    canonical_var_infos: _intern_canonical_var_infos(CanonicalVarInfo<'tcx>),
     existential_predicates: _intern_existential_predicates(ExistentialPredicate<'tcx>),
     predicates: _intern_predicates(Predicate<'tcx>),
     projs: _intern_projs(ProjectionKind),
@@ -2448,7 +2462,10 @@ impl<'tcx> TyCtxt<'tcx> {
         if ts.is_empty() { List::empty() } else { self._intern_place_elems(ts) }
     }
 
-    pub fn intern_canonical_var_infos(self, ts: &[CanonicalVarInfo]) -> CanonicalVarInfos<'tcx> {
+    pub fn intern_canonical_var_infos(
+        self,
+        ts: &[CanonicalVarInfo<'tcx>],
+    ) -> CanonicalVarInfos<'tcx> {
         if ts.is_empty() { List::empty() } else { self._intern_canonical_var_infos(ts) }
     }
 

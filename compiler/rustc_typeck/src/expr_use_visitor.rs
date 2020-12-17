@@ -18,7 +18,6 @@ use rustc_middle::ty::{self, adjustment, TyCtxt};
 use rustc_target::abi::VariantIdx;
 
 use crate::mem_categorization as mc;
-use rustc_span::Span;
 
 ///////////////////////////////////////////////////////////////////////////
 // The Delegate trait
@@ -27,14 +26,31 @@ use rustc_span::Span;
 /// employing the ExprUseVisitor.
 pub trait Delegate<'tcx> {
     // The value found at `place` is either copied or moved, depending
-    // on mode.
-    fn consume(&mut self, place_with_id: &PlaceWithHirId<'tcx>, mode: ConsumeMode);
+    // on `mode`. Where `diag_expr_id` is the id used for diagnostics for `place`.
+    //
+    // The parameter `diag_expr_id` indicates the HIR id that ought to be used for
+    // diagnostics. Around pattern matching such as `let pat = expr`, the diagnostic
+    // id will be the id of the expression `expr` but the place itself will have
+    // the id of the binding in the pattern `pat`.
+    fn consume(
+        &mut self,
+        place_with_id: &PlaceWithHirId<'tcx>,
+        diag_expr_id: hir::HirId,
+        mode: ConsumeMode,
+    );
 
     // The value found at `place` is being borrowed with kind `bk`.
-    fn borrow(&mut self, place_with_id: &PlaceWithHirId<'tcx>, bk: ty::BorrowKind);
+    // `diag_expr_id` is the id used for diagnostics (see `consume` for more details).
+    fn borrow(
+        &mut self,
+        place_with_id: &PlaceWithHirId<'tcx>,
+        diag_expr_id: hir::HirId,
+        bk: ty::BorrowKind,
+    );
 
-    // The path at `place_with_id` is being assigned to.
-    fn mutate(&mut self, assignee_place: &PlaceWithHirId<'tcx>);
+    // The path at `assignee_place` is being assigned to.
+    // `diag_expr_id` is the id used for diagnostics (see `consume` for more details).
+    fn mutate(&mut self, assignee_place: &PlaceWithHirId<'tcx>, diag_expr_id: hir::HirId);
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -56,6 +72,7 @@ pub enum MutateMode {
 // This is the code that actually walks the tree.
 pub struct ExprUseVisitor<'a, 'tcx> {
     mc: mc::MemCategorizationContext<'a, 'tcx>,
+    body_owner: LocalDefId,
     delegate: &'a mut dyn Delegate<'tcx>,
 }
 
@@ -93,6 +110,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
     ) -> Self {
         ExprUseVisitor {
             mc: mc::MemCategorizationContext::new(infcx, param_env, body_owner, typeck_results),
+            body_owner,
             delegate,
         }
     }
@@ -116,11 +134,11 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         self.mc.tcx()
     }
 
-    fn delegate_consume(&mut self, place_with_id: &PlaceWithHirId<'tcx>) {
+    fn delegate_consume(&mut self, place_with_id: &PlaceWithHirId<'tcx>, diag_expr_id: hir::HirId) {
         debug!("delegate_consume(place_with_id={:?})", place_with_id);
 
         let mode = copy_or_move(&self.mc, place_with_id);
-        self.delegate.consume(place_with_id, mode);
+        self.delegate.consume(place_with_id, diag_expr_id, mode);
     }
 
     fn consume_exprs(&mut self, exprs: &[hir::Expr<'_>]) {
@@ -133,13 +151,13 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         debug!("consume_expr(expr={:?})", expr);
 
         let place_with_id = return_if_err!(self.mc.cat_expr(expr));
-        self.delegate_consume(&place_with_id);
+        self.delegate_consume(&place_with_id, place_with_id.hir_id);
         self.walk_expr(expr);
     }
 
     fn mutate_expr(&mut self, expr: &hir::Expr<'_>) {
         let place_with_id = return_if_err!(self.mc.cat_expr(expr));
-        self.delegate.mutate(&place_with_id);
+        self.delegate.mutate(&place_with_id, place_with_id.hir_id);
         self.walk_expr(expr);
     }
 
@@ -147,7 +165,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         debug!("borrow_expr(expr={:?}, bk={:?})", expr, bk);
 
         let place_with_id = return_if_err!(self.mc.cat_expr(expr));
-        self.delegate.borrow(&place_with_id, bk);
+        self.delegate.borrow(&place_with_id, place_with_id.hir_id, bk);
 
         self.walk_expr(expr)
     }
@@ -224,7 +242,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             }
 
             hir::ExprKind::InlineAsm(ref asm) => {
-                for op in asm.operands {
+                for (op, _op_sp) in asm.operands {
                     match op {
                         hir::InlineAsmOperand::In { expr, .. }
                         | hir::InlineAsmOperand::Const { expr, .. }
@@ -312,8 +330,8 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.consume_expr(base);
             }
 
-            hir::ExprKind::Closure(_, _, _, fn_decl_span, _) => {
-                self.walk_captures(expr, fn_decl_span);
+            hir::ExprKind::Closure(..) => {
+                self.walk_captures(expr);
             }
 
             hir::ExprKind::Box(ref base) => {
@@ -404,7 +422,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                             with_field.ty(self.tcx(), substs),
                             ProjectionKind::Field(f_index as u32, VariantIdx::new(0)),
                         );
-                        self.delegate_consume(&field_place);
+                        self.delegate_consume(&field_place, field_place.hir_id);
                     }
                 }
             }
@@ -436,7 +454,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 adjustment::Adjust::NeverToAny | adjustment::Adjust::Pointer(_) => {
                     // Creating a closure/fn-pointer or unsizing consumes
                     // the input and stores it into the resulting rvalue.
-                    self.delegate_consume(&place_with_id);
+                    self.delegate_consume(&place_with_id, place_with_id.hir_id);
                 }
 
                 adjustment::Adjust::Deref(None) => {}
@@ -448,7 +466,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 // this is an autoref of `x`.
                 adjustment::Adjust::Deref(Some(ref deref)) => {
                     let bk = ty::BorrowKind::from_mutbl(deref.mutbl);
-                    self.delegate.borrow(&place_with_id, bk);
+                    self.delegate.borrow(&place_with_id, place_with_id.hir_id, bk);
                 }
 
                 adjustment::Adjust::Borrow(ref autoref) => {
@@ -476,13 +494,17 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
 
         match *autoref {
             adjustment::AutoBorrow::Ref(_, m) => {
-                self.delegate.borrow(base_place, ty::BorrowKind::from_mutbl(m.into()));
+                self.delegate.borrow(
+                    base_place,
+                    base_place.hir_id,
+                    ty::BorrowKind::from_mutbl(m.into()),
+                );
             }
 
             adjustment::AutoBorrow::RawPtr(m) => {
                 debug!("walk_autoref: expr.hir_id={} base_place={:?}", expr.hir_id, base_place);
 
-                self.delegate.borrow(base_place, ty::BorrowKind::from_mutbl(m));
+                self.delegate.borrow(base_place, base_place.hir_id, ty::BorrowKind::from_mutbl(m));
             }
         }
     }
@@ -508,7 +530,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         debug!("walk_pat(discr_place={:?}, pat={:?})", discr_place, pat);
 
         let tcx = self.tcx();
-        let ExprUseVisitor { ref mc, ref mut delegate } = *self;
+        let ExprUseVisitor { ref mc, body_owner: _, ref mut delegate } = *self;
         return_if_err!(mc.cat_pattern(discr_place.clone(), pat, |place, pat| {
             if let PatKind::Binding(_, canonical_id, ..) = pat.kind {
                 debug!("walk_pat: binding place={:?} pat={:?}", place, pat,);
@@ -525,19 +547,22 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                     // binding being produced.
                     let def = Res::Local(canonical_id);
                     if let Ok(ref binding_place) = mc.cat_res(pat.hir_id, pat.span, pat_ty, def) {
-                        delegate.mutate(binding_place);
+                        delegate.mutate(binding_place, binding_place.hir_id);
                     }
 
                     // It is also a borrow or copy/move of the value being matched.
+                    // In a cases of pattern like `let pat = upvar`, don't use the span
+                    // of the pattern, as this just looks confusing, instead use the span
+                    // of the discriminant.
                     match bm {
                         ty::BindByReference(m) => {
                             let bk = ty::BorrowKind::from_mutbl(m);
-                            delegate.borrow(place, bk);
+                            delegate.borrow(place, discr_place.hir_id, bk);
                         }
                         ty::BindByValue(..) => {
-                            let mode = copy_or_move(mc, place);
+                            let mode = copy_or_move(mc, &place);
                             debug!("walk_pat binding consuming pat");
-                            delegate.consume(place, mode);
+                            delegate.consume(place, discr_place.hir_id, mode);
                         }
                     }
                 }
@@ -545,45 +570,80 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         }));
     }
 
-    fn walk_captures(&mut self, closure_expr: &hir::Expr<'_>, fn_decl_span: Span) {
+    /// Handle the case where the current body contains a closure.
+    ///
+    /// When the current body being handled is a closure, then we must make sure that
+    /// - The parent closure only captures Places from the nested closure that are not local to it.
+    ///
+    /// In the following example the closures `c` only captures `p.x`` even though `incr`
+    /// is a capture of the nested closure
+    ///
+    /// ```rust,ignore(cannot-test-this-because-pseduo-code)
+    /// let p = ..;
+    /// let c = || {
+    ///    let incr = 10;
+    ///    let nested = || p.x += incr;
+    /// }
+    /// ```
+    ///
+    /// - When reporting the Place back to the Delegate, ensure that the UpvarId uses the enclosing
+    /// closure as the DefId.
+    fn walk_captures(&mut self, closure_expr: &hir::Expr<'_>) {
         debug!("walk_captures({:?})", closure_expr);
 
-        let closure_def_id = self.tcx().hir().local_def_id(closure_expr.hir_id);
-        if let Some(upvars) = self.tcx().upvars_mentioned(closure_def_id) {
-            for &var_id in upvars.keys() {
-                let upvar_id = ty::UpvarId {
-                    var_path: ty::UpvarPath { hir_id: var_id },
-                    closure_expr_id: closure_def_id,
-                };
-                let upvar_capture = self.mc.typeck_results.upvar_capture(upvar_id);
-                let captured_place = return_if_err!(self.cat_captured_var(
-                    closure_expr.hir_id,
-                    fn_decl_span,
-                    var_id,
-                ));
-                match upvar_capture {
-                    ty::UpvarCapture::ByValue(_) => {
-                        let mode = copy_or_move(&self.mc, &captured_place);
-                        self.delegate.consume(&captured_place, mode);
-                    }
-                    ty::UpvarCapture::ByRef(upvar_borrow) => {
-                        self.delegate.borrow(&captured_place, upvar_borrow.kind);
+        let closure_def_id = self.tcx().hir().local_def_id(closure_expr.hir_id).to_def_id();
+        let upvars = self.tcx().upvars_mentioned(self.body_owner);
+
+        // For purposes of this function, generator and closures are equivalent.
+        let body_owner_is_closure = match self.tcx().type_of(self.body_owner.to_def_id()).kind() {
+            ty::Closure(..) | ty::Generator(..) => true,
+            _ => false,
+        };
+
+        if let Some(min_captures) = self.mc.typeck_results.closure_min_captures.get(&closure_def_id)
+        {
+            for (var_hir_id, min_list) in min_captures.iter() {
+                if upvars.map_or(body_owner_is_closure, |upvars| !upvars.contains_key(var_hir_id)) {
+                    // The nested closure might be capturing the current (enclosing) closure's local variables.
+                    // We check if the root variable is ever mentioned within the enclosing closure, if not
+                    // then for the current body (if it's a closure) these aren't captures, we will ignore them.
+                    continue;
+                }
+                for captured_place in min_list {
+                    let place = &captured_place.place;
+                    let capture_info = captured_place.info;
+
+                    let place_base = if body_owner_is_closure {
+                        // Mark the place to be captured by the enclosing closure
+                        PlaceBase::Upvar(ty::UpvarId::new(*var_hir_id, self.body_owner))
+                    } else {
+                        // If the body owner isn't a closure then the variable must
+                        // be a local variable
+                        PlaceBase::Local(*var_hir_id)
+                    };
+                    let place_with_id = PlaceWithHirId::new(
+                        capture_info.expr_id.unwrap_or(closure_expr.hir_id),
+                        place.base_ty,
+                        place_base,
+                        place.projections.clone(),
+                    );
+
+                    match capture_info.capture_kind {
+                        ty::UpvarCapture::ByValue(_) => {
+                            let mode = copy_or_move(&self.mc, &place_with_id);
+                            self.delegate.consume(&place_with_id, place_with_id.hir_id, mode);
+                        }
+                        ty::UpvarCapture::ByRef(upvar_borrow) => {
+                            self.delegate.borrow(
+                                &place_with_id,
+                                place_with_id.hir_id,
+                                upvar_borrow.kind,
+                            );
+                        }
                     }
                 }
             }
         }
-    }
-
-    fn cat_captured_var(
-        &mut self,
-        closure_hir_id: hir::HirId,
-        closure_span: Span,
-        var_id: hir::HirId,
-    ) -> mc::McResult<PlaceWithHirId<'tcx>> {
-        // Create the place for the variable being borrowed, from the
-        // perspective of the creator (parent) of the closure.
-        let var_ty = self.mc.node_ty(var_id)?;
-        self.mc.cat_res(closure_hir_id, closure_span, var_ty, Res::Local(var_id))
     }
 }
 

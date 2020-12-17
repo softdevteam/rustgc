@@ -61,11 +61,13 @@ This API is completely unstable and subject to change.
 #![feature(box_syntax)]
 #![feature(crate_visibility_modifier)]
 #![feature(in_band_lifetimes)]
+#![feature(is_sorted)]
 #![feature(nll)]
 #![feature(or_patterns)]
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(slice_partition_dedup)]
+#![feature(control_flow_enum)]
 #![recursion_limit = "256"]
 
 #[macro_use]

@@ -527,6 +527,10 @@ impl Step for Rustc {
         cargo.rustdocflag("--document-private-items");
         cargo.rustdocflag("--enable-index-page");
         cargo.rustdocflag("-Zunstable-options");
+        // cfg(not(bootstrap)), can be removed on the next beta bump
+        if stage != 0 {
+            cargo.rustdocflag("-Znormalize-docs");
+        }
         compile::rustc_cargo(builder, &mut cargo, target);
 
         // Only include compiler crates, no dependencies of those, such as `libc`.
@@ -535,8 +539,12 @@ impl Step for Rustc {
         // Find dependencies for top level crates.
         let mut compiler_crates = HashSet::new();
         for root_crate in &["rustc_driver", "rustc_codegen_llvm", "rustc_codegen_ssa"] {
-            compiler_crates
-                .extend(builder.in_tree_crates(root_crate).into_iter().map(|krate| krate.name));
+            compiler_crates.extend(
+                builder
+                    .in_tree_crates(root_crate, Some(target))
+                    .into_iter()
+                    .map(|krate| krate.name),
+            );
         }
 
         for krate in &compiler_crates {
@@ -722,6 +730,7 @@ fn symlink_dir_force(config: &Config, src: &Path, dst: &Path) -> io::Result<()> 
 pub struct RustcBook {
     pub compiler: Compiler,
     pub target: TargetSelection,
+    pub validate: bool,
 }
 
 impl Step for RustcBook {
@@ -738,6 +747,7 @@ impl Step for RustcBook {
         run.builder.ensure(RustcBook {
             compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
+            validate: false,
         });
     }
 
@@ -767,6 +777,9 @@ impl Step for RustcBook {
         cmd.arg("--rustc-target").arg(&self.target.rustc_target_arg());
         if builder.config.verbose() {
             cmd.arg("--verbose");
+        }
+        if self.validate {
+            cmd.arg("--validate");
         }
         // If the lib directories are in an unusual location (changed in
         // config.toml), then this needs to explicitly update the dylib search

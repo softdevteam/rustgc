@@ -64,7 +64,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         };
 
         let sig = callee_ty.fn_sig(bx.tcx());
-        let sig = bx.tcx().normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), &sig);
+        let sig = bx.tcx().normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), sig);
         let arg_tys = sig.inputs();
         let ret_ty = sig.output();
         let name = bx.tcx().item_name(def_id);
@@ -439,16 +439,20 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 match split[1] {
                     "cxchg" | "cxchgweak" => {
                         let ty = substs.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
                             let weak = split[1] == "cxchgweak";
-                            let pair = bx.atomic_cmpxchg(
-                                args[0].immediate(),
-                                args[1].immediate(),
-                                args[2].immediate(),
-                                order,
-                                failorder,
-                                weak,
-                            );
+                            let mut dst = args[0].immediate();
+                            let mut cmp = args[1].immediate();
+                            let mut src = args[2].immediate();
+                            if ty.is_unsafe_ptr() {
+                                // Some platforms do not support atomic operations on pointers,
+                                // so we cast to integer first.
+                                let ptr_llty = bx.type_ptr_to(bx.type_isize());
+                                dst = bx.pointercast(dst, ptr_llty);
+                                cmp = bx.ptrtoint(cmp, bx.type_isize());
+                                src = bx.ptrtoint(src, bx.type_isize());
+                            }
+                            let pair = bx.atomic_cmpxchg(dst, cmp, src, order, failorder, weak);
                             let val = bx.extract_value(pair, 0);
                             let success = bx.extract_value(pair, 1);
                             let val = bx.from_immediate(val);
@@ -466,9 +470,23 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                     "load" => {
                         let ty = substs.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() {
-                            let size = bx.layout_of(ty).size;
-                            bx.atomic_load(args[0].immediate(), order, size)
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
+                            let layout = bx.layout_of(ty);
+                            let size = layout.size;
+                            let mut source = args[0].immediate();
+                            if ty.is_unsafe_ptr() {
+                                // Some platforms do not support atomic operations on pointers,
+                                // so we cast to integer first...
+                                let ptr_llty = bx.type_ptr_to(bx.type_isize());
+                                source = bx.pointercast(source, ptr_llty);
+                            }
+                            let result = bx.atomic_load(source, order, size);
+                            if ty.is_unsafe_ptr() {
+                                // ... and then cast the result back to a pointer
+                                bx.inttoptr(result, bx.backend_type(layout))
+                            } else {
+                                result
+                            }
                         } else {
                             return invalid_monomorphization(ty);
                         }
@@ -476,9 +494,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                     "store" => {
                         let ty = substs.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
                             let size = bx.layout_of(ty).size;
-                            bx.atomic_store(args[1].immediate(), args[0].immediate(), order, size);
+                            let mut val = args[1].immediate();
+                            let mut ptr = args[0].immediate();
+                            if ty.is_unsafe_ptr() {
+                                // Some platforms do not support atomic operations on pointers,
+                                // so we cast to integer first.
+                                let ptr_llty = bx.type_ptr_to(bx.type_isize());
+                                ptr = bx.pointercast(ptr, ptr_llty);
+                                val = bx.ptrtoint(val, bx.type_isize());
+                            }
+                            bx.atomic_store(val, ptr, order, size);
                             return;
                         } else {
                             return invalid_monomorphization(ty);

@@ -9,6 +9,7 @@ use std::hash::Hash;
 use rustc_middle::mir;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::def_id::DefId;
+use rustc_target::abi::Size;
 
 use super::{
     AllocId, Allocation, AllocationExtra, CheckInAllocMsg, Frame, ImmTy, InterpCx, InterpResult,
@@ -176,7 +177,7 @@ pub trait Machine<'mir, 'tcx>: Sized {
     ) -> InterpResult<'tcx>;
 
     /// Called to evaluate `Abort` MIR terminator.
-    fn abort(_ecx: &mut InterpCx<'mir, 'tcx, Self>) -> InterpResult<'tcx, !> {
+    fn abort(_ecx: &mut InterpCx<'mir, 'tcx, Self>, _msg: String) -> InterpResult<'tcx, !> {
         throw_unsup_format!("aborting execution is not supported")
     }
 
@@ -299,6 +300,15 @@ pub trait Machine<'mir, 'tcx>: Sized {
         Ok(())
     }
 
+    /// Called after initializing static memory using the interpreter.
+    fn after_static_mem_initialized(
+        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        _ptr: Pointer<Self::PointerTag>,
+        _size: Size,
+    ) -> InterpResult<'tcx> {
+        Ok(())
+    }
+
     /// Executes a retagging operation
     #[inline]
     fn retag(
@@ -366,9 +376,9 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
     type PointerTag = ();
     type ExtraFnVal = !;
 
-    type MemoryKind = !;
-    type MemoryMap = rustc_data_structures::fx::FxHashMap<AllocId, (MemoryKind<!>, Allocation)>;
-    const GLOBAL_KIND: Option<!> = None; // no copying of globals from `tcx` to machine memory
+    type MemoryMap =
+        rustc_data_structures::fx::FxHashMap<AllocId, (MemoryKind<Self::MemoryKind>, Allocation)>;
+    const GLOBAL_KIND: Option<Self::MemoryKind> = None; // no copying of globals from `tcx` to machine memory
 
     type AllocExtra = ();
     type FrameExtra = ();
@@ -407,7 +417,7 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
         _memory_extra: &Self::MemoryExtra,
         _id: AllocId,
         alloc: Cow<'b, Allocation>,
-        _kind: Option<MemoryKind<!>>,
+        _kind: Option<MemoryKind<Self::MemoryKind>>,
     ) -> (Cow<'b, Allocation<Self::PointerTag>>, Self::PointerTag) {
         // We do not use a tag so we can just cheaply forward the allocation
         (alloc, ())

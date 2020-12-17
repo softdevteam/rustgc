@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rustc_data_structures::sync::Lrc;
+use rustc_session::Session;
 use rustc_span::edition::Edition;
 
 use crate::clean;
@@ -10,7 +12,7 @@ use crate::formats::cache::{Cache, CACHE_KEY};
 /// Allows for different backends to rustdoc to be used with the `run_format()` function. Each
 /// backend renderer has hooks for initialization, documenting an item, entering and exiting a
 /// module, and cleanup/finalizing output.
-pub trait FormatRenderer: Clone {
+crate trait FormatRenderer: Clone {
     /// Sets up any state required for the renderer. When this is called the cache has already been
     /// populated.
     fn init(
@@ -19,6 +21,7 @@ pub trait FormatRenderer: Clone {
         render_info: RenderInfo,
         edition: Edition,
         cache: &mut Cache,
+        sess: Lrc<Session>,
     ) -> Result<(Self, clean::Crate), Error>;
 
     /// Renders a single non-module item. This means no recursive sub-item rendering is required.
@@ -43,12 +46,13 @@ pub trait FormatRenderer: Clone {
 }
 
 /// Main method for rendering a crate.
-pub fn run_format<T: FormatRenderer>(
+crate fn run_format<T: FormatRenderer>(
     krate: clean::Crate,
     options: RenderOptions,
     render_info: RenderInfo,
     diag: &rustc_errors::Handler,
     edition: Edition,
+    sess: Lrc<Session>,
 ) -> Result<(), Error> {
     let (krate, mut cache) = Cache::from_krate(
         render_info.clone(),
@@ -59,7 +63,7 @@ pub fn run_format<T: FormatRenderer>(
     );
 
     let (mut format_renderer, mut krate) =
-        T::init(krate, options, render_info, edition, &mut cache)?;
+        T::init(krate, options, render_info, edition, &mut cache, sess)?;
 
     let cache = Arc::new(cache);
     // Freeze the cache now that the index has been built. Put an Arc into TLS for future
@@ -86,7 +90,7 @@ pub fn run_format<T: FormatRenderer>(
             }
 
             cx.mod_item_in(&item, &name, &cache)?;
-            let module = match item.inner {
+            let module = match item.kind {
                 clean::StrippedItem(box clean::ModuleItem(m)) | clean::ModuleItem(m) => m,
                 _ => unreachable!(),
             };

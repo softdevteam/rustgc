@@ -21,6 +21,7 @@ pub const BUILTIN_ATTRIBUTES: &[(&str, DeprecationStatus)] = &[
         DeprecationStatus::Replaced("cognitive_complexity"),
     ),
     ("dump", DeprecationStatus::None),
+    ("msrv", DeprecationStatus::None),
 ];
 
 pub struct LimitStack {
@@ -57,7 +58,7 @@ pub fn get_attr<'a>(
     name: &'static str,
 ) -> impl Iterator<Item = &'a ast::Attribute> {
     attrs.iter().filter(move |attr| {
-        let attr = if let ast::AttrKind::Normal(ref attr) = attr.kind {
+        let attr = if let ast::AttrKind::Normal(ref attr, _) = attr.kind {
             attr
         } else {
             return false;
@@ -121,6 +122,24 @@ fn parse_attrs<F: FnMut(u64)>(sess: &Session, attrs: &[ast::Attribute], name: &'
             sess.span_err(attr.span, "bad clippy attribute");
         }
     }
+}
+
+pub fn get_unique_inner_attr(sess: &Session, attrs: &[ast::Attribute], name: &'static str) -> Option<ast::Attribute> {
+    let mut unique_attr = None;
+    for attr in get_attr(sess, attrs, name) {
+        match attr.style {
+            ast::AttrStyle::Inner if unique_attr.is_none() => unique_attr = Some(attr.clone()),
+            ast::AttrStyle::Inner => {
+                sess.struct_span_err(attr.span, &format!("`{}` is defined multiple times", name))
+                    .span_note(unique_attr.as_ref().unwrap().span, "first definition found here")
+                    .emit();
+            },
+            ast::AttrStyle::Outer => {
+                sess.span_err(attr.span, &format!("`{}` cannot be an outer attribute", name));
+            },
+        }
+    }
+    unique_attr
 }
 
 /// Return true if the attributes contain any of `proc_macro`,

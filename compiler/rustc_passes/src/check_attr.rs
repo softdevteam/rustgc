@@ -78,13 +78,19 @@ impl CheckAttrVisitor<'tcx> {
             } else if self.tcx.sess.check_name(attr, sym::track_caller) {
                 self.check_track_caller(&attr.span, attrs, span, target)
             } else if self.tcx.sess.check_name(attr, sym::doc) {
-                self.check_doc_alias(attr, hir_id, target)
+                self.check_doc_attrs(attr, hir_id, target)
             } else if self.tcx.sess.check_name(attr, sym::no_link) {
                 self.check_no_link(&attr, span, target)
             } else if self.tcx.sess.check_name(attr, sym::export_name) {
                 self.check_export_name(&attr, span, target)
             } else if self.tcx.sess.check_name(attr, sym::rustc_args_required_const) {
                 self.check_rustc_args_required_const(&attr, span, target, item)
+            } else if self.tcx.sess.check_name(attr, sym::allow_internal_unstable) {
+                self.check_allow_internal_unstable(&attr, span, target, &attrs)
+            } else if self.tcx.sess.check_name(attr, sym::rustc_allow_const_fn_unstable) {
+                self.check_rustc_allow_const_fn_unstable(hir_id, &attr, span, target)
+            } else if self.tcx.sess.check_name(attr, sym::naked) {
+                self.check_naked(attr, span, target)
             } else {
                 // lint-only checks
                 if self.tcx.sess.check_name(attr, sym::cold) {
@@ -104,7 +110,7 @@ impl CheckAttrVisitor<'tcx> {
             return;
         }
 
-        if matches!(target, Target::Fn | Target::Method(_) | Target::ForeignFn) {
+        if matches!(target, Target::Closure | Target::Fn | Target::Method(_) | Target::ForeignFn) {
             self.tcx.ensure().codegen_fn_attrs(self.tcx.hir().local_def_id(hir_id));
         }
 
@@ -158,6 +164,25 @@ impl CheckAttrVisitor<'tcx> {
         }
     }
 
+    /// Checks if `#[naked]` is applied to a function definition.
+    fn check_naked(&self, attr: &Attribute, span: &Span, target: Target) -> bool {
+        match target {
+            Target::Fn
+            | Target::Method(MethodKind::Trait { body: true } | MethodKind::Inherent) => true,
+            _ => {
+                self.tcx
+                    .sess
+                    .struct_span_err(
+                        attr.span,
+                        "attribute should be applied to a function definition",
+                    )
+                    .span_label(*span, "not a function definition")
+                    .emit();
+                false
+            }
+        }
+    }
+
     /// Checks if a `#[track_caller]` is applied to a non-naked function. Returns `true` if valid.
     fn check_track_caller(
         &self,
@@ -167,7 +192,7 @@ impl CheckAttrVisitor<'tcx> {
         target: Target,
     ) -> bool {
         match target {
-            _ if self.tcx.sess.contains_name(attrs, sym::naked) => {
+            _ if attrs.iter().any(|attr| attr.has_name(sym::naked)) => {
                 struct_span_err!(
                     self.tcx.sess,
                     *attr_span,
@@ -195,7 +220,7 @@ impl CheckAttrVisitor<'tcx> {
     /// Checks if the `#[non_exhaustive]` attribute on an `item` is valid. Returns `true` if valid.
     fn check_non_exhaustive(&self, attr: &Attribute, span: &Span, target: Target) -> bool {
         match target {
-            Target::Struct | Target::Enum => true,
+            Target::Struct | Target::Enum | Target::Variant => true,
             _ => {
                 struct_span_err!(
                     self.tcx.sess,
@@ -262,99 +287,159 @@ impl CheckAttrVisitor<'tcx> {
         }
     }
 
-    fn doc_alias_str_error(&self, meta: &NestedMetaItem) {
+    fn doc_attr_str_error(&self, meta: &NestedMetaItem, attr_name: &str) {
         self.tcx
             .sess
             .struct_span_err(
                 meta.span(),
-                "doc alias attribute expects a string: #[doc(alias = \"0\")]",
+                &format!("doc {0} attribute expects a string: #[doc({0} = \"a\")]", attr_name),
             )
             .emit();
     }
 
-    fn check_doc_alias(&self, attr: &Attribute, hir_id: HirId, target: Target) -> bool {
+    fn check_doc_alias(&self, meta: &NestedMetaItem, hir_id: HirId, target: Target) -> bool {
+        let doc_alias = meta.value_str().map(|s| s.to_string()).unwrap_or_else(String::new);
+        if doc_alias.is_empty() {
+            self.doc_attr_str_error(meta, "alias");
+            return false;
+        }
+        if let Some(c) =
+            doc_alias.chars().find(|&c| c == '"' || c == '\'' || (c.is_whitespace() && c != ' '))
+        {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.name_value_literal_span().unwrap_or_else(|| meta.span()),
+                    &format!("{:?} character isn't allowed in `#[doc(alias = \"...\")]`", c,),
+                )
+                .emit();
+            return false;
+        }
+        if doc_alias.starts_with(' ') || doc_alias.ends_with(' ') {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.name_value_literal_span().unwrap_or_else(|| meta.span()),
+                    "`#[doc(alias = \"...\")]` cannot start or end with ' '",
+                )
+                .emit();
+            return false;
+        }
+        if let Some(err) = match target {
+            Target::Impl => Some("implementation block"),
+            Target::ForeignMod => Some("extern block"),
+            Target::AssocTy => {
+                let parent_hir_id = self.tcx.hir().get_parent_item(hir_id);
+                let containing_item = self.tcx.hir().expect_item(parent_hir_id);
+                if Target::from_item(containing_item) == Target::Impl {
+                    Some("type alias in implementation block")
+                } else {
+                    None
+                }
+            }
+            Target::AssocConst => {
+                let parent_hir_id = self.tcx.hir().get_parent_item(hir_id);
+                let containing_item = self.tcx.hir().expect_item(parent_hir_id);
+                // We can't link to trait impl's consts.
+                let err = "associated constant in trait implementation block";
+                match containing_item.kind {
+                    ItemKind::Impl { of_trait: Some(_), .. } => Some(err),
+                    _ => None,
+                }
+            }
+            _ => None,
+        } {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.span(),
+                    &format!("`#[doc(alias = \"...\")]` isn't allowed on {}", err),
+                )
+                .emit();
+            return false;
+        }
+        true
+    }
+
+    fn check_doc_keyword(&self, meta: &NestedMetaItem, hir_id: HirId) -> bool {
+        let doc_keyword = meta.value_str().map(|s| s.to_string()).unwrap_or_else(String::new);
+        if doc_keyword.is_empty() {
+            self.doc_attr_str_error(meta, "keyword");
+            return false;
+        }
+        match self.tcx.hir().expect_item(hir_id).kind {
+            ItemKind::Mod(ref module) => {
+                if !module.item_ids.is_empty() {
+                    self.tcx
+                        .sess
+                        .struct_span_err(
+                            meta.span(),
+                            "`#[doc(keyword = \"...\")]` can only be used on empty modules",
+                        )
+                        .emit();
+                    return false;
+                }
+            }
+            _ => {
+                self.tcx
+                    .sess
+                    .struct_span_err(
+                        meta.span(),
+                        "`#[doc(keyword = \"...\")]` can only be used on modules",
+                    )
+                    .emit();
+                return false;
+            }
+        }
+        if !rustc_lexer::is_ident(&doc_keyword) {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.name_value_literal_span().unwrap_or_else(|| meta.span()),
+                    &format!("`{}` is not a valid identifier", doc_keyword),
+                )
+                .emit();
+            return false;
+        }
+        true
+    }
+
+    fn check_attr_crate_level(
+        &self,
+        meta: &NestedMetaItem,
+        hir_id: HirId,
+        attr_name: &str,
+    ) -> bool {
+        if CRATE_HIR_ID == hir_id {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.span(),
+                    &format!(
+                        "`#![doc({} = \"...\")]` isn't allowed as a crate level attribute",
+                        attr_name,
+                    ),
+                )
+                .emit();
+            return false;
+        }
+        true
+    }
+
+    fn check_doc_attrs(&self, attr: &Attribute, hir_id: HirId, target: Target) -> bool {
         if let Some(mi) = attr.meta() {
             if let Some(list) = mi.meta_item_list() {
                 for meta in list {
                     if meta.has_name(sym::alias) {
-                        if !meta.is_value_str() {
-                            self.doc_alias_str_error(meta);
-                            return false;
-                        }
-                        let doc_alias =
-                            meta.value_str().map(|s| s.to_string()).unwrap_or_else(String::new);
-                        if doc_alias.is_empty() {
-                            self.doc_alias_str_error(meta);
-                            return false;
-                        }
-                        if let Some(c) = doc_alias
-                            .chars()
-                            .find(|&c| c == '"' || c == '\'' || (c.is_whitespace() && c != ' '))
+                        if !self.check_attr_crate_level(meta, hir_id, "alias")
+                            || !self.check_doc_alias(meta, hir_id, target)
                         {
-                            self.tcx
-                                .sess
-                                .struct_span_err(
-                                    meta.span(),
-                                    &format!(
-                                        "{:?} character isn't allowed in `#[doc(alias = \"...\")]`",
-                                        c,
-                                    ),
-                                )
-                                .emit();
                             return false;
                         }
-                        if doc_alias.starts_with(' ') || doc_alias.ends_with(' ') {
-                            self.tcx
-                                .sess
-                                .struct_span_err(
-                                    meta.span(),
-                                    "`#[doc(alias = \"...\")]` cannot start or end with ' '",
-                                )
-                                .emit();
-                            return false;
-                        }
-                        if let Some(err) = match target {
-                            Target::Impl => Some("implementation block"),
-                            Target::ForeignMod => Some("extern block"),
-                            Target::AssocTy => {
-                                let parent_hir_id = self.tcx.hir().get_parent_item(hir_id);
-                                let containing_item = self.tcx.hir().expect_item(parent_hir_id);
-                                if Target::from_item(containing_item) == Target::Impl {
-                                    Some("type alias in implementation block")
-                                } else {
-                                    None
-                                }
-                            }
-                            Target::AssocConst => {
-                                let parent_hir_id = self.tcx.hir().get_parent_item(hir_id);
-                                let containing_item = self.tcx.hir().expect_item(parent_hir_id);
-                                // We can't link to trait impl's consts.
-                                let err = "associated constant in trait implementation block";
-                                match containing_item.kind {
-                                    ItemKind::Impl { of_trait: Some(_), .. } => Some(err),
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        } {
-                            self.tcx
-                                .sess
-                                .struct_span_err(
-                                    meta.span(),
-                                    &format!("`#[doc(alias = \"...\")]` isn't allowed on {}", err),
-                                )
-                                .emit();
-                            return false;
-                        }
-                        if CRATE_HIR_ID == hir_id {
-                            self.tcx
-                                .sess
-                                .struct_span_err(
-                                    meta.span(),
-                                    "`#![doc(alias = \"...\")]` isn't allowed as a crate \
-                                     level attribute",
-                                )
-                                .emit();
+                    } else if meta.has_name(sym::keyword) {
+                        if !self.check_attr_crate_level(meta, hir_id, "keyword")
+                            || !self.check_doc_keyword(meta, hir_id)
+                        {
                             return false;
                         }
                     }
@@ -460,60 +545,68 @@ impl CheckAttrVisitor<'tcx> {
         target: Target,
         item: Option<ItemLike<'_>>,
     ) -> bool {
-        if let Target::Fn | Target::Method(..) | Target::ForeignFn = target {
-            let mut invalid_args = vec![];
-            for meta in attr.meta_item_list().expect("no meta item list") {
-                if let Some(LitKind::Int(val, _)) = meta.literal().map(|lit| &lit.kind) {
-                    if let Some(ItemLike::Item(Item {
-                        kind: ItemKind::Fn(FnSig { decl, .. }, ..),
-                        ..
-                    }))
-                    | Some(ItemLike::ForeignItem(ForeignItem {
-                        kind: ForeignItemKind::Fn(decl, ..),
-                        ..
-                    })) = item
-                    {
-                        let arg_count = decl.inputs.len() as u128;
-                        if *val >= arg_count {
-                            let span = meta.span();
-                            self.tcx
-                                .sess
-                                .struct_span_err(span, "index exceeds number of arguments")
-                                .span_label(
-                                    span,
-                                    format!(
-                                        "there {} only {} argument{}",
-                                        if arg_count != 1 { "are" } else { "is" },
-                                        arg_count,
-                                        pluralize!(arg_count)
-                                    ),
-                                )
-                                .emit();
-                            return false;
-                        }
-                    } else {
-                        bug!("should be a function item");
-                    }
-                } else {
-                    invalid_args.push(meta.span());
-                }
-            }
-            if !invalid_args.is_empty() {
-                self.tcx
-                    .sess
-                    .struct_span_err(invalid_args, "arguments should be non-negative integers")
-                    .emit();
-                false
-            } else {
-                true
-            }
-        } else {
+        let is_function = matches!(target, Target::Fn | Target::Method(..) | Target::ForeignFn);
+        if !is_function {
             self.tcx
                 .sess
                 .struct_span_err(attr.span, "attribute should be applied to a function")
                 .span_label(*span, "not a function")
                 .emit();
+            return false;
+        }
+
+        let list = match attr.meta_item_list() {
+            // The attribute form is validated on AST.
+            None => return false,
+            Some(it) => it,
+        };
+
+        let mut invalid_args = vec![];
+        for meta in list {
+            if let Some(LitKind::Int(val, _)) = meta.literal().map(|lit| &lit.kind) {
+                if let Some(ItemLike::Item(Item {
+                    kind: ItemKind::Fn(FnSig { decl, .. }, ..),
+                    ..
+                }))
+                | Some(ItemLike::ForeignItem(ForeignItem {
+                    kind: ForeignItemKind::Fn(decl, ..),
+                    ..
+                })) = item
+                {
+                    let arg_count = decl.inputs.len() as u128;
+                    if *val >= arg_count {
+                        let span = meta.span();
+                        self.tcx
+                            .sess
+                            .struct_span_err(span, "index exceeds number of arguments")
+                            .span_label(
+                                span,
+                                format!(
+                                    "there {} only {} argument{}",
+                                    if arg_count != 1 { "are" } else { "is" },
+                                    arg_count,
+                                    pluralize!(arg_count)
+                                ),
+                            )
+                            .emit();
+                        return false;
+                    }
+                } else {
+                    bug!("should be a function item");
+                }
+            } else {
+                invalid_args.push(meta.span());
+            }
+        }
+
+        if !invalid_args.is_empty() {
+            self.tcx
+                .sess
+                .struct_span_err(invalid_args, "arguments should be non-negative integers")
+                .emit();
             false
+        } else {
+            true
         }
     }
 
@@ -587,6 +680,9 @@ impl CheckAttrVisitor<'tcx> {
 
         for hint in &hints {
             let (article, allowed_targets) = match hint.name_or_empty() {
+                _ if !matches!(target, Target::Struct | Target::Enum | Target::Union) => {
+                    ("a", "struct, enum, or union")
+                }
                 name @ sym::C | name @ sym::align => {
                     is_c |= name == sym::C;
                     match target {
@@ -652,12 +748,16 @@ impl CheckAttrVisitor<'tcx> {
                 }
                 _ => continue,
             };
-            self.emit_repr_error(
+
+            struct_span_err!(
+                self.tcx.sess,
                 hint.span(),
-                *span,
-                &format!("attribute should be applied to {}", allowed_targets),
-                &format!("not {} {}", article, allowed_targets),
+                E0517,
+                "{}",
+                &format!("attribute should be applied to {} {}", article, allowed_targets)
             )
+            .span_label(*span, &format!("not {} {}", article, allowed_targets))
+            .emit();
         }
 
         // Just point at all repr hints if there are any incompatibilities.
@@ -703,56 +803,6 @@ impl CheckAttrVisitor<'tcx> {
         }
     }
 
-    fn emit_repr_error(
-        &self,
-        hint_span: Span,
-        label_span: Span,
-        hint_message: &str,
-        label_message: &str,
-    ) {
-        struct_span_err!(self.tcx.sess, hint_span, E0517, "{}", hint_message)
-            .span_label(label_span, label_message)
-            .emit();
-    }
-
-    fn check_stmt_attributes(&self, stmt: &hir::Stmt<'_>) {
-        // When checking statements ignore expressions, they will be checked later
-        if let hir::StmtKind::Local(ref l) = stmt.kind {
-            self.check_attributes(l.hir_id, &l.attrs, &stmt.span, Target::Statement, None);
-            for attr in l.attrs.iter() {
-                if self.tcx.sess.check_name(attr, sym::repr) {
-                    self.emit_repr_error(
-                        attr.span,
-                        stmt.span,
-                        "attribute should not be applied to a statement",
-                        "not a struct, enum, or union",
-                    );
-                }
-            }
-        }
-    }
-
-    fn check_expr_attributes(&self, expr: &hir::Expr<'_>) {
-        let target = match expr.kind {
-            hir::ExprKind::Closure(..) => Target::Closure,
-            _ => Target::Expression,
-        };
-        self.check_attributes(expr.hir_id, &expr.attrs, &expr.span, target, None);
-        for attr in expr.attrs.iter() {
-            if self.tcx.sess.check_name(attr, sym::repr) {
-                self.emit_repr_error(
-                    attr.span,
-                    expr.span,
-                    "attribute should not be applied to an expression",
-                    "not defining a struct, enum, or union",
-                );
-            }
-        }
-        if target == Target::Closure {
-            self.tcx.ensure().codegen_fn_attrs(self.tcx.hir().local_def_id(expr.hir_id));
-        }
-    }
-
     fn check_used(&self, attrs: &'hir [Attribute], target: Target) {
         for attr in attrs {
             if self.tcx.sess.check_name(attr, sym::used) && target != Target::Static {
@@ -761,6 +811,55 @@ impl CheckAttrVisitor<'tcx> {
                     .span_err(attr.span, "attribute must be applied to a `static` variable");
             }
         }
+    }
+
+    /// Outputs an error for `#[allow_internal_unstable]` which can only be applied to macros.
+    /// (Allows proc_macro functions)
+    fn check_allow_internal_unstable(
+        &self,
+        attr: &Attribute,
+        span: &Span,
+        target: Target,
+        attrs: &[Attribute],
+    ) -> bool {
+        debug!("Checking target: {:?}", target);
+        if target == Target::Fn {
+            for attr in attrs {
+                if self.tcx.sess.is_proc_macro_attr(attr) {
+                    debug!("Is proc macro attr");
+                    return true;
+                }
+            }
+            debug!("Is not proc macro attr");
+        }
+        self.tcx
+            .sess
+            .struct_span_err(attr.span, "attribute should be applied to a macro")
+            .span_label(*span, "not a macro")
+            .emit();
+        false
+    }
+
+    /// Outputs an error for `#[allow_internal_unstable]` which can only be applied to macros.
+    /// (Allows proc_macro functions)
+    fn check_rustc_allow_const_fn_unstable(
+        &self,
+        hir_id: HirId,
+        attr: &Attribute,
+        span: &Span,
+        target: Target,
+    ) -> bool {
+        if let Target::Fn | Target::Method(_) = target {
+            if self.tcx.is_const_fn_raw(self.tcx.hir().local_def_id(hir_id)) {
+                return true;
+            }
+        }
+        self.tcx
+            .sess
+            .struct_span_err(attr.span, "attribute should be applied to `const fn`")
+            .span_label(*span, "not a `const fn`")
+            .emit();
+        false
     }
 }
 
@@ -808,13 +907,31 @@ impl Visitor<'tcx> for CheckAttrVisitor<'tcx> {
     }
 
     fn visit_stmt(&mut self, stmt: &'tcx hir::Stmt<'tcx>) {
-        self.check_stmt_attributes(stmt);
+        // When checking statements ignore expressions, they will be checked later.
+        if let hir::StmtKind::Local(ref l) = stmt.kind {
+            self.check_attributes(l.hir_id, &l.attrs, &stmt.span, Target::Statement, None);
+        }
         intravisit::walk_stmt(self, stmt)
     }
 
     fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {
-        self.check_expr_attributes(expr);
+        let target = match expr.kind {
+            hir::ExprKind::Closure(..) => Target::Closure,
+            _ => Target::Expression,
+        };
+
+        self.check_attributes(expr.hir_id, &expr.attrs, &expr.span, target, None);
         intravisit::walk_expr(self, expr)
+    }
+
+    fn visit_variant(
+        &mut self,
+        variant: &'tcx hir::Variant<'tcx>,
+        generics: &'tcx hir::Generics<'tcx>,
+        item_id: HirId,
+    ) {
+        self.check_attributes(variant.id, variant.attrs, &variant.span, Target::Variant, None);
+        intravisit::walk_variant(self, variant, generics, item_id)
     }
 }
 

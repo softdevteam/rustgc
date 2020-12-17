@@ -137,7 +137,6 @@
 //! [`thread::current`]: current
 //! [`thread::Result`]: Result
 //! [`unpark`]: Thread::unpark
-//! [`Thread::name`]: Thread::name
 //! [`thread::park_timeout`]: park_timeout
 //! [`Cell`]: crate::cell::Cell
 //! [`RefCell`]: crate::cell::RefCell
@@ -457,10 +456,15 @@ impl Builder {
         let my_packet: Arc<UnsafeCell<Option<Result<T>>>> = Arc::new(UnsafeCell::new(None));
         let their_packet = my_packet.clone();
 
+        let output_capture = crate::io::set_output_capture(None);
+        crate::io::set_output_capture(output_capture.clone());
+
         let main = move || {
             if let Some(name) = their_thread.cname() {
                 imp::Thread::set_name(name);
             }
+
+            crate::io::set_output_capture(output_capture);
 
             // SAFETY: the stack guard passed is the one for the current thread.
             // This means the current thread's stack and the new thread's stack

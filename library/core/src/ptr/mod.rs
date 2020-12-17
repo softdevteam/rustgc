@@ -16,12 +16,16 @@
 //! provided at this point are very minimal:
 //!
 //! * A [null] pointer is *never* valid, not even for accesses of [size zero][zst].
-//! * All pointers (except for the null pointer) are valid for all operations of
-//!   [size zero][zst].
 //! * For a pointer to be valid, it is necessary, but not always sufficient, that the pointer
 //!   be *dereferenceable*: the memory range of the given size starting at the pointer must all be
 //!   within the bounds of a single allocated object. Note that in Rust,
 //!   every (stack-allocated) variable is considered a separate allocated object.
+//! * Even for operations of [size zero][zst], the pointer must not be pointing to deallocated
+//!   memory, i.e., deallocation makes pointers invalid even for zero-sized operations. However,
+//!   casting any non-zero integer *literal* to a pointer is valid for zero-sized accesses, even if
+//!   some memory happens to exist at that address and gets deallocated. This corresponds to writing
+//!   your own allocator: allocating zero-sized objects is not very hard. The canonical way to
+//!   obtain a pointer that is valid for zero-sized accesses is [`NonNull::dangling`].
 //! * All accesses performed by functions in this module are *non-atomic* in the sense
 //!   of [atomic operations] used to synchronize between threads. This means it is
 //!   undefined behavior to perform two concurrent accesses to the same location from different
@@ -99,9 +103,9 @@ mod mut_ptr;
 ///   dropped normally.
 ///
 /// * It is friendlier to the optimizer to do this over [`ptr::read`] when
-///   dropping manually allocated memory (e.g., when writing Box/Rc/Vec),
-///   as the compiler doesn't need to prove that it's sound to elide the
-///   copy.
+///   dropping manually allocated memory (e.g., in the implementations of
+///   `Box`/`Rc`/`Vec`), as the compiler doesn't need to prove that it's
+///   sound to elide the copy.
 ///
 /// * It can be used to drop [pinned] data when `T` is not `repr(packed)`
 ///   (pinned data must not be moved before it is dropped).
@@ -1143,7 +1147,9 @@ pub unsafe fn write_volatile<T>(dst: *mut T, src: T) {
 pub(crate) unsafe fn align_offset<T: Sized>(p: *const T, a: usize) -> usize {
     // FIXME(#75598): Direct use of these intrinsics improves codegen significantly at opt-level <=
     // 1, where the method versions of these operations are not inlined.
-    use intrinsics::{unchecked_shl, unchecked_shr, unchecked_sub, wrapping_mul, wrapping_sub};
+    use intrinsics::{
+        unchecked_shl, unchecked_shr, unchecked_sub, wrapping_add, wrapping_mul, wrapping_sub,
+    };
 
     /// Calculate multiplicative modular inverse of `x` modulo `m`.
     ///
@@ -1198,8 +1204,17 @@ pub(crate) unsafe fn align_offset<T: Sized>(p: *const T, a: usize) -> usize {
     // SAFETY: `a` is a power-of-two, therefore non-zero.
     let a_minus_one = unsafe { unchecked_sub(a, 1) };
     if stride == 1 {
-        // `stride == 1` case can be computed more efficiently through `-p (mod a)`.
-        return wrapping_sub(0, p as usize) & a_minus_one;
+        // `stride == 1` case can be computed more simply through `-p (mod a)`, but doing so
+        // inhibits LLVM's ability to select instructions like `lea`. Instead we compute
+        //
+        //    round_up_to_next_alignment(p, a) - p
+        //
+        // which distributes operations around the load-bearing, but pessimizing `and` sufficiently
+        // for LLVM to be able to utilize the various optimizations it knows about.
+        return wrapping_sub(
+            wrapping_add(p as usize, a_minus_one) & wrapping_sub(0, a),
+            p as usize,
+        );
     }
 
     let pmoda = p as usize & a_minus_one;
