@@ -393,6 +393,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         may_dangle, Normal, template!(Word), dropck_eyepatch,
         "`may_dangle` has unstable semantics and may be removed in the future",
     ),
+    ungated!(no_trace, Normal, template!(Word)),
 
     // ==========================================================================
     // Internal attributes: Runtime related:

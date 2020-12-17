@@ -82,6 +82,10 @@ pub trait DerivedTypeMethods<'tcx>: BaseTypeMethods<'tcx> + MiscMethods<'tcx> {
         ty.is_freeze(self.tcx().at(DUMMY_SP), ty::ParamEnv::reveal_all())
     }
 
+    fn type_is_no_trace(&self, ty: Ty<'tcx>) -> bool {
+        ty.is_no_trace(self.tcx().at(DUMMY_SP), ty::ParamEnv::reveal_all())
+    }
+
     fn type_has_metadata(&self, ty: Ty<'tcx>) -> bool {
         let param_env = ty::ParamEnv::reveal_all();
         if ty.is_sized(self.tcx().at(DUMMY_SP), param_env) {

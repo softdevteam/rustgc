@@ -108,6 +108,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             sym::size_of
             | sym::pref_align_of
+            | sym::gc_layout
             | sym::min_align_of
             | sym::needs_drop
             | sym::needs_finalizer

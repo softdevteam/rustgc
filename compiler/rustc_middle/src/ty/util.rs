@@ -711,6 +711,13 @@ impl<'tcx> ty::TyS<'tcx> {
         self.is_trivially_freeze() || tcx_at.is_freeze_raw(param_env.and(self))
     }
 
+    // Checks whether values of this type `T` implement the `NoTrace` trait
+    // -- non-trace types are those that do not contain (either transitively
+    // or directly) pointers to GC'd types.
+    pub fn is_no_trace(&'tcx self, tcx_at: TyCtxtAt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        tcx_at.is_no_trace_raw(param_env.and(self))
+    }
+
     /// Fast path helper for testing if a type is `Freeze`.
     ///
     /// Returning true means the type is known to be `Freeze`. Returning
