@@ -35,11 +35,7 @@ fn inline(cx: &CodegenCx<'ll, '_>, val: &'ll Value, inline: InlineAttr) {
                 Attribute::NoInline.apply_llfn(Function, val);
             }
         }
-        None => {
-            Attribute::InlineHint.unapply_llfn(Function, val);
-            Attribute::AlwaysInline.unapply_llfn(Function, val);
-            Attribute::NoInline.unapply_llfn(Function, val);
-        }
+        None => {}
     };
 }
 
@@ -90,8 +86,7 @@ fn set_instrument_function(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
 
         // The function name varies on platforms.
         // See test/CodeGen/mcount.c in clang.
-        let mcount_name =
-            CString::new(cx.sess().target.options.target_mcount.as_str().as_bytes()).unwrap();
+        let mcount_name = CString::new(cx.sess().target.mcount.as_str().as_bytes()).unwrap();
 
         llvm::AddFunctionAttrStringValue(
             llfn,
@@ -105,7 +100,7 @@ fn set_instrument_function(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
 fn set_probestack(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
     // Only use stack probes if the target specification indicates that we
     // should be using stack probes
-    if !cx.sess().target.options.stack_probes {
+    if !cx.sess().target.stack_probes {
         return;
     }
 
@@ -132,9 +127,6 @@ fn set_probestack(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
         return;
     }
 
-    // FIXME(richkadel): Make sure probestack plays nice with `-Z instrument-coverage`
-    // or disable it if not, similar to above early exits.
-
     // Flag our internal `__rust_probestack` function as the stack probe symbol.
     // This is defined in the `compiler-builtins` crate for each architecture.
     llvm::AddFunctionAttrStringValue(
@@ -143,25 +135,6 @@ fn set_probestack(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
         const_cstr!("probe-stack"),
         const_cstr!("__rust_probestack"),
     );
-}
-
-fn translate_obsolete_target_features(feature: &str) -> &str {
-    const LLVM9_FEATURE_CHANGES: &[(&str, &str)] =
-        &[("+fp-only-sp", "-fp64"), ("-fp-only-sp", "+fp64"), ("+d16", "-d32"), ("-d16", "+d32")];
-    if llvm_util::get_major_version() >= 9 {
-        for &(old, new) in LLVM9_FEATURE_CHANGES {
-            if feature == old {
-                return new;
-            }
-        }
-    } else {
-        for &(old, new) in LLVM9_FEATURE_CHANGES {
-            if feature == new {
-                return old;
-            }
-        }
-    }
-    feature
 }
 
 pub fn llvm_target_features(sess: &Session) -> impl Iterator<Item = &str> {
@@ -173,13 +146,7 @@ pub fn llvm_target_features(sess: &Session) -> impl Iterator<Item = &str> {
         .target_feature
         .split(',')
         .filter(|f| !RUSTC_SPECIFIC_FEATURES.iter().any(|s| f.contains(s)));
-    sess.target
-        .options
-        .features
-        .split(',')
-        .chain(cmdline)
-        .filter(|l| !l.is_empty())
-        .map(translate_obsolete_target_features)
+    sess.target.features.split(',').chain(cmdline).filter(|l| !l.is_empty())
 }
 
 pub fn apply_target_cpu_attr(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
@@ -255,12 +222,14 @@ pub fn from_fn_attrs(cx: &CodegenCx<'ll, 'tcx>, llfn: &'ll Value, instance: ty::
         }
     }
 
-    // FIXME(eddyb) consolidate these two `inline` calls (and avoid overwrites).
-    if instance.def.requires_inline(cx.tcx) {
-        inline(cx, llfn, attributes::InlineAttr::Hint);
-    }
-
-    inline(cx, llfn, codegen_fn_attrs.inline.clone());
+    let inline_attr = if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED) {
+        InlineAttr::Never
+    } else if codegen_fn_attrs.inline == InlineAttr::None && instance.def.requires_inline(cx.tcx) {
+        InlineAttr::Hint
+    } else {
+        codegen_fn_attrs.inline
+    };
+    inline(cx, llfn, inline_attr);
 
     // The `uwtable` attribute according to LLVM is:
     //
@@ -378,8 +347,8 @@ pub fn provide_both(providers: &mut Providers) {
             .collect::<FxHashMap<_, _>>();
 
         let mut ret = FxHashMap::default();
-        for lib in tcx.foreign_modules(cnum).iter() {
-            let module = def_id_to_native_lib.get(&lib.def_id).and_then(|s| s.wasm_import_module);
+        for (def_id, lib) in tcx.foreign_modules(cnum).iter() {
+            let module = def_id_to_native_lib.get(&def_id).and_then(|s| s.wasm_import_module);
             let module = match module {
                 Some(s) => s,
                 None => continue,

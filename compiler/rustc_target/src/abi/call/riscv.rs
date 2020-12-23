@@ -4,7 +4,7 @@
 // Reference: Clang RISC-V ELF psABI lowering code
 // https://github.com/llvm/llvm-project/blob/8e780252a7284be45cf1ba224cabd884847e8e92/clang/lib/CodeGen/TargetInfo.cpp#L9311-L9773
 
-use crate::abi::call::{ArgAbi, ArgAttribute, CastTarget, FnAbi, PassMode, Reg, RegKind, Uniform};
+use crate::abi::call::{ArgAbi, ArgExtension, CastTarget, FnAbi, PassMode, Reg, RegKind, Uniform};
 use crate::abi::{
     self, Abi, FieldsShape, HasDataLayout, LayoutOf, Size, TyAndLayout, TyAndLayoutMethods,
 };
@@ -308,7 +308,7 @@ fn extend_integer_width<'a, Ty>(arg: &mut ArgAbi<'a, Ty>, xlen: u64) {
             // 32-bit integers are always sign-extended
             if i.size().bits() == 32 && xlen > 32 {
                 if let PassMode::Direct(ref mut attrs) = arg.mode {
-                    attrs.set(ArgAttribute::SExt);
+                    attrs.ext(ArgExtension::Sext);
                     return;
                 }
             }
@@ -323,7 +323,7 @@ where
     Ty: TyAndLayoutMethods<'a, C> + Copy,
     C: LayoutOf<Ty = Ty, TyAndLayout = TyAndLayout<'a, Ty>> + HasDataLayout + HasTargetSpec,
 {
-    let flen = match &cx.target_spec().options.llvm_abiname[..] {
+    let flen = match &cx.target_spec().llvm_abiname[..] {
         "ilp32f" | "lp64f" => 32,
         "ilp32d" | "lp64d" => 64,
         _ => 0,
@@ -333,10 +333,8 @@ where
     let mut avail_gprs = 8;
     let mut avail_fprs = 8;
 
-    if !fn_abi.ret.is_ignore() {
-        if classify_ret(cx, &mut fn_abi.ret, xlen, flen) {
-            avail_gprs -= 1;
-        }
+    if !fn_abi.ret.is_ignore() && classify_ret(cx, &mut fn_abi.ret, xlen, flen) {
+        avail_gprs -= 1;
     }
 
     for (i, arg) in fn_abi.args.iter_mut().enumerate() {

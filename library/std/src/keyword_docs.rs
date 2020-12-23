@@ -15,18 +15,35 @@
 /// ```
 ///
 /// In general, any cast that can be performed via ascribing the type can also be done using `as`,
-/// so instead of writing `let x: u32 = 123`, you can write `let x = 123 as u32` (Note: `let x: u32
-/// = 123` would be best in that situation). The same is not true in the other direction, however,
+/// so instead of writing `let x: u32 = 123`, you can write `let x = 123 as u32` (note: `let x: u32
+/// = 123` would be best in that situation). The same is not true in the other direction, however;
 /// explicitly using `as` allows a few more coercions that aren't allowed implicitly, such as
 /// changing the type of a raw pointer or turning closures into raw pointers.
 ///
-/// Other places `as` is used include as extra syntax for [`crate`] and `use`, to change the name
-/// something is imported as.
+/// `as` can be seen as the primitive for `From` and `Into`: `as` only works  with primitives
+/// (`u8`, `bool`, `str`, pointers, ...) whereas `From` and `Into`  also works with types like
+/// `String` or `Vec`.
 ///
-/// For more information on what `as` is capable of, see the [Reference]
+/// `as` can also be used with the `_` placeholder when the destination type can be inferred. Note
+/// that this can cause inference breakage and usually such code should use an explicit type for
+/// both clarity and stability. This is most useful when converting pointers using `as *const _` or
+/// `as *mut _` though the [`cast`][const-cast] method is recommended over `as *const _` and it is
+/// [the same][mut-cast] for `as *mut _`: those methods make the intent clearer.
+///
+/// `as` is also used to rename imports in [`use`] and [`extern crate`][`crate`] statements:
+///
+/// ```
+/// # #[allow(unused_imports)]
+/// use std::{mem as memory, net as network};
+/// // Now you can use the names `memory` and `network` to refer to `std::mem` and `std::net`.
+/// ```
+/// For more information on what `as` is capable of, see the [Reference].
 ///
 /// [Reference]: ../reference/expressions/operator-expr.html#type-cast-expressions
 /// [`crate`]: keyword.crate.html
+/// [`use`]: keyword.use.html
+/// [const-cast]: primitive.pointer.html#method.cast
+/// [mut-cast]: primitive.pointer.html#method.cast-1
 mod as_keyword {}
 
 #[doc(keyword = "break")]
@@ -346,7 +363,7 @@ mod else_keyword {}
 /// When data follows along with a variant, such as with rust's built-in [`Option`] type, the data
 /// is added as the type describes, for example `Option::Some(123)`. The same follows with
 /// struct-like variants, with things looking like `ComplexEnum::LotsOfThings { usual_struct_stuff:
-/// true, blah: "hello!".to_string(), }`. Empty Enums are similar to () in that they cannot be
+/// true, blah: "hello!".to_string(), }`. Empty Enums are similar to [`!`] in that they cannot be
 /// instantiated at all, and are used mainly to mess with the type system in interesting ways.
 ///
 /// For more information, take a look at the [Rust Book] or the [Reference]
@@ -354,6 +371,7 @@ mod else_keyword {}
 /// [ADT]: https://en.wikipedia.org/wiki/Algebraic_data_type
 /// [Rust Book]: ../book/ch06-01-defining-an-enum.html
 /// [Reference]: ../reference/items/enumerations.html
+/// [`!`]: primitive.never.html
 mod enum_keyword {}
 
 #[doc(keyword = "extern")]
@@ -396,6 +414,7 @@ mod enum_keyword {}
 /// [Rust book]:
 /// ../book/ch19-01-unsafe-rust.html#using-extern-functions-to-call-external-code
 /// [Reference]: ../reference/items/external-blocks.html
+/// [`crate`]: keyword.crate.html
 mod extern_keyword {}
 
 #[doc(keyword = "false")]
@@ -546,8 +565,12 @@ mod fn_keyword {}
 ///
 /// For more information on for-loops, see the [Rust book] or the [Reference].
 ///
+/// See also, [`loop`], [`while`].
+///
 /// [`in`]: keyword.in.html
 /// [`impl`]: keyword.impl.html
+/// [`loop`]: keyword.loop.html
+/// [`while`]: keyword.while.html
 /// [higher-ranked trait bounds]: ../reference/trait-bounds.html#higher-ranked-trait-bounds
 /// [Rust book]:
 /// ../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
@@ -699,8 +722,8 @@ mod impl_keyword {}
 ///
 /// ## Literal Examples:
 ///
-///    * `for _ **in** 1..3 {}` - Iterate over an exclusive range up to but excluding 3.
-///    * `for _ **in** 1..=3 {}` - Iterate over an inclusive range up to and including 3.
+///    * `for _ in 1..3 {}` - Iterate over an exclusive range up to but excluding 3.
+///    * `for _ in 1..=3 {}` - Iterate over an inclusive range up to and including 3.
 ///
 /// (Read more about [range patterns])
 ///
@@ -823,6 +846,8 @@ mod let_keyword {}
 ///
 /// For more information on `while` and loops in general, see the [reference].
 ///
+/// See also, [`for`], [`loop`].
+///
 /// [`for`]: keyword.for.html
 /// [`loop`]: keyword.loop.html
 /// [reference]: ../reference/expressions/loop-expr.html#predicate-loops
@@ -871,6 +896,10 @@ mod while_keyword {}
 ///
 /// For more information on `loop` and loops in general, see the [Reference].
 ///
+/// See also, [`for`], [`while`].
+///
+/// [`for`]: keyword.for.html
+/// [`while`]: keyword.while.html
 /// [Reference]: ../reference/expressions/loop-expr.html
 mod loop_keyword {}
 
@@ -1731,7 +1760,7 @@ mod super_keyword {}
 ///
 /// # Differences between the 2015 and 2018 editions
 ///
-/// In the 2015 edition parameters pattern where not needed for traits:
+/// In the 2015 edition the parameters pattern was not needed for traits:
 ///
 /// ```rust,edition2015
 /// trait Tr {

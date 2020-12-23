@@ -1,6 +1,6 @@
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::ty::print::{FmtPrinter, Printer};
-use crate::ty::subst::InternalSubsts;
+use crate::ty::subst::{InternalSubsts, Subst};
 use crate::ty::{self, SubstsRef, Ty, TyCtxt, TypeFoldable};
 use rustc_errors::ErrorReported;
 use rustc_hir::def::Namespace;
@@ -359,15 +359,15 @@ impl<'tcx> Instance<'tcx> {
         // HACK(eddyb) erase regions in `substs` first, so that `param_env.and(...)`
         // below is more likely to ignore the bounds in scope (e.g. if the only
         // generic parameters mentioned by `substs` were lifetime ones).
-        let substs = tcx.erase_regions(&substs);
+        let substs = tcx.erase_regions(substs);
 
         // FIXME(eddyb) should this always use `param_env.with_reveal_all()`?
         if let Some((did, param_did)) = def.as_const_arg() {
             tcx.resolve_instance_of_const_arg(
-                tcx.erase_regions(&param_env.and((did, param_did, substs))),
+                tcx.erase_regions(param_env.and((did, param_did, substs))),
             )
         } else {
-            tcx.resolve_instance(tcx.erase_regions(&param_env.and((def.did, substs))))
+            tcx.resolve_instance(tcx.erase_regions(param_env.and((def.did, substs))))
         }
     }
 
@@ -452,7 +452,7 @@ impl<'tcx> Instance<'tcx> {
         let self_ty = tcx.mk_closure(closure_did, substs);
 
         let sig = substs.as_closure().sig();
-        let sig = tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), &sig);
+        let sig = tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), sig);
         assert_eq!(sig.inputs().len(), 1);
         let substs = tcx.mk_substs_trait(self_ty, &[sig.inputs()[0].into()]);
 
@@ -470,8 +470,31 @@ impl<'tcx> Instance<'tcx> {
     /// This function returns `Some(substs)` in the former case and `None` otherwise -- i.e., if
     /// this function returns `None`, then the MIR body does not require substitution during
     /// codegen.
-    pub fn substs_for_mir_body(&self) -> Option<SubstsRef<'tcx>> {
+    fn substs_for_mir_body(&self) -> Option<SubstsRef<'tcx>> {
         if self.def.has_polymorphic_mir_body() { Some(self.substs) } else { None }
+    }
+
+    pub fn subst_mir<T>(&self, tcx: TyCtxt<'tcx>, v: &T) -> T
+    where
+        T: TypeFoldable<'tcx> + Copy,
+    {
+        if let Some(substs) = self.substs_for_mir_body() { v.subst(tcx, substs) } else { *v }
+    }
+
+    pub fn subst_mir_and_normalize_erasing_regions<T>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+        v: T,
+    ) -> T
+    where
+        T: TypeFoldable<'tcx> + Clone,
+    {
+        if let Some(substs) = self.substs_for_mir_body() {
+            tcx.subst_and_normalize_erasing_regions(substs, param_env, v)
+        } else {
+            tcx.normalize_erasing_regions(param_env, v)
+        }
     }
 
     /// Returns a new `Instance` where generic parameters in `instance.substs` are replaced by
@@ -517,7 +540,7 @@ fn polymorphize<'tcx>(
 
     struct PolymorphizationFolder<'tcx> {
         tcx: TyCtxt<'tcx>,
-    };
+    }
 
     impl ty::TypeFolder<'tcx> for PolymorphizationFolder<'tcx> {
         fn tcx<'a>(&'a self) -> TyCtxt<'tcx> {

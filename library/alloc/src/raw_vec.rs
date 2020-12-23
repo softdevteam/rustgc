@@ -1,15 +1,15 @@
 #![unstable(feature = "raw_vec_internals", reason = "implementation detail", issue = "none")]
 #![doc(hidden)]
 
-use core::alloc::LayoutErr;
+use core::alloc::LayoutError;
 use core::cmp;
 use core::intrinsics;
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::Drop;
-use core::ptr::{NonNull, Unique};
+use core::ptr::{self, NonNull, Unique};
 use core::slice;
 
-use crate::alloc::{handle_alloc_error, AllocRef, Global, Layout};
+use crate::alloc::{handle_alloc_error, Allocator, Global, Layout};
 use crate::boxed::Box;
 use crate::collections::TryReserveError::{self, *};
 
@@ -46,7 +46,7 @@ enum AllocInit {
 /// `usize::MAX`. This means that you need to be careful when round-tripping this type with a
 /// `Box<[T]>`, since `capacity()` won't yield the length.
 #[allow(missing_debug_implementations)]
-pub struct RawVec<T, A: AllocRef = Global> {
+pub struct RawVec<T, A: Allocator = Global> {
     ptr: Unique<T>,
     cap: usize,
     alloc: A,
@@ -111,46 +111,12 @@ impl<T> RawVec<T, Global> {
     pub unsafe fn from_raw_parts(ptr: *mut T, capacity: usize) -> Self {
         unsafe { Self::from_raw_parts_in(ptr, capacity, Global) }
     }
-
-    /// Converts a `Box<[T]>` into a `RawVec<T>`.
-    pub fn from_box(slice: Box<[T]>) -> Self {
-        unsafe {
-            let mut slice = ManuallyDrop::new(slice);
-            RawVec::from_raw_parts(slice.as_mut_ptr(), slice.len())
-        }
-    }
-
-    /// Converts the entire buffer into `Box<[MaybeUninit<T>]>` with the specified `len`.
-    ///
-    /// Note that this will correctly reconstitute any `cap` changes
-    /// that may have been performed. (See description of type for details.)
-    ///
-    /// # Safety
-    ///
-    /// * `len` must be greater than or equal to the most recently requested capacity, and
-    /// * `len` must be less than or equal to `self.capacity()`.
-    ///
-    /// Note, that the requested capacity and `self.capacity()` could differ, as
-    /// an allocator could overallocate and return a greater memory block than requested.
-    pub unsafe fn into_box(self, len: usize) -> Box<[MaybeUninit<T>]> {
-        // Sanity-check one half of the safety requirement (we cannot check the other half).
-        debug_assert!(
-            len <= self.capacity(),
-            "`len` must be smaller than or equal to `self.capacity()`"
-        );
-
-        let me = ManuallyDrop::new(self);
-        unsafe {
-            let slice = slice::from_raw_parts_mut(me.ptr() as *mut MaybeUninit<T>, len);
-            Box::from_raw(slice)
-        }
-    }
 }
 
-impl<T, A: AllocRef> RawVec<T, A> {
+impl<T, A: Allocator> RawVec<T, A> {
     /// Like `new`, but parameterized over the choice of allocator for
     /// the returned `RawVec`.
-    #[allow_internal_unstable(const_fn)]
+    #[rustc_allow_const_fn_unstable(const_fn)]
     pub const fn new_in(alloc: A) -> Self {
         // `cap: 0` means "unallocated". zero-sized types are ignored.
         Self { ptr: Unique::dangling(), cap: 0, alloc }
@@ -170,6 +136,40 @@ impl<T, A: AllocRef> RawVec<T, A> {
         Self::allocate_in(capacity, AllocInit::Zeroed, alloc)
     }
 
+    /// Converts a `Box<[T]>` into a `RawVec<T>`.
+    pub fn from_box(slice: Box<[T], A>) -> Self {
+        unsafe {
+            let (slice, alloc) = Box::into_raw_with_allocator(slice);
+            RawVec::from_raw_parts_in(slice.as_mut_ptr(), slice.len(), alloc)
+        }
+    }
+
+    /// Converts the entire buffer into `Box<[MaybeUninit<T>]>` with the specified `len`.
+    ///
+    /// Note that this will correctly reconstitute any `cap` changes
+    /// that may have been performed. (See description of type for details.)
+    ///
+    /// # Safety
+    ///
+    /// * `len` must be greater than or equal to the most recently requested capacity, and
+    /// * `len` must be less than or equal to `self.capacity()`.
+    ///
+    /// Note, that the requested capacity and `self.capacity()` could differ, as
+    /// an allocator could overallocate and return a greater memory block than requested.
+    pub unsafe fn into_box(self, len: usize) -> Box<[MaybeUninit<T>], A> {
+        // Sanity-check one half of the safety requirement (we cannot check the other half).
+        debug_assert!(
+            len <= self.capacity(),
+            "`len` must be smaller than or equal to `self.capacity()`"
+        );
+
+        let me = ManuallyDrop::new(self);
+        unsafe {
+            let slice = slice::from_raw_parts_mut(me.ptr() as *mut MaybeUninit<T>, len);
+            Box::from_raw_in(slice, ptr::read(&me.alloc))
+        }
+    }
+
     fn allocate_in(capacity: usize, init: AllocInit, alloc: A) -> Self {
         if mem::size_of::<T>() == 0 {
             Self::new_in(alloc)
@@ -185,8 +185,8 @@ impl<T, A: AllocRef> RawVec<T, A> {
                 Err(_) => capacity_overflow(),
             }
             let result = match init {
-                AllocInit::Uninitialized => alloc.alloc(layout),
-                AllocInit::Zeroed => alloc.alloc_zeroed(layout),
+                AllocInit::Uninitialized => alloc.allocate(layout),
+                AllocInit::Zeroed => alloc.allocate_zeroed(layout),
             };
             let ptr = match result {
                 Ok(ptr) => ptr,
@@ -232,13 +232,8 @@ impl<T, A: AllocRef> RawVec<T, A> {
     }
 
     /// Returns a shared reference to the allocator backing this `RawVec`.
-    pub fn alloc(&self) -> &A {
+    pub fn allocator(&self) -> &A {
         &self.alloc
-    }
-
-    /// Returns a mutable reference to the allocator backing this `RawVec`.
-    pub fn alloc_mut(&mut self) -> &mut A {
-        &mut self.alloc
     }
 
     fn current_memory(&self) -> Option<(NonNull<u8>, Layout)> {
@@ -259,7 +254,7 @@ impl<T, A: AllocRef> RawVec<T, A> {
     /// Ensures that the buffer contains at least enough space to hold `len +
     /// additional` elements. If it doesn't already have enough capacity, will
     /// reallocate enough space plus comfortable slack space to get amortized
-    /// `O(1)` behavior. Will limit this behavior if it would needlessly cause
+    /// *O*(1) behavior. Will limit this behavior if it would needlessly cause
     /// itself to panic.
     ///
     /// If `len` exceeds `self.capacity()`, this may fail to actually allocate
@@ -364,7 +359,7 @@ impl<T, A: AllocRef> RawVec<T, A> {
     }
 }
 
-impl<T, A: AllocRef> RawVec<T, A> {
+impl<T, A: Allocator> RawVec<T, A> {
     /// Returns if the buffer needs to grow to fulfill the needed extra capacity.
     /// Mainly used to make inlining reserve-calls possible without inlining `grow`.
     fn needs_to_grow(&self, len: usize, additional: usize) -> bool {
@@ -471,12 +466,12 @@ impl<T, A: AllocRef> RawVec<T, A> {
 // significant, because the number of different `A` types seen in practice is
 // much smaller than the number of `T` types.)
 fn finish_grow<A>(
-    new_layout: Result<Layout, LayoutErr>,
+    new_layout: Result<Layout, LayoutError>,
     current_memory: Option<(NonNull<u8>, Layout)>,
     alloc: &mut A,
 ) -> Result<NonNull<[u8]>, TryReserveError>
 where
-    A: AllocRef,
+    A: Allocator,
 {
     // Check for the error here to minimize the size of `RawVec::grow_*`.
     let new_layout = new_layout.map_err(|_| CapacityOverflow)?;
@@ -491,17 +486,17 @@ where
             alloc.grow(ptr, old_layout, new_layout)
         }
     } else {
-        alloc.alloc(new_layout)
+        alloc.allocate(new_layout)
     };
 
     memory.map_err(|_| AllocError { layout: new_layout, non_exhaustive: () })
 }
 
-unsafe impl<#[may_dangle] T, A: AllocRef> Drop for RawVec<T, A> {
+unsafe impl<#[may_dangle] T, A: Allocator> Drop for RawVec<T, A> {
     /// Frees the memory owned by the `RawVec` *without* trying to drop its contents.
     fn drop(&mut self) {
         if let Some((ptr, layout)) = self.current_memory() {
-            unsafe { self.alloc.dealloc(ptr, layout) }
+            unsafe { self.alloc.deallocate(ptr, layout) }
         }
     }
 }

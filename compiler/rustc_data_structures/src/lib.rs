@@ -15,7 +15,8 @@
 #![feature(fn_traits)]
 #![feature(int_bits_const)]
 #![feature(min_specialization)]
-#![feature(optin_builtin_traits)]
+#![cfg_attr(bootstrap, feature(optin_builtin_traits))]
+#![cfg_attr(not(bootstrap), feature(auto_traits))]
 #![feature(nll)]
 #![feature(allow_internal_unstable)]
 #![feature(hash_raw_entry)]
@@ -27,8 +28,11 @@
 #![feature(extend_one)]
 #![feature(const_panic)]
 #![feature(min_const_generics)]
+#![feature(new_uninit)]
 #![feature(once_cell)]
+#![feature(maybe_uninit_uninit_array)]
 #![allow(rustc::default_hash_types)]
+#![deny(unaligned_references)]
 
 #[macro_use]
 extern crate tracing;
@@ -46,9 +50,9 @@ pub fn cold_path<F: FnOnce() -> R, R>(f: F) -> R {
 #[macro_export]
 macro_rules! likely {
     ($e:expr) => {
-        #[allow(unused_unsafe)]
-        {
-            unsafe { std::intrinsics::likely($e) }
+        match $e {
+            #[allow(unused_unsafe)]
+            e => unsafe { std::intrinsics::likely(e) },
         }
     };
 }
@@ -56,9 +60,9 @@ macro_rules! likely {
 #[macro_export]
 macro_rules! unlikely {
     ($e:expr) => {
-        #[allow(unused_unsafe)]
-        {
-            unsafe { std::intrinsics::unlikely($e) }
+        match $e {
+            #[allow(unused_unsafe)]
+            e => unsafe { std::intrinsics::unlikely(e) },
         }
     };
 }
@@ -69,6 +73,7 @@ pub mod box_region;
 pub mod captures;
 pub mod const_cstr;
 pub mod flock;
+pub mod functor;
 pub mod fx;
 pub mod graph;
 pub mod jobserver;
@@ -101,6 +106,7 @@ pub mod work_queue;
 pub use atomic_ref::AtomicRef;
 pub mod frozen;
 pub mod sso;
+pub mod steal;
 pub mod tagged_ptr;
 pub mod temp_dir;
 pub mod unhash;

@@ -43,6 +43,7 @@ impl<'a> Visitor<'a> for ItemLowerer<'a, '_, '_> {
                 items: BTreeSet::new(),
                 trait_items: BTreeSet::new(),
                 impl_items: BTreeSet::new(),
+                foreign_items: BTreeSet::new(),
             },
         );
 
@@ -104,6 +105,18 @@ impl<'a> Visitor<'a> for ItemLowerer<'a, '_, '_> {
         });
 
         visit::walk_assoc_item(self, item, ctxt);
+    }
+
+    fn visit_foreign_item(&mut self, item: &'a ForeignItem) {
+        self.lctx.allocate_hir_id_counter(item.id);
+        self.lctx.with_hir_id_owner(item.id, |lctx| {
+            let hir_item = lctx.lower_foreign_item(item);
+            let id = hir::ForeignItemId { hir_id: hir_item.hir_id };
+            lctx.foreign_items.insert(id, hir_item);
+            lctx.modules.get_mut(&lctx.current_module).unwrap().foreign_items.insert(id);
+        });
+
+        visit::walk_foreign_item(self, item);
     }
 }
 
@@ -304,7 +317,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 })
             }
             ItemKind::Mod(ref m) => hir::ItemKind::Mod(self.lower_mod(m)),
-            ItemKind::ForeignMod(ref nm) => hir::ItemKind::ForeignMod(self.lower_foreign_mod(nm)),
+            ItemKind::ForeignMod(ref fm) => hir::ItemKind::ForeignMod {
+                abi: fm.abi.map_or(abi::Abi::C, |abi| self.lower_abi(abi)),
+                items: self
+                    .arena
+                    .alloc_from_iter(fm.items.iter().map(|x| self.lower_foreign_item_ref(x))),
+            },
             ItemKind::GlobalAsm(ref ga) => hir::ItemKind::GlobalAsm(self.lower_global_asm(ga)),
             ItemKind::TyAlias(_, ref gen, _, Some(ref ty)) => {
                 // We lower
@@ -704,10 +722,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
         }
     }
 
-    fn lower_foreign_mod(&mut self, fm: &ForeignMod) -> hir::ForeignMod<'hir> {
-        hir::ForeignMod {
-            abi: fm.abi.map_or(abi::Abi::C, |abi| self.lower_abi(abi)),
-            items: self.arena.alloc_from_iter(fm.items.iter().map(|x| self.lower_foreign_item(x))),
+    fn lower_foreign_item_ref(&mut self, i: &ForeignItem) -> hir::ForeignItemRef<'hir> {
+        hir::ForeignItemRef {
+            id: hir::ForeignItemId { hir_id: self.lower_node_id(i.id) },
+            ident: i.ident,
+            span: i.span,
+            vis: self.lower_visibility(&i.vis, Some(i.id)),
         }
     }
 
@@ -1096,8 +1116,18 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // Check if this is a binding pattern, if so, we can optimize and avoid adding a
                 // `let <pat> = __argN;` statement. In this case, we do not rename the parameter.
                 let (ident, is_simple_parameter) = match parameter.pat.kind {
-                    hir::PatKind::Binding(hir::BindingAnnotation::Unannotated, _, ident, _) => {
-                        (ident, true)
+                    hir::PatKind::Binding(
+                        hir::BindingAnnotation::Unannotated | hir::BindingAnnotation::Mutable,
+                        _,
+                        ident,
+                        _,
+                    ) => (ident, true),
+                    // For `ref mut` or wildcard arguments, we can't reuse the binding, but
+                    // we can keep the same name for the parameter.
+                    // This lets rustdoc render it correctly in documentation.
+                    hir::PatKind::Binding(_, _, ident, _) => (ident, false),
+                    hir::PatKind::Wild => {
+                        (Ident::with_dummy_span(rustc_span::symbol::kw::Underscore), false)
                     }
                     _ => {
                         // Replace the ident for bindings that aren't simple.

@@ -68,6 +68,11 @@ impl<'a, 'hir> ItemLikeVisitor<'hir> for OuterVisitor<'a, 'hir> {
         let mut inner_visitor = self.new_inner_visitor(self.hir_map);
         inner_visitor.check(i.hir_id, |this| intravisit::walk_impl_item(this, i));
     }
+
+    fn visit_foreign_item(&mut self, i: &'hir hir::ForeignItem<'hir>) {
+        let mut inner_visitor = self.new_inner_visitor(self.hir_map);
+        inner_visitor.check(i.hir_id, |this| intravisit::walk_foreign_item(this, i));
+    }
 }
 
 impl<'a, 'hir> HirIdValidator<'a, 'hir> {
@@ -162,5 +167,25 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirIdValidator<'a, 'hir> {
         // values that actually belong to an ImplItem instead of the ItemKind::Impl
         // we are currently in. So for those it's correct that they have a
         // different owner.
+    }
+
+    fn visit_foreign_item_ref(&mut self, _: &'hir hir::ForeignItemRef<'hir>) {
+        // Explicitly do nothing here. ForeignItemRefs contain hir::Visibility
+        // values that actually belong to an ForeignItem instead of the ItemKind::ForeignMod
+        // we are currently in. So for those it's correct that they have a
+        // different owner.
+    }
+
+    fn visit_generic_param(&mut self, param: &'hir hir::GenericParam<'hir>) {
+        if let hir::GenericParamKind::Type {
+            synthetic: Some(hir::SyntheticTyParamKind::ImplTrait),
+            ..
+        } = param.kind
+        {
+            // Synthetic impl trait parameters are owned by the node of the desugared type.
+            // This means it is correct for them to have a different owner.
+        } else {
+            intravisit::walk_generic_param(self, param);
+        }
     }
 }

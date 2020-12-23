@@ -81,13 +81,35 @@ crate fn eval_nullary_intrinsic<'tcx>(
             ensure_monomorphic_enough(tcx, tp_ty)?;
             ConstValue::from_u64(tcx.type_id_hash(tp_ty))
         }
-        sym::variant_count => {
-            if let ty::Adt(ref adt, _) = tp_ty.kind() {
-                ConstValue::from_machine_usize(adt.variants.len() as u64, &tcx)
-            } else {
-                ConstValue::from_machine_usize(0u64, &tcx)
-            }
-        }
+        sym::variant_count => match tp_ty.kind() {
+            ty::Adt(ref adt, _) => ConstValue::from_machine_usize(adt.variants.len() as u64, &tcx),
+            ty::Projection(_)
+            | ty::Opaque(_, _)
+            | ty::Param(_)
+            | ty::Bound(_, _)
+            | ty::Placeholder(_)
+            | ty::Infer(_) => throw_inval!(TooGeneric),
+            ty::Bool
+            | ty::Char
+            | ty::Int(_)
+            | ty::Uint(_)
+            | ty::Float(_)
+            | ty::Foreign(_)
+            | ty::Str
+            | ty::Array(_, _)
+            | ty::Slice(_)
+            | ty::RawPtr(_)
+            | ty::Ref(_, _, _)
+            | ty::FnDef(_, _)
+            | ty::FnPtr(_)
+            | ty::Dynamic(_, _)
+            | ty::Closure(_, _)
+            | ty::Generator(_, _, _)
+            | ty::GeneratorWitness(_)
+            | ty::Never
+            | ty::Tuple(_)
+            | ty::Error(_) => ConstValue::from_machine_usize(0u64, &tcx),
+        },
         other => bug!("`{}` is not a zero arg intrinsic", other),
     })
 }
@@ -110,7 +132,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             None => match intrinsic_name {
                 sym::transmute => throw_ub_format!("transmuting to uninhabited type"),
                 sym::unreachable => throw_ub!(Unreachable),
-                sym::abort => M::abort(self)?,
+                sym::abort => M::abort(self, "the program aborted execution".to_owned())?,
                 // Unsupported diverging intrinsic.
                 _ => return Ok(false),
             },
@@ -397,6 +419,22 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
             sym::transmute => {
                 self.copy_op_transmute(args[0], dest)?;
+            }
+            sym::assert_inhabited => {
+                let ty = instance.substs.type_at(0);
+                let layout = self.layout_of(ty)?;
+
+                if layout.abi.is_uninhabited() {
+                    // The run-time intrinsic panics just to get a good backtrace; here we abort
+                    // since there is no problem showing a backtrace even for aborts.
+                    M::abort(
+                        self,
+                        format!(
+                            "aborted execution: attempted to instantiate uninhabited type `{}`",
+                            ty
+                        ),
+                    )?;
+                }
             }
             sym::simd_insert => {
                 let index = u64::from(self.read_scalar(args[1])?.to_u32()?);

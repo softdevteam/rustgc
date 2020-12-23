@@ -14,11 +14,16 @@ All contributors are expected to follow the [Rust Code of Conduct].
 
 - [Contributing to Clippy](#contributing-to-clippy)
   - [Getting started](#getting-started)
+    - [High level approach](#high-level-approach)
     - [Finding something to fix/improve](#finding-something-to-fiximprove)
   - [Writing code](#writing-code)
   - [Getting code-completion for rustc internals to work](#getting-code-completion-for-rustc-internals-to-work)
   - [How Clippy works](#how-clippy-works)
   - [Fixing build failures caused by Rust](#fixing-build-failures-caused-by-rust)
+    - [Patching git-subtree to work with big repos](#patching-git-subtree-to-work-with-big-repos)
+    - [Performing the sync](#performing-the-sync)
+    - [Syncing back changes in Clippy to [`rust-lang/rust`]](#syncing-back-changes-in-clippy-to-rust-langrust)
+    - [Defining remotes](#defining-remotes)
   - [Issue and PR triage](#issue-and-pr-triage)
   - [Bors and Homu](#bors-and-homu)
   - [Contributions](#contributions)
@@ -63,9 +68,10 @@ To figure out how this syntax structure is encoded in the AST, it is recommended
 Usually the lint will end up to be a nested series of matches and ifs, [like so][deep-nesting].
 But we can make it nest-less by using [if_chain] macro, [like this][nest-less].
 
-[`E-medium`] issues are generally pretty easy too, though it's recommended you work on an E-easy issue first.
-They are mostly classified as [`E-medium`], since they might be somewhat involved code wise,
-but not difficult per-se.
+[`E-medium`] issues are generally pretty easy too, though it's recommended you work on an [`good first issue`]
+first. Sometimes they are only somewhat involved code wise, but not difficult per-se.
+Note that [`E-medium`] issues may require some knowledge of Clippy internals or some 
+debugging to find the actual problem behind the issue. 
 
 [`T-middle`] issues can be more involved and require verifying types. The [`ty`] module contains a
 lot of methods that are useful, though one of the most useful would be `expr_ty` (gives the type of
@@ -316,11 +322,11 @@ If you have @bors permissions, you can find an overview of the available
 commands [here][homu_instructions].
 
 [triage]: https://forge.rust-lang.org/release/triage-procedure.html
-[l-crash]: https://github.com/rust-lang/rust-clippy/labels/L-crash%20%3Aboom%3A
-[l-bug]: https://github.com/rust-lang/rust-clippy/labels/L-bug%20%3Abeetle%3A
+[l-crash]: https://github.com/rust-lang/rust-clippy/labels/L-crash
+[l-bug]: https://github.com/rust-lang/rust-clippy/labels/L-bug
 [homu]: https://github.com/rust-lang/homu
-[homu_instructions]: https://buildbot2.rust-lang.org/homu/
-[homu_queue]: https://buildbot2.rust-lang.org/homu/queue/clippy
+[homu_instructions]: https://bors.rust-lang.org/
+[homu_queue]: https://bors.rust-lang.org/queue/clippy
 
 ## Contributions
 

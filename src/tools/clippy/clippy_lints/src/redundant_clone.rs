@@ -17,7 +17,9 @@ use rustc_middle::ty::{self, fold::TypeVisitor, Ty};
 use rustc_mir::dataflow::{Analysis, AnalysisDomain, GenKill, GenKillAnalysis, ResultsCursor};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::{BytePos, Span};
+use rustc_span::sym;
 use std::convert::TryFrom;
+use std::ops::ControlFlow;
 
 macro_rules! unwrap_or_continue {
     ($x:expr) => {
@@ -114,7 +116,7 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClone {
             let from_borrow = match_def_path(cx, fn_def_id, &paths::CLONE_TRAIT_METHOD)
                 || match_def_path(cx, fn_def_id, &paths::TO_OWNED_METHOD)
                 || (match_def_path(cx, fn_def_id, &paths::TO_STRING_METHOD)
-                    && is_type_diagnostic_item(cx, arg_ty, sym!(string_type)));
+                    && is_type_diagnostic_item(cx, arg_ty, sym::string_type));
 
             let from_deref = !from_borrow
                 && (match_def_path(cx, fn_def_id, &paths::PATH_TO_PATH_BUF)
@@ -318,11 +320,11 @@ fn find_stmt_assigns_to<'tcx>(
 
     match (by_ref, &*rvalue) {
         (true, mir::Rvalue::Ref(_, _, place)) | (false, mir::Rvalue::Use(mir::Operand::Copy(place))) => {
-            base_local_and_movability(cx, mir, *place)
+            Some(base_local_and_movability(cx, mir, *place))
         },
         (false, mir::Rvalue::Ref(_, _, place)) => {
             if let [mir::ProjectionElem::Deref] = place.as_ref().projection {
-                base_local_and_movability(cx, mir, *place)
+                Some(base_local_and_movability(cx, mir, *place))
             } else {
                 None
             }
@@ -339,7 +341,7 @@ fn base_local_and_movability<'tcx>(
     cx: &LateContext<'tcx>,
     mir: &mir::Body<'tcx>,
     place: mir::Place<'tcx>,
-) -> Option<(mir::Local, CannotMoveOut)> {
+) -> (mir::Local, CannotMoveOut) {
     use rustc_middle::mir::PlaceRef;
 
     // Dereference. You cannot move things out from a borrowed value.
@@ -360,7 +362,7 @@ fn base_local_and_movability<'tcx>(
             && !is_copy(cx, mir::Place::ty_from(local, projection, &mir.local_decls, cx.tcx).ty);
     }
 
-    Some((local, deref || field || slice))
+    (local, deref || field || slice)
 }
 
 struct LocalUseVisitor {
@@ -517,7 +519,10 @@ impl<'a, 'tcx> mir::visit::Visitor<'tcx> for PossibleBorrowerVisitor<'a, 'tcx> {
                 self.possible_borrower.add(borrowed.local, lhs);
             },
             other => {
-                if !ContainsRegion.visit_ty(place.ty(&self.body.local_decls, self.cx.tcx).ty) {
+                if ContainsRegion
+                    .visit_ty(place.ty(&self.body.local_decls, self.cx.tcx).ty)
+                    .is_continue()
+                {
                     return;
                 }
                 rvalue_locals(other, |rhs| {
@@ -539,7 +544,7 @@ impl<'a, 'tcx> mir::visit::Visitor<'tcx> for PossibleBorrowerVisitor<'a, 'tcx> {
             // If the call returns something with lifetimes,
             // let's conservatively assume the returned value contains lifetime of all the arguments.
             // For example, given `let y: Foo<'a> = foo(x)`, `y` is considered to be a possible borrower of `x`.
-            if !ContainsRegion.visit_ty(&self.body.local_decls[*dest].ty) {
+            if ContainsRegion.visit_ty(&self.body.local_decls[*dest].ty).is_continue() {
                 return;
             }
 
@@ -558,8 +563,10 @@ impl<'a, 'tcx> mir::visit::Visitor<'tcx> for PossibleBorrowerVisitor<'a, 'tcx> {
 struct ContainsRegion;
 
 impl TypeVisitor<'_> for ContainsRegion {
-    fn visit_region(&mut self, _: ty::Region<'_>) -> bool {
-        true
+    type BreakTy = ();
+
+    fn visit_region(&mut self, _: ty::Region<'_>) -> ControlFlow<Self::BreakTy> {
+        ControlFlow::BREAK
     }
 }
 

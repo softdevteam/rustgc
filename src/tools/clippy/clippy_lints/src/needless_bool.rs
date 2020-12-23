@@ -3,8 +3,9 @@
 //! This lint is **warn** by default
 
 use crate::utils::sugg::Sugg;
-use crate::utils::{higher, parent_node_is_if_expr, snippet_with_applicability, span_lint, span_lint_and_sugg};
-use if_chain::if_chain;
+use crate::utils::{
+    higher, is_expn_of, parent_node_is_if_expr, snippet_with_applicability, span_lint, span_lint_and_sugg,
+};
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, Block, Expr, ExprKind, StmtKind, UnOp};
@@ -196,13 +197,9 @@ struct ExpressionInfoWithSpan {
 }
 
 fn is_unary_not(e: &Expr<'_>) -> (bool, Span) {
-    if_chain! {
-        if let ExprKind::Unary(unop, operand) = e.kind;
-        if let UnOp::UnNot = unop;
-        then {
-            return (true, operand.span);
-        }
-    };
+    if let ExprKind::Unary(UnOp::UnNot, operand) = e.kind {
+        return (true, operand.span);
+    }
     (false, e.span)
 }
 
@@ -233,6 +230,9 @@ fn check_comparison<'a, 'tcx>(
             cx.typeck_results().expr_ty(left_side),
             cx.typeck_results().expr_ty(right_side),
         );
+        if is_expn_of(left_side.span, "cfg").is_some() || is_expn_of(right_side.span, "cfg").is_some() {
+            return;
+        }
         if l_ty.is_bool() && r_ty.is_bool() {
             let mut applicability = Applicability::MachineApplicable;
 
@@ -295,7 +295,14 @@ fn suggest_bool_comparison<'a, 'tcx>(
     message: &str,
     conv_hint: impl FnOnce(Sugg<'a>) -> Sugg<'a>,
 ) {
-    let hint = Sugg::hir_with_applicability(cx, expr, "..", &mut applicability);
+    let hint = if expr.span.from_expansion() {
+        if applicability != Applicability::Unspecified {
+            applicability = Applicability::MaybeIncorrect;
+        }
+        Sugg::hir_with_macro_callsite(cx, expr, "..")
+    } else {
+        Sugg::hir_with_applicability(cx, expr, "..", &mut applicability)
+    };
     span_lint_and_sugg(
         cx,
         BOOL_COMPARISON,

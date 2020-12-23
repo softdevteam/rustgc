@@ -1,9 +1,10 @@
 //! The `Visitor` responsible for actually checking a `mir::Body` for invalid operations.
 
-use rustc_errors::{struct_span_err, Applicability, Diagnostic};
+use rustc_errors::{struct_span_err, Applicability, Diagnostic, ErrorReported};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{self as hir, HirId, LangItem};
 use rustc_infer::infer::TyCtxtInferExt;
+use rustc_infer::traits::{ImplSource, Obligation, ObligationCause};
 use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::cast::CastTy;
@@ -11,9 +12,10 @@ use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{
     self, adjustment::PointerCast, Instance, InstanceDef, Ty, TyCtxt, TypeAndMut,
 };
+use rustc_middle::ty::{Binder, TraitPredicate, TraitRef};
 use rustc_span::{sym, Span, Symbol};
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt;
-use rustc_trait_selection::traits::{self, TraitEngine};
+use rustc_trait_selection::traits::{self, SelectionContext, TraitEngine};
 
 use std::mem;
 use std::ops::Deref;
@@ -123,7 +125,11 @@ impl Qualifs<'mir, 'tcx> {
         has_mut_interior.get().contains(local) || self.indirectly_mutable(ccx, local, location)
     }
 
-    fn in_return_place(&mut self, ccx: &'mir ConstCx<'mir, 'tcx>) -> ConstQualifs {
+    fn in_return_place(
+        &mut self,
+        ccx: &'mir ConstCx<'mir, 'tcx>,
+        error_occured: Option<ErrorReported>,
+    ) -> ConstQualifs {
         // Find the `Return` terminator if one exists.
         //
         // If no `Return` terminator exists, this MIR is divergent. Just return the conservative
@@ -139,7 +145,7 @@ impl Qualifs<'mir, 'tcx> {
             .map(|(bb, _)| bb);
 
         let return_block = match return_block {
-            None => return qualifs::in_any_value_of_ty(ccx, ccx.body.return_ty()),
+            None => return qualifs::in_any_value_of_ty(ccx, ccx.body.return_ty(), error_occured),
             Some(bb) => bb,
         };
 
@@ -170,6 +176,7 @@ impl Qualifs<'mir, 'tcx> {
             needs_drop: self.needs_drop(ccx, RETURN_PLACE, return_loc),
             has_mut_interior: self.has_mut_interior(ccx, RETURN_PLACE, return_loc),
             custom_eq,
+            error_occured,
         }
     }
 }
@@ -181,7 +188,7 @@ pub struct Validator<'mir, 'tcx> {
     /// The span of the current statement.
     span: Span,
 
-    error_emitted: bool,
+    error_emitted: Option<ErrorReported>,
     secondary_errors: Vec<Diagnostic>,
 }
 
@@ -199,7 +206,7 @@ impl Validator<'mir, 'tcx> {
             span: ccx.body.span,
             ccx,
             qualifs: Default::default(),
-            error_emitted: false,
+            error_emitted: None,
             secondary_errors: Vec::new(),
         }
     }
@@ -266,7 +273,7 @@ impl Validator<'mir, 'tcx> {
         // If we got through const-checking without emitting any "primary" errors, emit any
         // "secondary" errors if they occurred.
         let secondary_errors = mem::take(&mut self.secondary_errors);
-        if !self.error_emitted {
+        if self.error_emitted.is_none() {
             for error in secondary_errors {
                 self.tcx.sess.diagnostic().emit_diagnostic(&error);
             }
@@ -276,7 +283,7 @@ impl Validator<'mir, 'tcx> {
     }
 
     pub fn qualifs_in_return_place(&mut self) -> ConstQualifs {
-        self.qualifs.in_return_place(self.ccx)
+        self.qualifs.in_return_place(self.ccx, self.error_emitted)
     }
 
     /// Emits an error if an expression cannot be evaluated in the current context.
@@ -292,7 +299,11 @@ impl Validator<'mir, 'tcx> {
 
             Status::Unstable(gate) if self.tcx.features().enabled(gate) => {
                 let unstable_in_stable = self.ccx.is_const_stable_const_fn()
-                    && !super::allow_internal_unstable(self.tcx, self.def_id().to_def_id(), gate);
+                    && !super::rustc_allow_const_fn_unstable(
+                        self.tcx,
+                        self.def_id().to_def_id(),
+                        gate,
+                    );
                 if unstable_in_stable {
                     emit_unstable_in_stable_error(self.ccx, span, gate);
                 }
@@ -314,7 +325,7 @@ impl Validator<'mir, 'tcx> {
 
         match op.importance() {
             ops::DiagnosticImportance::Primary => {
-                self.error_emitted = true;
+                self.error_emitted = Some(ErrorReported);
                 err.emit();
             }
 
@@ -756,9 +767,39 @@ impl Visitor<'tcx> for Validator<'mir, 'tcx> {
                     }
                 };
 
-                // Resolve a trait method call to its concrete implementation, which may be in a
-                // `const` trait impl.
-                if self.tcx.features().const_trait_impl {
+                // Attempting to call a trait method?
+                if let Some(trait_id) = tcx.trait_of_item(callee) {
+                    if !self.tcx.features().const_trait_impl {
+                        self.check_op(ops::FnCallNonConst(callee));
+                        return;
+                    }
+
+                    let trait_ref = TraitRef::from_method(tcx, trait_id, substs);
+                    let obligation = Obligation::new(
+                        ObligationCause::dummy(),
+                        param_env,
+                        Binder::bind(TraitPredicate {
+                            trait_ref: TraitRef::from_method(tcx, trait_id, substs),
+                        }),
+                    );
+
+                    let implsrc = tcx.infer_ctxt().enter(|infcx| {
+                        let mut selcx = SelectionContext::new(&infcx);
+                        selcx.select(&obligation).unwrap()
+                    });
+
+                    // If the method is provided via a where-clause that does not use the `?const`
+                    // opt-out, the call is allowed.
+                    if let Some(ImplSource::Param(_, hir::Constness::Const)) = implsrc {
+                        debug!(
+                            "const_trait_impl: provided {:?} via where-clause in {:?}",
+                            trait_ref, param_env
+                        );
+                        return;
+                    }
+
+                    // Resolve a trait method call to its concrete implementation, which may be in a
+                    // `const` trait impl.
                     let instance = Instance::resolve(tcx, param_env, callee, substs);
                     debug!("Resolving ({:?}) -> {:?}", callee, instance);
                     if let Ok(Some(func)) = instance {
@@ -807,7 +848,7 @@ impl Visitor<'tcx> for Validator<'mir, 'tcx> {
                     }
 
                     // Calling an unstable function *always* requires that the corresponding gate
-                    // be enabled, even if the function has `#[allow_internal_unstable(the_gate)]`.
+                    // be enabled, even if the function has `#[rustc_allow_const_fn_unstable(the_gate)]`.
                     if !tcx.features().declared_lib_features.iter().any(|&(sym, _)| sym == gate) {
                         self.check_op(ops::FnCallUnstable(callee, Some(gate)));
                         return;
@@ -821,7 +862,7 @@ impl Visitor<'tcx> for Validator<'mir, 'tcx> {
 
                     // Otherwise, we are something const-stable calling a const-unstable fn.
 
-                    if super::allow_internal_unstable(tcx, caller, gate) {
+                    if super::rustc_allow_const_fn_unstable(tcx, caller, gate) {
                         return;
                     }
 
@@ -967,8 +1008,8 @@ fn emit_unstable_in_stable_error(ccx: &ConstCx<'_, '_>, span: Span, gate: Symbol
         )
         .span_suggestion(
             attr_span,
-            "otherwise `#[allow_internal_unstable]` can be used to bypass stability checks",
-            format!("#[allow_internal_unstable({})]\n", gate),
+            "otherwise `#[rustc_allow_const_fn_unstable]` can be used to bypass stability checks",
+            format!("#[rustc_allow_const_fn_unstable({})]\n", gate),
             Applicability::MaybeIncorrect,
         )
         .emit();

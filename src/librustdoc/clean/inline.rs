@@ -37,7 +37,7 @@ type Attrs<'hir> = rustc_middle::ty::Attributes<'hir>;
 /// and `Some` of a vector of items if it was successfully expanded.
 ///
 /// `parent_module` refers to the parent of the *re-export*, not the original item.
-pub fn try_inline(
+crate fn try_inline(
     cx: &DocContext<'_>,
     parent_module: DefId,
     res: Res,
@@ -54,7 +54,7 @@ pub fn try_inline(
     debug!("attrs={:?}", attrs);
     let attrs_clone = attrs;
 
-    let inner = match res {
+    let kind = match res {
         Res::Def(DefKind::Trait, did) => {
             record_extern_fqn(cx, did, clean::TypeKind::Trait);
             ret.extend(build_impls(cx, Some(parent_module), did, attrs));
@@ -124,20 +124,12 @@ pub fn try_inline(
     let attrs = merge_attrs(cx, Some(parent_module), target_attrs, attrs_clone);
 
     cx.renderinfo.borrow_mut().inlined.insert(did);
-    ret.push(clean::Item {
-        source: cx.tcx.def_span(did).clean(cx),
-        name: Some(name.clean(cx)),
-        attrs,
-        inner,
-        visibility: clean::Public,
-        stability: cx.tcx.lookup_stability(did).cloned(),
-        deprecation: cx.tcx.lookup_deprecation(did).clean(cx),
-        def_id: did,
-    });
+    let what_rustc_thinks = clean::Item::from_def_id_and_parts(did, Some(name.clean(cx)), kind, cx);
+    ret.push(clean::Item { attrs, ..what_rustc_thinks });
     Some(ret)
 }
 
-pub fn try_inline_glob(
+crate fn try_inline_glob(
     cx: &DocContext<'_>,
     res: Res,
     visited: &mut FxHashSet<DefId>,
@@ -160,7 +152,7 @@ pub fn try_inline_glob(
     }
 }
 
-pub fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
+crate fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
     cx.tcx.get_attrs(did)
 }
 
@@ -168,7 +160,7 @@ pub fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
 ///
 /// These names are used later on by HTML rendering to generate things like
 /// source links back to the original item.
-pub fn record_extern_fqn(cx: &DocContext<'_>, did: DefId, kind: clean::TypeKind) {
+crate fn record_extern_fqn(cx: &DocContext<'_>, did: DefId, kind: clean::TypeKind) {
     let crate_name = cx.tcx.crate_name(did.krate).to_string();
 
     let relative = cx.tcx.def_path(did).data.into_iter().filter_map(|elem| {
@@ -189,11 +181,10 @@ pub fn record_extern_fqn(cx: &DocContext<'_>, did: DefId, kind: clean::TypeKind)
     }
 }
 
-pub fn build_external_trait(cx: &DocContext<'_>, did: DefId) -> clean::Trait {
+crate fn build_external_trait(cx: &DocContext<'_>, did: DefId) -> clean::Trait {
     let trait_items =
         cx.tcx.associated_items(did).in_definition_order().map(|item| item.clean(cx)).collect();
 
-    let auto_trait = cx.tcx.trait_def(did).has_auto_impl;
     let predicates = cx.tcx.predicates_of(did);
     let generics = (cx.tcx.generics_of(did), predicates).clean(cx);
     let generics = filter_non_trait_generics(did, generics);
@@ -201,7 +192,6 @@ pub fn build_external_trait(cx: &DocContext<'_>, did: DefId) -> clean::Trait {
     let is_spotlight = load_attrs(cx, did).clean(cx).has_doc_flag(sym::spotlight);
     let is_auto = cx.tcx.trait_is_auto(did);
     clean::Trait {
-        auto: auto_trait,
         unsafety: cx.tcx.trait_def(did).unsafety,
         generics,
         items: trait_items,
@@ -284,7 +274,7 @@ fn build_type_alias_type(cx: &DocContext<'_>, did: DefId) -> Option<clean::Type>
     type_.def_id().and_then(|did| build_ty(cx, did))
 }
 
-pub fn build_ty(cx: &DocContext<'_>, did: DefId) -> Option<clean::Type> {
+crate fn build_ty(cx: &DocContext<'_>, did: DefId) -> Option<clean::Type> {
     match cx.tcx.def_kind(did) {
         DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Const | DefKind::Static => {
             Some(cx.tcx.type_of(did).clean(cx))
@@ -295,7 +285,7 @@ pub fn build_ty(cx: &DocContext<'_>, did: DefId) -> Option<clean::Type> {
 }
 
 /// Builds all inherent implementations of an ADT (struct/union/enum) or Trait item/path/reexport.
-pub fn build_impls(
+crate fn build_impls(
     cx: &DocContext<'_>,
     parent_module: Option<DefId>,
     did: DefId,
@@ -338,7 +328,7 @@ fn merge_attrs(
 }
 
 /// Builds a specific implementation of a type. The `did` could be a type method or trait method.
-pub fn build_impl(
+crate fn build_impl(
     cx: &DocContext<'_>,
     parent_module: impl Into<Option<DefId>>,
     did: DefId,
@@ -348,9 +338,6 @@ pub fn build_impl(
     if !cx.renderinfo.borrow_mut().inlined.insert(did) {
         return;
     }
-
-    let attrs = merge_attrs(cx, parent_module.into(), load_attrs(cx, did), attrs);
-    debug!("merged_attrs={:?}", attrs);
 
     let tcx = cx.tcx;
     let associated_trait = tcx.impl_trait_ref(did);
@@ -445,8 +432,10 @@ pub fn build_impl(
 
     debug!("build_impl: impl {:?} for {:?}", trait_.def_id(), for_.def_id());
 
-    ret.push(clean::Item {
-        inner: clean::ImplItem(clean::Impl {
+    let mut item = clean::Item::from_def_id_and_parts(
+        did,
+        None,
+        clean::ImplItem(clean::Impl {
             unsafety: hir::Unsafety::Normal,
             generics,
             provided_trait_methods: provided,
@@ -457,14 +446,11 @@ pub fn build_impl(
             synthetic: false,
             blanket_impl: None,
         }),
-        source: tcx.def_span(did).clean(cx),
-        name: None,
-        attrs,
-        visibility: clean::Inherited,
-        stability: tcx.lookup_stability(did).cloned(),
-        deprecation: tcx.lookup_deprecation(did).clean(cx),
-        def_id: did,
-    });
+        cx,
+    );
+    item.attrs = merge_attrs(cx, parent_module.into(), load_attrs(cx, did), attrs);
+    debug!("merged_attrs={:?}", item.attrs);
+    ret.push(item);
 }
 
 fn build_module(cx: &DocContext<'_>, did: DefId, visited: &mut FxHashSet<DefId>) -> clean::Module {
@@ -493,12 +479,13 @@ fn build_module(cx: &DocContext<'_>, did: DefId, visited: &mut FxHashSet<DefId>)
                     items.push(clean::Item {
                         name: None,
                         attrs: clean::Attributes::default(),
-                        source: clean::Span::empty(),
+                        source: clean::Span::dummy(),
                         def_id: DefId::local(CRATE_DEF_INDEX),
                         visibility: clean::Public,
                         stability: None,
+                        const_stability: None,
                         deprecation: None,
-                        inner: clean::ImportItem(clean::Import::new_simple(
+                        kind: clean::ImportItem(clean::Import::new_simple(
                             item.ident.to_string(),
                             clean::ImportSource {
                                 path: clean::Path {
@@ -527,7 +514,7 @@ fn build_module(cx: &DocContext<'_>, did: DefId, visited: &mut FxHashSet<DefId>)
     }
 }
 
-pub fn print_inlined_const(cx: &DocContext<'_>, did: DefId) -> String {
+crate fn print_inlined_const(cx: &DocContext<'_>, did: DefId) -> String {
     if let Some(did) = did.as_local() {
         let hir_id = cx.tcx.hir().local_def_id_to_hir_id(did);
         rustc_hir_pretty::id_to_string(&cx.tcx.hir(), hir_id)
@@ -555,7 +542,7 @@ fn build_static(cx: &DocContext<'_>, did: DefId, mutable: bool) -> clean::Static
     }
 }
 
-fn build_macro(cx: &DocContext<'_>, did: DefId, name: Symbol) -> clean::ItemEnum {
+fn build_macro(cx: &DocContext<'_>, did: DefId, name: Symbol) -> clean::ItemKind {
     let imported_from = cx.tcx.original_crate_name(did.krate);
     match cx.enter_resolver(|r| r.cstore().load_macro_untracked(did, cx.sess())) {
         LoadedMacro::MacroDef(def, _) => {
@@ -644,7 +631,7 @@ fn separate_supertrait_bounds(
     (g, ty_bounds)
 }
 
-pub fn record_extern_trait(cx: &DocContext<'_>, did: DefId) {
+crate fn record_extern_trait(cx: &DocContext<'_>, did: DefId) {
     if did.is_local() {
         return;
     }

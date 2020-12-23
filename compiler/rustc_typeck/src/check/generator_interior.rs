@@ -80,7 +80,7 @@ impl<'a, 'tcx> InteriorVisitor<'a, 'tcx> {
             });
 
         if let Some(yield_data) = live_across_yield {
-            let ty = self.fcx.resolve_vars_if_possible(&ty);
+            let ty = self.fcx.resolve_vars_if_possible(ty);
             debug!(
                 "type in expr = {:?}, scope = {:?}, type = {:?}, count = {}, yield_span = {:?}",
                 expr, scope, ty, self.expr_count, yield_data.span
@@ -120,7 +120,7 @@ impl<'a, 'tcx> InteriorVisitor<'a, 'tcx> {
                 self.expr_count,
                 expr.map(|e| e.span)
             );
-            let ty = self.fcx.resolve_vars_if_possible(&ty);
+            let ty = self.fcx.resolve_vars_if_possible(ty);
             if let Some((unresolved_type, unresolved_type_span)) =
                 self.fcx.unresolved_type_vars(&ty)
             {
@@ -179,15 +179,16 @@ pub fn resolve_interior<'a, 'tcx>(
         .filter_map(|mut cause| {
             // Erase regions and canonicalize late-bound regions to deduplicate as many types as we
             // can.
-            let erased = fcx.tcx.erase_regions(&cause.ty);
+            let erased = fcx.tcx.erase_regions(cause.ty);
             if captured_tys.insert(erased) {
                 // Replace all regions inside the generator interior with late bound regions.
                 // Note that each region slot in the types gets a new fresh late bound region,
                 // which means that none of the regions inside relate to any other, even if
                 // typeck had previously found constraints that would cause them to be related.
-                let folded = fcx.tcx.fold_regions(&erased, &mut false, |_, current_depth| {
+                let folded = fcx.tcx.fold_regions(erased, &mut false, |_, current_depth| {
+                    let r = fcx.tcx.mk_region(ty::ReLateBound(current_depth, ty::BrAnon(counter)));
                     counter += 1;
-                    fcx.tcx.mk_region(ty::ReLateBound(current_depth, ty::BrAnon(counter)))
+                    r
                 });
 
                 cause.ty = folded;
@@ -344,6 +345,18 @@ impl<'a, 'tcx> Visitor<'tcx> for InteriorVisitor<'a, 'tcx> {
         // The type table might not have information for this expression
         // if it is in a malformed scope. (#66387)
         if let Some(ty) = self.fcx.typeck_results.borrow().expr_ty_opt(expr) {
+            if guard_borrowing_from_pattern {
+                // Match guards create references to all the bindings in the pattern that are used
+                // in the guard, e.g. `y if is_even(y) => ...` becomes `is_even(*r_y)` where `r_y`
+                // is a reference to `y`, so we must record a reference to the type of the binding.
+                let tcx = self.fcx.tcx;
+                let ref_ty = tcx.mk_ref(
+                    // Use `ReErased` as `resolve_interior` is going to replace all the regions anyway.
+                    tcx.mk_region(ty::RegionKind::ReErased),
+                    ty::TypeAndMut { ty, mutbl: hir::Mutability::Not },
+                );
+                self.record(ref_ty, scope, Some(expr), expr.span, guard_borrowing_from_pattern);
+            }
             self.record(ty, scope, Some(expr), expr.span, guard_borrowing_from_pattern);
         } else {
             self.fcx.tcx.sess.delay_span_bug(expr.span, "no type for node");

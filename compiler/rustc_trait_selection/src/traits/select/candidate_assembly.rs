@@ -229,7 +229,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             param_env: obligation.param_env,
             cause: obligation.cause.clone(),
             recursion_depth: obligation.recursion_depth,
-            predicate: self.infcx().resolve_vars_if_possible(&obligation.predicate),
+            predicate: self.infcx().resolve_vars_if_possible(obligation.predicate),
         };
 
         if obligation.predicate.skip_binder().self_ty().is_ty_var() {
@@ -350,18 +350,15 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         // Micro-optimization: filter out predicates relating to different traits.
         let matching_bounds =
-            all_bounds.filter(|p| p.def_id() == stack.obligation.predicate.def_id());
+            all_bounds.filter(|p| p.value.def_id() == stack.obligation.predicate.def_id());
 
         // Keep only those bounds which may apply, and propagate overflow if it occurs.
-        let mut param_candidates = vec![];
         for bound in matching_bounds {
-            let wc = self.evaluate_where_clause(stack, bound)?;
+            let wc = self.evaluate_where_clause(stack, bound.value)?;
             if wc.may_apply() {
-                param_candidates.push(ParamCandidate(bound));
+                candidates.vec.push(ParamCandidate(bound));
             }
         }
-
-        candidates.vec.extend(param_candidates);
 
         Ok(())
     }
@@ -607,7 +604,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // The code below doesn't care about regions, and the
             // self-ty here doesn't escape this probe, so just erase
             // any LBR.
-            let self_ty = self.tcx().erase_late_bound_regions(&obligation.self_ty());
+            let self_ty = self.tcx().erase_late_bound_regions(obligation.self_ty());
             let poly_trait_ref = match self_ty.kind() {
                 ty::Dynamic(ref data, ..) => {
                     if data.auto_traits().any(|did| did == obligation.predicate.def_id()) {
@@ -642,9 +639,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
             debug!(?poly_trait_ref, "assemble_candidates_from_object_ty");
 
-            let poly_trait_predicate = self.infcx().resolve_vars_if_possible(&obligation.predicate);
+            let poly_trait_predicate = self.infcx().resolve_vars_if_possible(obligation.predicate);
             let placeholder_trait_predicate =
-                self.infcx().replace_bound_vars_with_placeholders(&poly_trait_predicate);
+                self.infcx().replace_bound_vars_with_placeholders(poly_trait_predicate);
 
             // Count only those upcast versions that match the trait-ref
             // we are looking for. Specifically, do not only check for the

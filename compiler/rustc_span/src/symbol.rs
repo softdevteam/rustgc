@@ -127,6 +127,7 @@ symbols! {
         ArgumentV1,
         Arguments,
         C,
+        CString,
         Center,
         Clone,
         Copy,
@@ -261,10 +262,12 @@ symbols! {
         arm_target_feature,
         array,
         arrays,
+        as_ptr,
         as_str,
         asm,
         assert,
         assert_inhabited,
+        assert_macro,
         assert_receiver_is_total_eq,
         assert_uninit_valid,
         assert_zero_valid,
@@ -282,6 +285,7 @@ symbols! {
         attr_literals,
         attributes,
         augmented_assignments,
+        auto_traits,
         automatically_derived,
         avx512_target_feature,
         await_macro,
@@ -310,11 +314,13 @@ symbols! {
         breakpoint,
         bridge,
         bswap,
+        c_str,
         c_variadic,
         call,
         call_mut,
         call_once,
         caller_location,
+        capture_disjoint_fields,
         cdylib,
         ceilf32,
         ceilf64,
@@ -323,6 +329,7 @@ symbols! {
         cfg_attr,
         cfg_attr_multi,
         cfg_doctest,
+        cfg_panic,
         cfg_sanitize,
         cfg_target_feature,
         cfg_target_has_atomic,
@@ -349,6 +356,7 @@ symbols! {
         concat_idents,
         conservative_impl_trait,
         console,
+        const_allocate,
         const_compare_raw_pointers,
         const_constructor,
         const_eval_limit,
@@ -388,6 +396,7 @@ symbols! {
         copysignf64,
         core,
         core_intrinsics,
+        core_panic_macro,
         cosf32,
         cosf64,
         crate_id,
@@ -397,6 +406,7 @@ symbols! {
         crate_type,
         crate_visibility_modifier,
         crt_dash_static: "crt-static",
+        cstring_type,
         ctlz,
         ctlz_nonzero,
         ctpop,
@@ -410,6 +420,7 @@ symbols! {
         dead_code,
         dealloc,
         debug,
+        debug_assert_macro,
         debug_assertions,
         debug_struct,
         debug_trait,
@@ -430,6 +441,7 @@ symbols! {
         deref_mut,
         deref_target,
         derive,
+        destructuring_assignment,
         diagnostic,
         direct,
         discriminant_kind,
@@ -448,6 +460,9 @@ symbols! {
         document_private_items,
         dotdot_in_tuple_patterns,
         dotdoteq_in_patterns,
+        dreg,
+        dreg_low16,
+        dreg_low8,
         drop,
         drop_in_place,
         drop_types_in_const,
@@ -467,6 +482,7 @@ symbols! {
         encode,
         env,
         eq,
+        ermsb_target_feature,
         err,
         exact_div,
         except,
@@ -477,11 +493,13 @@ symbols! {
         existential_type,
         exp2f32,
         exp2f64,
+        expect,
         expected,
         expf32,
         expf64,
         export_name,
         expr,
+        extended_key_value_attributes,
         extern_absolute_paths,
         extern_crate_item_prelude,
         extern_crate_self,
@@ -500,6 +518,7 @@ symbols! {
         fadd_fast,
         fdiv_fast,
         feature,
+        ffi,
         ffi_const,
         ffi_pure,
         ffi_returns_twice,
@@ -528,6 +547,7 @@ symbols! {
         format_args_capture,
         format_args_nl,
         freeze,
+        freg,
         frem_fast,
         from,
         from_desugaring,
@@ -612,6 +632,7 @@ symbols! {
         iter,
         keyword,
         kind,
+        kreg,
         label,
         label_break_value,
         lang,
@@ -637,6 +658,7 @@ symbols! {
         lint_reasons,
         literal,
         llvm_asm,
+        local,
         local_inner_macros,
         log10f32,
         log10f64,
@@ -783,7 +805,9 @@ symbols! {
         panic_info,
         panic_location,
         panic_runtime,
+        panic_str,
         panic_unwind,
+        panicking,
         param_attrs,
         parent_trait,
         partial_cmp,
@@ -800,6 +824,8 @@ symbols! {
         plugin_registrar,
         plugins,
         pointer,
+        pointer_trait,
+        pointer_trait_fmt,
         poll,
         position,
         post_dash_lto: "post-lto",
@@ -840,6 +866,9 @@ symbols! {
         pub_restricted,
         pure,
         pushpop_unsafe,
+        qreg,
+        qreg_low4,
+        qreg_low8,
         quad_precision_float,
         question_mark,
         quote,
@@ -861,6 +890,13 @@ symbols! {
         reexport_test_harness_main,
         reference,
         reflect,
+        reg,
+        reg16,
+        reg32,
+        reg64,
+        reg_abcd,
+        reg_byte,
+        reg_thumb,
         register_attr,
         register_tool,
         relaxed_adts,
@@ -899,9 +935,11 @@ symbols! {
         rustc,
         rustc_allocator,
         rustc_allocator_nounwind,
+        rustc_allow_const_fn_unstable,
         rustc_args_required_const,
         rustc_attrs,
         rustc_builtin_macro,
+        rustc_capture_analysis,
         rustc_clean,
         rustc_const_stable,
         rustc_const_unstable,
@@ -1044,6 +1082,8 @@ symbols! {
         spotlight,
         sqrtf32,
         sqrtf64,
+        sreg,
+        sreg_low16,
         sse4a_target_feature,
         stable,
         staged_api,
@@ -1055,6 +1095,7 @@ symbols! {
         staticlib,
         std,
         std_inject,
+        std_panic_macro,
         stmt,
         stmt_expr_attributes,
         stop_after_dataflow,
@@ -1165,6 +1206,7 @@ symbols! {
         unsafe_cell,
         unsafe_no_drop_flag,
         unsize,
+        unsized_fn_params,
         unsized_locals,
         unsized_tuple_coercion,
         unstable,
@@ -1172,6 +1214,7 @@ symbols! {
         unused_qualifications,
         unwind,
         unwind_attributes,
+        unwrap,
         unwrap_or,
         use_extern_macros,
         use_nested_groups,
@@ -1199,6 +1242,8 @@ symbols! {
         volatile_load,
         volatile_set_memory,
         volatile_store,
+        vreg,
+        vreg_low16,
         warn,
         wasm_import_module,
         wasm_target_feature,
@@ -1210,6 +1255,9 @@ symbols! {
         wrapping_mul,
         wrapping_sub,
         write_bytes,
+        xmm_reg,
+        ymm_reg,
+        zmm_reg,
     }
 }
 
@@ -1348,15 +1396,13 @@ impl fmt::Display for IdentPrinter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_raw {
             f.write_str("r#")?;
-        } else {
-            if self.symbol == kw::DollarCrate {
-                if let Some(span) = self.convert_dollar_crate {
-                    let converted = span.ctxt().dollar_crate_name();
-                    if !converted.is_path_segment_keyword() {
-                        f.write_str("::")?;
-                    }
-                    return fmt::Display::fmt(&converted, f);
+        } else if self.symbol == kw::DollarCrate {
+            if let Some(span) = self.convert_dollar_crate {
+                let converted = span.ctxt().dollar_crate_name();
+                if !converted.is_path_segment_keyword() {
+                    f.write_str("::")?;
                 }
+                return fmt::Display::fmt(&converted, f);
             }
         }
         fmt::Display::fmt(&self.symbol, f)
@@ -1574,11 +1620,6 @@ impl Symbol {
 
     fn is_unused_keyword_2018(self) -> bool {
         self == kw::Try
-    }
-
-    /// Used for sanity checking rustdoc keyword sections.
-    pub fn is_doc_keyword(self) -> bool {
-        self <= kw::Union
     }
 
     /// A keyword or reserved identifier that can be used as a path segment.

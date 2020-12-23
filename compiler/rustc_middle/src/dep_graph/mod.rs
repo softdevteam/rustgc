@@ -5,7 +5,7 @@ use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::sync::Lock;
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_errors::Diagnostic;
-use rustc_hir::def_id::LocalDefId;
+use rustc_hir::def_id::{DefPathHash, LocalDefId};
 
 mod dep_node;
 
@@ -91,6 +91,12 @@ impl<'tcx> DepContext for TyCtxt<'tcx> {
     type DepKind = DepKind;
     type StableHashingContext = StableHashingContext<'tcx>;
 
+    fn register_reused_dep_path_hash(&self, hash: DefPathHash) {
+        if let Some(cache) = self.queries.on_disk_cache.as_ref() {
+            cache.register_reused_dep_path_hash(*self, hash)
+        }
+    }
+
     fn create_stable_hashing_context(&self) -> Self::StableHashingContext {
         TyCtxt::create_stable_hashing_context(*self)
     }
@@ -164,11 +170,17 @@ impl<'tcx> DepContext for TyCtxt<'tcx> {
     }
 
     fn load_diagnostics(&self, prev_dep_node_index: SerializedDepNodeIndex) -> Vec<Diagnostic> {
-        self.queries.on_disk_cache.load_diagnostics(*self, prev_dep_node_index)
+        self.queries
+            .on_disk_cache
+            .as_ref()
+            .map(|c| c.load_diagnostics(*self, prev_dep_node_index))
+            .unwrap_or_default()
     }
 
     fn store_diagnostics(&self, dep_node_index: DepNodeIndex, diagnostics: ThinVec<Diagnostic>) {
-        self.queries.on_disk_cache.store_diagnostics(dep_node_index, diagnostics)
+        if let Some(c) = self.queries.on_disk_cache.as_ref() {
+            c.store_diagnostics(dep_node_index, diagnostics)
+        }
     }
 
     fn store_diagnostics_for_anon_node(
@@ -176,7 +188,9 @@ impl<'tcx> DepContext for TyCtxt<'tcx> {
         dep_node_index: DepNodeIndex,
         diagnostics: ThinVec<Diagnostic>,
     ) {
-        self.queries.on_disk_cache.store_diagnostics_for_anon_node(dep_node_index, diagnostics)
+        if let Some(c) = self.queries.on_disk_cache.as_ref() {
+            c.store_diagnostics_for_anon_node(dep_node_index, diagnostics)
+        }
     }
 
     fn profiler(&self) -> &SelfProfilerRef {

@@ -9,10 +9,11 @@ use rustc_hir::{Expr, ExprKind, HirId, MatchSource};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, TyS};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `Into`, `TryInto`, `From`, `TryFrom`,`IntoIter` calls
-    /// that useless converts to the same type as caller.
+    /// **What it does:** Checks for `Into`, `TryInto`, `From`, `TryFrom`, or `IntoIter` calls
+    /// which uselessly convert to the same type.
     ///
     /// **Why is this bad?** Redundant code.
     ///
@@ -30,7 +31,7 @@ declare_clippy_lint! {
     /// ```
     pub USELESS_CONVERSION,
     complexity,
-    "calls to `Into`, `TryInto`, `From`, `TryFrom`, `IntoIter` that performs useless conversions to the same type"
+    "calls to `Into`, `TryInto`, `From`, `TryFrom`, or `IntoIter` which perform useless conversions to the same type"
 }
 
 #[derive(Default)]
@@ -106,7 +107,7 @@ impl<'tcx> LateLintPass<'tcx> for UselessConversion {
                     if_chain! {
                         let a = cx.typeck_results().expr_ty(e);
                         let b = cx.typeck_results().expr_ty(&args[0]);
-                        if is_type_diagnostic_item(cx, a, sym!(result_type));
+                        if is_type_diagnostic_item(cx, a, sym::result_type);
                         if let ty::Adt(_, substs) = a.kind();
                         if let Some(a_type) = substs.types().next();
                         if TyS::same_type(a_type, b);
@@ -136,7 +137,7 @@ impl<'tcx> LateLintPass<'tcx> for UselessConversion {
                     then {
                         if_chain! {
                             if match_def_path(cx, def_id, &paths::TRY_FROM);
-                            if is_type_diagnostic_item(cx, a, sym!(result_type));
+                            if is_type_diagnostic_item(cx, a, sym::result_type);
                             if let ty::Adt(_, substs) = a.kind();
                             if let Some(a_type) = substs.types().next();
                             if TyS::same_type(a_type, b);

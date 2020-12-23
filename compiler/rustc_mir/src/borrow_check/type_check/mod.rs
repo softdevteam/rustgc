@@ -749,7 +749,11 @@ impl<'a, 'b, 'tcx> TypeVerifier<'a, 'b, 'tcx> {
                     (&adt_def.variants[VariantIdx::new(0)], substs)
                 }
                 ty::Closure(_, substs) => {
-                    return match substs.as_closure().upvar_tys().nth(field.index()) {
+                    return match substs
+                        .as_closure()
+                        .tupled_upvars_ty()
+                        .tuple_element_ty(field.index())
+                    {
                         Some(ty) => Ok(ty),
                         None => Err(FieldAccessError::OutOfRange {
                             field_count: substs.as_closure().upvar_tys().count(),
@@ -784,7 +788,7 @@ impl<'a, 'b, 'tcx> TypeVerifier<'a, 'b, 'tcx> {
         };
 
         if let Some(field) = variant.fields.get(field.index()) {
-            Ok(self.cx.normalize(&field.ty(tcx, substs), location))
+            Ok(self.cx.normalize(field.ty(tcx, substs), location))
         } else {
             Err(FieldAccessError::OutOfRange { field_count: variant.fields.len() })
         }
@@ -972,6 +976,11 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         };
         checker.check_user_type_annotations();
         checker
+    }
+
+    fn unsized_feature_enabled(&self) -> bool {
+        let features = self.tcx().features();
+        features.unsized_locals || features.unsized_fn_params
     }
 
     /// Equate the inferred type and the annotated type for user type annotations
@@ -1240,7 +1249,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                             anon_owner_def_id,
                             dummy_body_id,
                             param_env,
-                            &anon_ty,
+                            anon_ty,
                             locations.span(body),
                         ));
                     debug!(
@@ -1266,7 +1275,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     );
 
                     for (&opaque_def_id, opaque_decl) in &opaque_type_map {
-                        let resolved_ty = infcx.resolve_vars_if_possible(&opaque_decl.concrete_ty);
+                        let resolved_ty = infcx.resolve_vars_if_possible(opaque_decl.concrete_ty);
                         let concrete_is_opaque = if let ty::Opaque(def_id, _) = resolved_ty.kind() {
                             *def_id == opaque_def_id
                         } else {
@@ -1291,7 +1300,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         let subst_opaque_defn_ty =
                             opaque_defn_ty.concrete_type.subst(tcx, opaque_decl.substs);
                         let renumbered_opaque_defn_ty =
-                            renumber::renumber_regions(infcx, &subst_opaque_defn_ty);
+                            renumber::renumber_regions(infcx, subst_opaque_defn_ty);
 
                         debug!(
                             "eq_opaque_type_and_type: concrete_ty={:?}={:?} opaque_defn_ty={:?}",
@@ -1456,7 +1465,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 }
 
                 self.check_rvalue(body, rv, location);
-                if !self.tcx().features().unsized_locals {
+                if !self.unsized_feature_enabled() {
                     let trait_ref = ty::TraitRef {
                         def_id: tcx.require_lang_item(LangItem::Sized, Some(self.last_span)),
                         substs: tcx.mk_substs_trait(place_ty, &[]),
@@ -1596,7 +1605,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 let (sig, map) = self.infcx.replace_bound_vars_with_fresh_vars(
                     term.source_info.span,
                     LateBoundRegionConversionTime::FnCall,
-                    &sig,
+                    sig,
                 );
                 let sig = self.normalize(sig, term_location);
                 self.check_call_dest(body, term, &sig, destination, term_location);
@@ -1717,9 +1726,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     );
                 }
 
-                // When `#![feature(unsized_locals)]` is not enabled,
+                // When `unsized_fn_params` and `unsized_locals` are both not enabled,
                 // this check is done at `check_local`.
-                if self.tcx().features().unsized_locals {
+                if self.unsized_feature_enabled() {
                     let span = term.source_info.span;
                     self.ensure_place_sized(dest_ty, span);
                 }
@@ -1880,9 +1889,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             LocalKind::Var | LocalKind::Temp => {}
         }
 
-        // When `#![feature(unsized_locals)]` is enabled, only function calls
+        // When `unsized_fn_params` or `unsized_locals` is enabled, only function calls
         // and nullary ops are checked in `check_call_dest`.
-        if !self.tcx().features().unsized_locals {
+        if !self.unsized_feature_enabled() {
             let span = local_decl.source_info.span;
             let ty = local_decl.ty;
             self.ensure_place_sized(ty, span);
@@ -1895,7 +1904,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         // Erase the regions from `ty` to get a global type.  The
         // `Sized` bound in no way depends on precise regions, so this
         // shouldn't affect `is_sized`.
-        let erased_ty = tcx.erase_regions(&ty);
+        let erased_ty = tcx.erase_regions(ty);
         if !erased_ty.is_sized(tcx.at(span), self.param_env) {
             // in current MIR construction, all non-control-flow rvalue
             // expressions evaluate through `as_temp` or `into` a return
@@ -2024,7 +2033,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
 
             Rvalue::NullaryOp(_, ty) => {
                 // Even with unsized locals cannot box an unsized value.
-                if self.tcx().features().unsized_locals {
+                if self.unsized_feature_enabled() {
                     let span = body.source_info(location).span;
                     self.ensure_place_sized(ty, span);
                 }

@@ -14,6 +14,9 @@
 #![feature(crate_visibility_modifier)]
 #![feature(never_type)]
 #![feature(once_cell)]
+#![feature(type_ascription)]
+#![feature(split_inclusive)]
+#![feature(str_split_once)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -59,9 +62,11 @@ use std::default::Default;
 use std::env;
 use std::process;
 
+use rustc_data_structures::sync::Lrc;
 use rustc_errors::ErrorReported;
 use rustc_session::config::{make_crate_type_option, ErrorOutputType, RustcOptGroup};
 use rustc_session::getopts;
+use rustc_session::Session;
 use rustc_session::{early_error, early_warn};
 
 #[macro_use]
@@ -269,6 +274,26 @@ fn opts() -> Vec<RustcOptGroup> {
                 "sort modules by where they appear in the program, rather than alphabetically",
             )
         }),
+        unstable("default-theme", |o| {
+            o.optopt(
+                "",
+                "default-theme",
+                "Set the default theme. THEME should be the theme name, generally lowercase. \
+                 If an unknown default theme is specified, the builtin default is used. \
+                 The set of themes, and the rustdoc built-in default is not stable.",
+                "THEME",
+            )
+        }),
+        unstable("default-setting", |o| {
+            o.optmulti(
+                "",
+                "default-setting",
+                "Default value for a rustdoc setting (used when \"rustdoc-SETTING\" is absent \
+                 from web browser Local Storage). If VALUE is not supplied, \"true\" is used. \
+                 Supported SETTINGs and VALUEs are not documented and not stable.",
+                "SETTING[=VALUE]",
+            )
+        }),
         stable("theme", |o| {
             o.optmulti(
                 "",
@@ -403,6 +428,7 @@ fn opts() -> Vec<RustcOptGroup> {
                 "specified the rustc-like binary to use as the test builder",
             )
         }),
+        unstable("check", |o| o.optflag("", "check", "Run rustdoc checks")),
     ]
 }
 
@@ -412,6 +438,7 @@ fn usage(argv0: &str) {
         (option.apply)(&mut options);
     }
     println!("{}", options.usage(&format!("{} [options] <input>", argv0)));
+    println!("More information available at https://doc.rust-lang.org/rustdoc/what-is-rustdoc.html")
 }
 
 /// A result type used by several functions under `main()`.
@@ -459,8 +486,9 @@ fn run_renderer<T: formats::FormatRenderer>(
     render_info: config::RenderInfo,
     diag: &rustc_errors::Handler,
     edition: rustc_span::edition::Edition,
+    sess: Lrc<Session>,
 ) -> MainResult {
-    match formats::run_format::<T>(krate, renderopts, render_info, &diag, edition) {
+    match formats::run_format::<T>(krate, renderopts, render_info, &diag, edition, sess) {
         Ok(_) => Ok(()),
         Err(e) => {
             let mut msg = diag.struct_err(&format!("couldn't generate documentation: {}", e.error));
@@ -491,9 +519,10 @@ fn main_options(options: config::Options) -> MainResult {
     }
 
     // need to move these items separately because we lose them by the time the closure is called,
-    // but we can't crates the Handler ahead of time because it's not Send
+    // but we can't create the Handler ahead of time because it's not Send
     let diag_opts = (options.error_format, options.edition, options.debugging_opts.clone());
     let show_coverage = options.show_coverage;
+    let run_check = options.run_check;
 
     // First, parse the crate and extract all relevant information.
     info!("starting to run rustc");
@@ -519,17 +548,23 @@ fn main_options(options: config::Options) -> MainResult {
         // if we ran coverage, bail early, we don't need to also generate docs at this point
         // (also we didn't load in any of the useful passes)
         return Ok(());
+    } else if run_check {
+        // Since we're in "check" mode, no need to generate anything beyond this point.
+        return Ok(());
     }
 
     info!("going to format");
     let (error_format, edition, debugging_options) = diag_opts;
     let diag = core::new_handler(error_format, None, &debugging_options);
+    let sess_time = sess.clone();
     match output_format {
-        None | Some(config::OutputFormat::Html) => sess.time("render_html", || {
-            run_renderer::<html::render::Context>(krate, renderopts, renderinfo, &diag, edition)
+        None | Some(config::OutputFormat::Html) => sess_time.time("render_html", || {
+            run_renderer::<html::render::Context>(
+                krate, renderopts, renderinfo, &diag, edition, sess,
+            )
         }),
-        Some(config::OutputFormat::Json) => sess.time("render_json", || {
-            run_renderer::<json::JsonRenderer>(krate, renderopts, renderinfo, &diag, edition)
+        Some(config::OutputFormat::Json) => sess_time.time("render_json", || {
+            run_renderer::<json::JsonRenderer>(krate, renderopts, renderinfo, &diag, edition, sess)
         }),
     }
 }

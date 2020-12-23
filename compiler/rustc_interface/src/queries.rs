@@ -3,6 +3,7 @@ use crate::passes::{self, BoxedResolver, QueryContext};
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::traits::CodegenBackend;
+use rustc_data_structures::steal::Steal;
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::{Lrc, OnceCell, WorkerLocal};
 use rustc_errors::ErrorReported;
@@ -12,7 +13,6 @@ use rustc_incremental::DepGraphFuture;
 use rustc_lint::LintStore;
 use rustc_middle::arena::Arena;
 use rustc_middle::dep_graph::DepGraph;
-use rustc_middle::ty::steal::Steal;
 use rustc_middle::ty::{GlobalCtxt, ResolverOutputs, TyCtxt};
 use rustc_serialize::json;
 use rustc_session::config::{self, OutputFilenames, OutputType};
@@ -156,13 +156,11 @@ impl<'tcx> Queries<'tcx> {
 
     pub fn crate_name(&self) -> Result<&Query<String>> {
         self.crate_name.compute(|| {
-            Ok(match self.compiler.crate_name {
-                Some(ref crate_name) => crate_name.clone(),
-                None => {
-                    let parse_result = self.parse()?;
-                    let krate = parse_result.peek();
-                    find_crate_name(self.session(), &krate.attrs, &self.compiler.input)
-                }
+            Ok({
+                let parse_result = self.parse()?;
+                let krate = parse_result.peek();
+                // parse `#[crate_name]` even if `--crate-name` was passed, to make sure it matches.
+                find_crate_name(self.session(), &krate.attrs, &self.compiler.input)
             })
         })
     }

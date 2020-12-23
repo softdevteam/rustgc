@@ -4,6 +4,7 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::{def, BindingAnnotation, Block, Expr, ExprKind, MatchSource, PatKind, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_span::sym;
 
 use crate::utils::sugg::Sugg;
 use crate::utils::{
@@ -143,7 +144,7 @@ impl QuestionMark {
     fn is_option(cx: &LateContext<'_>, expression: &Expr<'_>) -> bool {
         let expr_ty = cx.typeck_results().expr_ty(expression);
 
-        is_type_diagnostic_item(cx, expr_ty, sym!(option_type))
+        is_type_diagnostic_item(cx, expr_ty, sym::option_type)
     }
 
     fn expression_returns_none(cx: &LateContext<'_>, expression: &Expr<'_>) -> bool {
@@ -175,8 +176,7 @@ impl QuestionMark {
             if block.stmts.len() == 1;
             if let Some(expr) = block.stmts.iter().last();
             if let StmtKind::Semi(ref expr) = expr.kind;
-            if let ExprKind::Ret(ret_expr) = expr.kind;
-            if let Some(ret_expr) = ret_expr;
+            if let ExprKind::Ret(Some(ret_expr)) = expr.kind;
 
             then {
                 return Some(ret_expr);

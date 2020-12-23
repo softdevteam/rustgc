@@ -48,30 +48,30 @@ macro_rules! CloneLiftImpls {
 /// Used for types that are `Copy` and which **do not care arena
 /// allocated data** (i.e., don't need to be folded).
 #[macro_export]
-macro_rules! CloneTypeFoldableImpls {
+macro_rules! TrivialTypeFoldableImpls {
     (for <$tcx:lifetime> { $($ty:ty,)+ }) => {
         $(
             impl<$tcx> $crate::ty::fold::TypeFoldable<$tcx> for $ty {
                 fn super_fold_with<F: $crate::ty::fold::TypeFolder<$tcx>>(
-                    &self,
+                    self,
                     _: &mut F
                 ) -> $ty {
-                    Clone::clone(self)
+                    self
                 }
 
                 fn super_visit_with<F: $crate::ty::fold::TypeVisitor<$tcx>>(
                     &self,
                     _: &mut F)
-                    -> bool
+                    -> ::std::ops::ControlFlow<F::BreakTy>
                 {
-                    false
+                    ::std::ops::ControlFlow::CONTINUE
                 }
             }
         )+
     };
 
     ($($ty:ty,)+) => {
-        CloneTypeFoldableImpls! {
+        TrivialTypeFoldableImpls! {
             for <'tcx> {
                 $($ty,)+
             }
@@ -80,9 +80,9 @@ macro_rules! CloneTypeFoldableImpls {
 }
 
 #[macro_export]
-macro_rules! CloneTypeFoldableAndLiftImpls {
+macro_rules! TrivialTypeFoldableAndLiftImpls {
     ($($t:tt)*) => {
-        CloneTypeFoldableImpls! { $($t)* }
+        TrivialTypeFoldableImpls! { $($t)* }
         CloneLiftImpls! { $($t)* }
     }
 }
@@ -96,7 +96,7 @@ macro_rules! EnumTypeFoldableImpl {
             $(where $($wc)*)*
         {
             fn super_fold_with<V: $crate::ty::fold::TypeFolder<$tcx>>(
-                &self,
+                self,
                 folder: &mut V,
             ) -> Self {
                 EnumTypeFoldableImpl!(@FoldVariants(self, folder) input($($variants)*) output())
@@ -105,7 +105,7 @@ macro_rules! EnumTypeFoldableImpl {
             fn super_visit_with<V: $crate::ty::fold::TypeVisitor<$tcx>>(
                 &self,
                 visitor: &mut V,
-            ) -> bool {
+            ) -> ::std::ops::ControlFlow<V::BreakTy> {
                 EnumTypeFoldableImpl!(@VisitVariants(self, visitor) input($($variants)*) output())
             }
         }
@@ -179,9 +179,10 @@ macro_rules! EnumTypeFoldableImpl {
                 input($($input)*)
                 output(
                     $variant ( $($variant_arg),* ) => {
-                        false $(|| $crate::ty::fold::TypeFoldable::visit_with(
+                        $($crate::ty::fold::TypeFoldable::visit_with(
                             $variant_arg, $visitor
-                        ))*
+                        )?;)*
+                        ::std::ops::ControlFlow::CONTINUE
                     }
                     $($output)*
                 )
@@ -196,9 +197,10 @@ macro_rules! EnumTypeFoldableImpl {
                 input($($input)*)
                 output(
                     $variant { $($variant_arg),* } => {
-                        false $(|| $crate::ty::fold::TypeFoldable::visit_with(
+                        $($crate::ty::fold::TypeFoldable::visit_with(
                             $variant_arg, $visitor
-                        ))*
+                        )?;)*
+                        ::std::ops::ControlFlow::CONTINUE
                     }
                     $($output)*
                 )
@@ -212,7 +214,7 @@ macro_rules! EnumTypeFoldableImpl {
             @VisitVariants($this, $visitor)
                 input($($input)*)
                 output(
-                    $variant => { false }
+                    $variant => { ::std::ops::ControlFlow::CONTINUE }
                     $($output)*
                 )
         )

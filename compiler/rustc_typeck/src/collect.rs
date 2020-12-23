@@ -40,7 +40,7 @@ use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::util::Discr;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, AdtKind, Const, ToPolyTraitRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, AdtKind, Const, DefIdTree, ToPolyTraitRef, Ty, TyCtxt};
 use rustc_middle::ty::{ReprOptions, ToPredicate, WithConstness};
 use rustc_session::config::SanitizerSet;
 use rustc_session::lint;
@@ -49,6 +49,8 @@ use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::spec::abi;
 use rustc_trait_selection::traits::error_reporting::suggestions::NextTypeParamName;
+
+use std::ops::ControlFlow;
 
 mod item_bounds;
 mod type_of;
@@ -357,8 +359,8 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                 self.tcx().sess,
                 span,
                 E0212,
-                "cannot extract an associated type from a higher-ranked trait bound \
-                 in this context"
+                "cannot use the associated type of a trait \
+                 with uninferred generic parameters"
             );
 
             match self.node() {
@@ -384,7 +386,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                                         "{}::{}",
                                         // Replace the existing lifetimes with a new named lifetime.
                                         self.tcx
-                                            .replace_late_bound_regions(&poly_trait_ref, |_| {
+                                            .replace_late_bound_regions(poly_trait_ref, |_| {
                                                 self.tcx.mk_region(ty::ReEarlyBound(
                                                     ty::EarlyBoundRegion {
                                                         def_id: item_def_id,
@@ -422,7 +424,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                         format!(
                             "{}::{}",
                             // Erase named lt, we want `<A as B<'_>::C`, not `<A as B<'a>::C`.
-                            self.tcx.anonymize_late_bound_regions(&poly_trait_ref).skip_binder(),
+                            self.tcx.anonymize_late_bound_regions(poly_trait_ref).skip_binder(),
                             item_segment.ident
                         ),
                         Applicability::MaybeIncorrect,
@@ -644,8 +646,9 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::HirId) {
         | hir::ItemKind::Use(..)
         | hir::ItemKind::Mod(_)
         | hir::ItemKind::GlobalAsm(_) => {}
-        hir::ItemKind::ForeignMod(ref foreign_mod) => {
-            for item in foreign_mod.items {
+        hir::ItemKind::ForeignMod { items, .. } => {
+            for item in items {
+                let item = tcx.hir().foreign_item(item.id);
                 let def_id = tcx.hir().local_def_id(item.hir_id);
                 tcx.ensure().generics_of(def_id);
                 tcx.ensure().type_of(def_id);
@@ -2060,14 +2063,14 @@ fn const_evaluatable_predicates_of<'tcx>(
             }
 
             impl<'a, 'tcx> TypeVisitor<'tcx> for TyAliasVisitor<'a, 'tcx> {
-                fn visit_const(&mut self, ct: &'tcx Const<'tcx>) -> bool {
+                fn visit_const(&mut self, ct: &'tcx Const<'tcx>) -> ControlFlow<Self::BreakTy> {
                     if let ty::ConstKind::Unevaluated(def, substs, None) = ct.val {
                         self.preds.insert((
                             ty::PredicateAtom::ConstEvaluatable(def, substs).to_predicate(self.tcx),
                             self.span,
                         ));
                     }
-                    false
+                    ControlFlow::CONTINUE
                 }
             }
 
@@ -2090,25 +2093,25 @@ fn const_evaluatable_predicates_of<'tcx>(
     if let hir::Node::Item(item) = node {
         if let hir::ItemKind::Impl { ref of_trait, ref self_ty, .. } = item.kind {
             if let Some(of_trait) = of_trait {
-                warn!("const_evaluatable_predicates_of({:?}): visit impl trait_ref", def_id);
+                debug!("const_evaluatable_predicates_of({:?}): visit impl trait_ref", def_id);
                 collector.visit_trait_ref(of_trait);
             }
 
-            warn!("const_evaluatable_predicates_of({:?}): visit_self_ty", def_id);
+            debug!("const_evaluatable_predicates_of({:?}): visit_self_ty", def_id);
             collector.visit_ty(self_ty);
         }
     }
 
     if let Some(generics) = node.generics() {
-        warn!("const_evaluatable_predicates_of({:?}): visit_generics", def_id);
+        debug!("const_evaluatable_predicates_of({:?}): visit_generics", def_id);
         collector.visit_generics(generics);
     }
 
     if let Some(fn_sig) = tcx.hir().fn_sig_by_hir_id(hir_id) {
-        warn!("const_evaluatable_predicates_of({:?}): visit_fn_decl", def_id);
+        debug!("const_evaluatable_predicates_of({:?}): visit_fn_decl", def_id);
         collector.visit_fn_decl(fn_sig.decl);
     }
-    warn!("const_evaluatable_predicates_of({:?}) = {:?}", def_id, collector.preds);
+    debug!("const_evaluatable_predicates_of({:?}) = {:?}", def_id, collector.preds);
 
     collector.preds
 }
@@ -2138,13 +2141,8 @@ fn explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericPredicat
             // * It must be an associated type for this trait (*not* a
             //   supertrait).
             if let ty::Projection(projection) = ty.kind() {
-                if projection.substs == trait_identity_substs
+                projection.substs == trait_identity_substs
                     && tcx.associated_item(projection.item_def_id).container.id() == def_id
-                {
-                    true
-                } else {
-                    false
-                }
             } else {
                 false
             }
@@ -2409,6 +2407,7 @@ fn from_target_feature(
                 Some(sym::movbe_target_feature) => rust_features.movbe_target_feature,
                 Some(sym::rtm_target_feature) => rust_features.rtm_target_feature,
                 Some(sym::f16c_target_feature) => rust_features.f16c_target_feature,
+                Some(sym::ermsb_target_feature) => rust_features.ermsb_target_feature,
                 Some(name) => bug!("unknown target feature gate {}", name),
                 None => true,
             };
@@ -2650,7 +2649,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                             set.path.segments.iter().map(|x| x.ident.name).collect::<Vec<_>>();
                         match segments.as_slice() {
                             [sym::arm, sym::a32] | [sym::arm, sym::t32] => {
-                                if !tcx.sess.target.options.has_thumb_interworking {
+                                if !tcx.sess.target.has_thumb_interworking {
                                     struct_span_err!(
                                         tcx.sess.diagnostic(),
                                         attr.span,
@@ -2785,6 +2784,14 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
             None => ia,
         }
     });
+
+    // #73631: closures inherit `#[target_feature]` annotations
+    if tcx.features().target_feature_11 && tcx.is_closure(id) {
+        let owner_id = tcx.parent(id).expect("closure should have a parent");
+        codegen_fn_attrs
+            .target_features
+            .extend(tcx.codegen_fn_attrs(owner_id).target_features.iter().copied())
+    }
 
     // If a function uses #[target_feature] it can't be inlined into general
     // purpose functions as they wouldn't have the right target features

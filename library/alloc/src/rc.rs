@@ -11,7 +11,7 @@
 //! is no exception: you cannot generally obtain a mutable reference to
 //! something inside an [`Rc`]. If you need mutability, put a [`Cell`]
 //! or [`RefCell`] inside the [`Rc`]; see [an example of mutability
-//! inside an Rc][mutability].
+//! inside an `Rc`][mutability].
 //!
 //! [`Rc`] uses non-atomic reference counting. This means that overhead is very
 //! low, but an [`Rc`] cannot be sent between threads, and consequently [`Rc`]
@@ -35,13 +35,27 @@
 //! `Rc<T>` automatically dereferences to `T` (via the [`Deref`] trait),
 //! so you can call `T`'s methods on a value of type [`Rc<T>`][`Rc`]. To avoid name
 //! clashes with `T`'s methods, the methods of [`Rc<T>`][`Rc`] itself are associated
-//! functions, called using function-like syntax:
+//! functions, called using [fully qualified syntax]:
 //!
 //! ```
 //! use std::rc::Rc;
-//! let my_rc = Rc::new(());
 //!
+//! let my_rc = Rc::new(());
 //! Rc::downgrade(&my_rc);
+//! ```
+//!
+//! `Rc<T>`'s implementations of traits like `Clone` may also be called using
+//! fully qualified syntax. Some people prefer to use fully qualified syntax,
+//! while others prefer using method-call syntax.
+//!
+//! ```
+//! use std::rc::Rc;
+//!
+//! let rc = Rc::new(());
+//! // Method-call syntax
+//! let rc2 = rc.clone();
+//! // Fully qualified syntax
+//! let rc3 = Rc::clone(&rc);
 //! ```
 //!
 //! [`Weak<T>`][`Weak`] does not auto-dereference to `T`, because the inner value may have
@@ -54,6 +68,7 @@
 //!
 //! ```
 //! use std::rc::Rc;
+//!
 //! let foo = Rc::new(vec![1.0, 2.0, 3.0]);
 //! // The two syntaxes below are equivalent.
 //! let a = foo.clone();
@@ -218,7 +233,7 @@
 //! [`Cell`]: core::cell::Cell
 //! [`RefCell`]: core::cell::RefCell
 //! [send]: core::marker::Send
-//! [arc]: ../../std/sync/struct.Arc.html
+//! [arc]: crate::sync::Arc
 //! [`Deref`]: core::ops::Deref
 //! [downgrade]: Rc::downgrade
 //! [upgrade]: Weak::upgrade
@@ -247,7 +262,7 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::slice::from_raw_parts_mut;
 
-use crate::alloc::{box_free, handle_alloc_error, AllocError, AllocRef, Global, Layout};
+use crate::alloc::{box_free, handle_alloc_error, AllocError, Allocator, Global, Layout};
 use crate::borrow::{Cow, ToOwned};
 use crate::string::String;
 use crate::vec::Vec;
@@ -272,10 +287,9 @@ struct RcBox<T: ?Sized> {
 ///
 /// The inherent methods of `Rc` are all associated functions, which means
 /// that you have to call them as e.g., [`Rc::get_mut(&mut value)`][get_mut] instead of
-/// `value.get_mut()`. This avoids conflicts with methods of the inner
-/// type `T`.
+/// `value.get_mut()`. This avoids conflicts with methods of the inner type `T`.
 ///
-/// [get_mut]: #method.get_mut
+/// [get_mut]: Rc::get_mut
 #[cfg_attr(not(test), rustc_diagnostic_item = "Rc")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Rc<T: ?Sized> {
@@ -402,7 +416,7 @@ impl<T> Rc<T> {
         unsafe {
             Rc::from_ptr(Rc::allocate_for_layout(
                 Layout::new::<T>(),
-                |layout| Global.alloc(layout),
+                |layout| Global.allocate(layout),
                 |mem| mem as *mut RcBox<mem::MaybeUninit<T>>,
             ))
         }
@@ -433,7 +447,7 @@ impl<T> Rc<T> {
         unsafe {
             Rc::from_ptr(Rc::allocate_for_layout(
                 Layout::new::<T>(),
-                |layout| Global.alloc_zeroed(layout),
+                |layout| Global.allocate_zeroed(layout),
                 |mem| mem as *mut RcBox<mem::MaybeUninit<T>>,
             ))
         }
@@ -541,7 +555,7 @@ impl<T> Rc<[T]> {
         unsafe {
             Rc::from_ptr(Rc::allocate_for_layout(
                 Layout::array::<T>(len).unwrap(),
-                |layout| Global.alloc_zeroed(layout),
+                |layout| Global.allocate_zeroed(layout),
                 |mem| {
                     ptr::slice_from_raw_parts_mut(mem as *mut T, len)
                         as *mut RcBox<[mem::MaybeUninit<T>]>
@@ -1026,7 +1040,7 @@ impl<T: ?Sized> Rc<T> {
         unsafe {
             Self::allocate_for_layout(
                 Layout::for_value(&*ptr),
-                |layout| Global.alloc(layout),
+                |layout| Global.allocate(layout),
                 |mem| set_data_ptr(ptr as *mut T, mem) as *mut RcBox<T>,
             )
         }
@@ -1034,7 +1048,7 @@ impl<T: ?Sized> Rc<T> {
 
     fn from_box(v: Box<T>) -> Rc<T> {
         unsafe {
-            let box_unique = Box::into_unique(v);
+            let (box_unique, alloc) = Box::into_unique(v);
             let bptr = box_unique.as_ptr();
 
             let value_size = size_of_val(&*bptr);
@@ -1048,7 +1062,7 @@ impl<T: ?Sized> Rc<T> {
             );
 
             // Free the allocation without dropping its contents
-            box_free(box_unique);
+            box_free(box_unique, alloc);
 
             Self::from_ptr(ptr)
         }
@@ -1061,7 +1075,7 @@ impl<T> Rc<[T]> {
         unsafe {
             Self::allocate_for_layout(
                 Layout::array::<T>(len).unwrap(),
-                |layout| Global.alloc(layout),
+                |layout| Global.allocate(layout),
                 |mem| ptr::slice_from_raw_parts_mut(mem as *mut T, len) as *mut RcBox<[T]>,
             )
         }
@@ -1111,7 +1125,7 @@ impl<T> Rc<[T]> {
                     let slice = from_raw_parts_mut(self.elems, self.n_elems);
                     ptr::drop_in_place(slice);
 
-                    Global.dealloc(self.mem, self.layout);
+                    Global.deallocate(self.mem, self.layout);
                 }
             }
         }
@@ -1211,7 +1225,7 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
                 self.inner().dec_weak();
 
                 if self.inner().weak() == 0 {
-                    Global.dealloc(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
+                    Global.deallocate(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
                 }
             }
         }
@@ -2026,7 +2040,7 @@ impl<T: ?Sized> Drop for Weak<T> {
         // the strong pointers have disappeared.
         if inner.weak() == 0 {
             unsafe {
-                Global.dealloc(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
+                Global.deallocate(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
             }
         }
     }

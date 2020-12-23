@@ -406,7 +406,8 @@ impl<T> Cell<T> {
     /// assert_eq!(five, 5);
     /// ```
     #[stable(feature = "move_cell", since = "1.17.0")]
-    pub fn into_inner(self) -> T {
+    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
+    pub const fn into_inner(self) -> T {
         self.value.into_inner()
     }
 }
@@ -573,7 +574,7 @@ pub struct RefCell<T: ?Sized> {
     value: UnsafeCell<T>,
 }
 
-/// An error returned by [`RefCell::try_borrow`](struct.RefCell.html#method.try_borrow).
+/// An error returned by [`RefCell::try_borrow`].
 #[stable(feature = "try_borrow", since = "1.13.0")]
 pub struct BorrowError {
     _private: (),
@@ -593,7 +594,7 @@ impl Display for BorrowError {
     }
 }
 
-/// An error returned by [`RefCell::try_borrow_mut`](struct.RefCell.html#method.try_borrow_mut).
+/// An error returned by [`RefCell::try_borrow_mut`].
 #[stable(feature = "try_borrow", since = "1.13.0")]
 pub struct BorrowMutError {
     _private: (),
@@ -668,12 +669,11 @@ impl<T> RefCell<T> {
     /// let five = c.into_inner();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
     #[inline]
-    pub fn into_inner(self) -> T {
+    pub const fn into_inner(self) -> T {
         // Since this function takes `self` (the `RefCell`) by value, the
         // compiler statically verifies that it is not currently borrowed.
-        // Therefore the following assertion is just a `debug_assert!`.
-        debug_assert!(self.borrow.get() == UNUSED);
         self.value.into_inner()
     }
 
@@ -929,7 +929,7 @@ impl<T: ?Sized> RefCell<T> {
     /// Also, please be aware that this method is only for special circumstances and is usually
     /// not what you want. In case of doubt, use [`borrow_mut`] instead.
     ///
-    /// [`borrow_mut`]: #method.borrow_mut
+    /// [`borrow_mut`]: RefCell::borrow_mut()
     ///
     /// # Examples
     ///
@@ -953,7 +953,7 @@ impl<T: ?Sized> RefCell<T> {
     /// ensure no borrows exist and then resets the state tracking shared borrows. This is relevant
     /// if some `Ref` or `RefMut` borrows have been leaked.
     ///
-    /// [`get_mut`]: #method.get_mut
+    /// [`get_mut`]: RefCell::get_mut()
     ///
     /// # Examples
     ///
@@ -1027,7 +1027,6 @@ impl<T: Default> RefCell<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(refcell_take)]
     /// use std::cell::RefCell;
     ///
     /// let c = RefCell::new(5);
@@ -1036,7 +1035,7 @@ impl<T: Default> RefCell<T> {
     /// assert_eq!(five, 5);
     /// assert_eq!(c.into_inner(), 0);
     /// ```
-    #[unstable(feature = "refcell_take", issue = "71395")]
+    #[stable(feature = "refcell_take", since = "1.50.0")]
     pub fn take(&self) -> T {
         self.replace(Default::default())
     }
@@ -1682,7 +1681,8 @@ impl<T> UnsafeCell<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn into_inner(self) -> T {
+    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
+    pub const fn into_inner(self) -> T {
         self.value
     }
 }
@@ -1733,8 +1733,7 @@ impl<T: ?Sized> UnsafeCell<T> {
     #[inline]
     #[unstable(feature = "unsafe_cell_get_mut", issue = "76943")]
     pub fn get_mut(&mut self) -> &mut T {
-        // SAFETY: (outer) `&mut` guarantees unique access.
-        unsafe { &mut *self.get() }
+        &mut self.value
     }
 
     /// Gets a mutable pointer to the wrapped value.
@@ -1746,7 +1745,7 @@ impl<T: ?Sized> UnsafeCell<T> {
     /// when casting to `&mut T`, and ensure that there are no mutations
     /// or mutable aliases going on when casting to `&T`.
     ///
-    /// [`get`]: #method.get
+    /// [`get`]: UnsafeCell::get()
     ///
     /// # Examples
     ///

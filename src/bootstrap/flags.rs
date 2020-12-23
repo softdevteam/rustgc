@@ -15,6 +15,31 @@ use crate::config::{Config, TargetSelection};
 use crate::setup::Profile;
 use crate::{Build, DocTests};
 
+pub enum Color {
+    Always,
+    Never,
+    Auto,
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl std::str::FromStr for Color {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            "auto" => Ok(Self::Auto),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Deserialized version of all flags for this compile.
 pub struct Flags {
     pub verbose: usize, // number of -v args; each extra -v after the first is passed to Cargo
@@ -34,6 +59,7 @@ pub struct Flags {
     pub rustc_error_format: Option<String>,
     pub json_output: bool,
     pub dry_run: bool,
+    pub color: Color,
 
     // This overrides the deny-warnings configuration option,
     // which passes -Dwarnings to the compiler invocations.
@@ -55,6 +81,7 @@ pub enum Subcommand {
         paths: Vec<PathBuf>,
     },
     Clippy {
+        fix: bool,
         paths: Vec<PathBuf>,
     },
     Fix {
@@ -183,6 +210,7 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         );
         opts.optopt("", "error-format", "rustc error format", "FORMAT");
         opts.optflag("", "json-output", "use message-format=json");
+        opts.optopt("", "color", "whether to use color in cargo and rustc output", "STYLE");
         opts.optopt(
             "",
             "llvm-skip-rebuild",
@@ -232,7 +260,13 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         match subcommand.as_str() {
             "test" | "t" => {
                 opts.optflag("", "no-fail-fast", "Run all tests regardless of failure");
-                opts.optmulti("", "test-args", "extra arguments", "ARGS");
+                opts.optmulti(
+                    "",
+                    "test-args",
+                    "extra arguments to be passed for the test tool being used \
+                        (e.g. libtest, compiletest or rustdoc)",
+                    "ARGS",
+                );
                 opts.optmulti(
                     "",
                     "rustc-args",
@@ -266,6 +300,9 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
             }
             "bench" => {
                 opts.optmulti("", "test-args", "extra arguments", "ARGS");
+            }
+            "clippy" => {
+                opts.optflag("", "fix", "automatically apply lint suggestions");
             }
             "doc" => {
                 opts.optflag("", "open", "open the docs in a browser");
@@ -507,7 +544,7 @@ Arguments:
             "check" | "c" => {
                 Subcommand::Check { paths, all_targets: matches.opt_present("all-targets") }
             }
-            "clippy" => Subcommand::Clippy { paths },
+            "clippy" => Subcommand::Clippy { paths, fix: matches.opt_present("fix") },
             "fix" => Subcommand::Fix { paths },
             "test" | "t" => Subcommand::Test {
                 paths,
@@ -634,6 +671,9 @@ Arguments:
             llvm_skip_rebuild: matches.opt_str("llvm-skip-rebuild").map(|s| s.to_lowercase()).map(
                 |s| s.parse::<bool>().expect("`llvm-skip-rebuild` should be either true or false"),
             ),
+            color: matches
+                .opt_get_default("color", Color::Auto)
+                .expect("`color` should be `always`, `never`, or `auto`"),
         }
     }
 }

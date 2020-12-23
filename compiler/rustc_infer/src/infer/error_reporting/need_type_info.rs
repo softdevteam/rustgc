@@ -49,7 +49,7 @@ impl<'a, 'tcx> FindHirNodeVisitor<'a, 'tcx> {
             .and_then(|typeck_results| typeck_results.borrow().node_type_opt(hir_id));
         match ty_opt {
             Some(ty) => {
-                let ty = self.infcx.resolve_vars_if_possible(&ty);
+                let ty = self.infcx.resolve_vars_if_possible(ty);
                 if ty.walk().any(|inner| {
                     inner == self.target
                         || match (inner.unpack(), self.target.unpack()) {
@@ -124,6 +124,11 @@ impl<'a, 'tcx> Visitor<'tcx> for FindHirNodeVisitor<'a, 'tcx> {
                 return;
             }
         }
+
+        // FIXME(const_generics): Currently, any uninferred `const` generics arguments
+        // are handled specially, but instead they should be handled in `annotate_method_call`,
+        // which currently doesn't work because this evaluates to `false` for const arguments.
+        // See https://github.com/rust-lang/rust/pull/77758 for more details.
         if self.node_ty_contains_target(expr.hir_id).is_some() {
             match expr.kind {
                 ExprKind::Closure(..) => self.found_closure = Some(&expr),
@@ -343,13 +348,8 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         arg: GenericArg<'tcx>,
         error_code: TypeAnnotationNeeded,
     ) -> DiagnosticBuilder<'tcx> {
-        let arg = self.resolve_vars_if_possible(&arg);
+        let arg = self.resolve_vars_if_possible(arg);
         let arg_data = self.extract_inference_diagnostics_data(arg, None);
-        let kind_str = match arg.unpack() {
-            GenericArgKind::Type(_) => "type",
-            GenericArgKind::Const(_) => "the value",
-            GenericArgKind::Lifetime(_) => bug!("unexpected lifetime"),
-        };
 
         let mut local_visitor = FindHirNodeVisitor::new(&self, arg, span);
         let ty_to_string = |ty: Ty<'tcx>| -> String {
@@ -618,6 +618,28 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             .any(|span_label| span_label.label.is_some() && span_label.span == span)
             && local_visitor.found_arg_pattern.is_none()
         {
+            let (kind_str, const_value) = match arg.unpack() {
+                GenericArgKind::Type(_) => ("type", None),
+                GenericArgKind::Const(_) => ("the value", Some(())),
+                GenericArgKind::Lifetime(_) => bug!("unexpected lifetime"),
+            };
+
+            // FIXME(const_generics): we would like to handle const arguments
+            // as part of the normal diagnostics flow below, but there appear to
+            // be subtleties in doing so, so for now we special-case const args
+            // here.
+            if let Some(suggestion) = const_value
+                .and_then(|_| arg_data.parent_name.as_ref())
+                .map(|parent| format!("{}::<{}>", parent, arg_data.name))
+            {
+                err.span_suggestion_verbose(
+                    span,
+                    "consider specifying the const argument",
+                    suggestion,
+                    Applicability::MaybeIncorrect,
+                );
+            }
+
             // Avoid multiple labels pointing at `span`.
             err.span_label(
                 span,
@@ -686,7 +708,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         span: Span,
         ty: Ty<'tcx>,
     ) -> DiagnosticBuilder<'tcx> {
-        let ty = self.resolve_vars_if_possible(&ty);
+        let ty = self.resolve_vars_if_possible(ty);
         let data = self.extract_inference_diagnostics_data(ty.into(), None);
 
         let mut err = struct_span_err!(
@@ -739,7 +761,6 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 "cannot infer {} {} {} `{}`{}",
                 kind_str, preposition, descr, type_name, parent_desc
             )
-            .into()
         }
     }
 }

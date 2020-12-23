@@ -9,6 +9,7 @@ use rustc_data_structures::sync::{join, Lrc};
 use rustc_hir as hir;
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LocalDefId, CRATE_DEF_INDEX, LOCAL_CRATE};
+use rustc_hir::definitions::DefPathData;
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc_hir::itemlikevisit::{ItemLikeVisitor, ParItemLikeVisitor};
 use rustc_hir::lang_items;
@@ -27,7 +28,7 @@ use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::{self, SymbolName, Ty, TyCtxt};
 use rustc_serialize::{opaque, Encodable, Encoder};
 use rustc_session::config::CrateType;
-use rustc_span::hygiene::{ExpnDataEncodeMode, HygieneEncodeContext};
+use rustc_span::hygiene::{ExpnDataEncodeMode, HygieneEncodeContext, MacroKind};
 use rustc_span::symbol::{sym, Ident, Symbol};
 use rustc_span::{self, ExternalSource, FileName, SourceFile, Span, SyntaxContext};
 use rustc_target::abi::VariantIdx;
@@ -1225,7 +1226,7 @@ impl EncodeContext<'a, 'tcx> {
             hir::ItemKind::Mod(ref m) => {
                 return self.encode_info_for_mod(item.hir_id, m, &item.attrs);
             }
-            hir::ItemKind::ForeignMod(_) => EntryKind::ForeignMod,
+            hir::ItemKind::ForeignMod { .. } => EntryKind::ForeignMod,
             hir::ItemKind::GlobalAsm(..) => EntryKind::GlobalAsm,
             hir::ItemKind::TyAlias(..) => EntryKind::Type,
             hir::ItemKind::OpaqueTy(..) => {
@@ -1320,11 +1321,11 @@ impl EncodeContext<'a, 'tcx> {
         record!(self.tables.expn_that_defined[def_id] <- self.tcx.expansion_that_defined(def_id));
         // FIXME(eddyb) there should be a nicer way to do this.
         match item.kind {
-            hir::ItemKind::ForeignMod(ref fm) => record!(self.tables.children[def_id] <-
-                fm.items
+            hir::ItemKind::ForeignMod { items, .. } => record!(self.tables.children[def_id] <-
+                items
                     .iter()
                     .map(|foreign_item| tcx.hir().local_def_id(
-                        foreign_item.hir_id).local_def_index)
+                        foreign_item.id.hir_id).local_def_index)
             ),
             hir::ItemKind::Enum(..) => record!(self.tables.children[def_id] <-
                 self.tcx.adt_def(def_id).variants.iter().map(|v| {
@@ -1502,7 +1503,7 @@ impl EncodeContext<'a, 'tcx> {
     fn encode_foreign_modules(&mut self) -> Lazy<[ForeignModule]> {
         empty_proc_macro!(self);
         let foreign_modules = self.tcx.foreign_modules(LOCAL_CRATE);
-        self.lazy(foreign_modules.iter().cloned())
+        self.lazy(foreign_modules.iter().map(|(_, m)| m).cloned())
     }
 
     fn encode_hygiene(&mut self) -> (SyntaxContextTable, ExpnDataTable) {
@@ -1539,12 +1540,41 @@ impl EncodeContext<'a, 'tcx> {
             // so we manually encode just the information that we need
             for proc_macro in &hir.krate().proc_macros {
                 let id = proc_macro.owner.local_def_index;
-                let span = self.lazy(hir.span(*proc_macro));
+                let mut name = hir.name(*proc_macro);
+                let span = hir.span(*proc_macro);
                 // Proc-macros may have attributes like `#[allow_internal_unstable]`,
                 // so downstream crates need access to them.
-                let attrs = self.lazy(hir.attrs(*proc_macro));
-                self.tables.span.set(id, span);
-                self.tables.attributes.set(id, attrs);
+                let attrs = hir.attrs(*proc_macro);
+                let macro_kind = if tcx.sess.contains_name(attrs, sym::proc_macro) {
+                    MacroKind::Bang
+                } else if tcx.sess.contains_name(attrs, sym::proc_macro_attribute) {
+                    MacroKind::Attr
+                } else if let Some(attr) = tcx.sess.find_by_name(attrs, sym::proc_macro_derive) {
+                    // This unwrap chain should have been checked by the proc-macro harness.
+                    name = attr.meta_item_list().unwrap()[0]
+                        .meta_item()
+                        .unwrap()
+                        .ident()
+                        .unwrap()
+                        .name;
+                    MacroKind::Derive
+                } else {
+                    bug!("Unknown proc-macro type for item {:?}", id);
+                };
+
+                let mut def_key = self.tcx.hir().def_key(proc_macro.owner);
+                def_key.disambiguated_data.data = DefPathData::MacroNs(name);
+
+                let def_id = DefId::local(id);
+                record!(self.tables.kind[def_id] <- EntryKind::ProcMacro(macro_kind));
+                record!(self.tables.attributes[def_id] <- attrs);
+                record!(self.tables.def_keys[def_id] <- def_key);
+                record!(self.tables.ident_span[def_id] <- span);
+                record!(self.tables.span[def_id] <- span);
+                record!(self.tables.visibility[def_id] <- ty::Visibility::Public);
+                if let Some(stability) = stability {
+                    record!(self.tables.stability[def_id] <- stability);
+                }
             }
 
             Some(ProcMacroData { proc_macro_decls_static, stability, macros })
@@ -1836,7 +1866,7 @@ impl EncodeContext<'a, 'tcx> {
             | hir::ItemKind::Const(..)
             | hir::ItemKind::Fn(..)
             | hir::ItemKind::Mod(..)
-            | hir::ItemKind::ForeignMod(..)
+            | hir::ItemKind::ForeignMod { .. }
             | hir::ItemKind::GlobalAsm(..)
             | hir::ItemKind::ExternCrate(..)
             | hir::ItemKind::Use(..)
@@ -1913,6 +1943,8 @@ impl<'tcx, 'v> ItemLikeVisitor<'v> for ImplVisitor<'tcx> {
     fn visit_impl_item(&mut self, _impl_item: &'v hir::ImplItem<'v>) {
         // handled in `visit_item` above
     }
+
+    fn visit_foreign_item(&mut self, _foreign_item: &'v hir::ForeignItem<'v>) {}
 }
 
 /// Used to prefetch queries which will be needed later by metadata encoding.
@@ -1976,6 +2008,11 @@ impl<'tcx, 'v> ParItemLikeVisitor<'v> for PrefetchVisitor<'tcx> {
             }
             hir::ImplItemKind::TyAlias(..) => (),
         }
+    }
+
+    fn visit_foreign_item(&self, _foreign_item: &'v hir::ForeignItem<'v>) {
+        // This should be kept in sync with `encode_info_for_foreign_item`.
+        // Foreign items contain no MIR.
     }
 }
 
@@ -2042,6 +2079,10 @@ fn encode_metadata_impl(tcx: TyCtxt<'_>) -> EncodedMetadata {
     encoder.emit_raw_bytes(&[0, 0, 0, 0]);
 
     let source_map_files = tcx.sess.source_map().files();
+    let source_file_cache = (source_map_files[0].clone(), 0);
+    let required_source_files = Some(GrowableBitSet::with_capacity(source_map_files.len()));
+    drop(source_map_files);
+
     let hygiene_ctxt = HygieneEncodeContext::default();
 
     let mut ecx = EncodeContext {
@@ -2052,13 +2093,12 @@ fn encode_metadata_impl(tcx: TyCtxt<'_>) -> EncodedMetadata {
         lazy_state: LazyState::NoNode,
         type_shorthands: Default::default(),
         predicate_shorthands: Default::default(),
-        source_file_cache: (source_map_files[0].clone(), 0),
+        source_file_cache,
         interpret_allocs: Default::default(),
-        required_source_files: Some(GrowableBitSet::with_capacity(source_map_files.len())),
+        required_source_files,
         is_proc_macro: tcx.sess.crate_types().contains(&CrateType::ProcMacro),
         hygiene_ctxt: &hygiene_ctxt,
     };
-    drop(source_map_files);
 
     // Encode the rustc version string in a predictable location.
     rustc_version().encode(&mut ecx).unwrap();

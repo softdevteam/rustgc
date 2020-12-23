@@ -1,5 +1,5 @@
 #![warn(clippy::needless_lifetimes)]
-#![allow(dead_code, clippy::needless_pass_by_value)]
+#![allow(dead_code, clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 
 fn distinct_lifetimes<'a, 'b>(_x: &'a u8, _y: &'b u8, _z: u8) {}
 
@@ -354,6 +354,17 @@ mod nested_elision_sites {
     }
     fn nested_fn_pointer_4<'a>(_: &'a i32) -> impl Fn(fn(&i32)) {
         |f| ()
+    }
+}
+
+mod issue6159 {
+    use std::ops::Deref;
+    pub fn apply_deref<'a, T, F, R>(x: &'a T, f: F) -> R
+    where
+        T: Deref,
+        F: FnOnce(&'a T::Target) -> R,
+    {
+        f(x.deref())
     }
 }
 

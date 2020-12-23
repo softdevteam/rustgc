@@ -41,10 +41,10 @@ where
             // http://www.angelcode.com/dev/callconv/callconv.html
             // Clang's ABI handling is in lib/CodeGen/TargetInfo.cpp
             let t = cx.target_spec();
-            if t.options.abi_return_struct_as_int {
+            if t.abi_return_struct_as_int {
                 // According to Clang, everyone but MSVC returns single-element
                 // float aggregates directly in a floating-point register.
-                if !t.options.is_like_msvc && is_single_fp_element(cx, fn_abi.ret.layout) {
+                if !t.is_like_msvc && is_single_fp_element(cx, fn_abi.ret.layout) {
                     match fn_abi.ret.layout.size.bytes() {
                         4 => fn_abi.ret.cast_to(Reg::f32()),
                         8 => fn_abi.ret.cast_to(Reg::f64()),
@@ -92,9 +92,14 @@ where
 
         for arg in &mut fn_abi.args {
             let attrs = match arg.mode {
-                PassMode::Ignore | PassMode::Indirect(_, None) => continue,
+                PassMode::Ignore
+                | PassMode::Indirect { attrs: _, extra_attrs: None, on_stack: _ } => {
+                    continue;
+                }
                 PassMode::Direct(ref mut attrs) => attrs,
-                PassMode::Pair(..) | PassMode::Indirect(_, Some(_)) | PassMode::Cast(_) => {
+                PassMode::Pair(..)
+                | PassMode::Indirect { attrs: _, extra_attrs: Some(_), on_stack: _ }
+                | PassMode::Cast(_) => {
                     unreachable!("x86 shouldn't be passing arguments by {:?}", arg.mode)
                 }
             };

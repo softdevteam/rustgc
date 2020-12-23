@@ -359,6 +359,18 @@ impl<'a> Parser<'a> {
     /// Also performs recovery for `and` / `or` which are mistaken for `&&` and `||` respectively.
     fn check_assoc_op(&self) -> Option<Spanned<AssocOp>> {
         let (op, span) = match (AssocOp::from_token(&self.token), self.token.ident()) {
+            // When parsing const expressions, stop parsing when encountering `>`.
+            (
+                Some(
+                    AssocOp::ShiftRight
+                    | AssocOp::Greater
+                    | AssocOp::GreaterEqual
+                    | AssocOp::AssignOp(token::BinOpToken::Shr),
+                ),
+                _,
+            ) if self.restrictions.contains(Restrictions::CONST_EXPR) => {
+                return None;
+            }
             (Some(op), _) => (op, self.token.span),
             (None, Some((Ident { name: sym::and, span }, false))) => {
                 self.error_bad_logical_op("and", "&&", "conjunction");
@@ -819,7 +831,7 @@ impl<'a> Parser<'a> {
         self.struct_span_err(self.token.span, &format!("unexpected token: `{}`", actual)).emit();
     }
 
-    // We need and identifier or integer, but the next token is a float.
+    // We need an identifier or integer, but the next token is a float.
     // Break the float into components to extract the identifier or integer.
     // FIXME: With current `TokenCursor` it's hard to break tokens into more than 2
     // parts unless those parts are processed immediately. `TokenCursor` should either
@@ -1062,8 +1074,8 @@ impl<'a> Parser<'a> {
             })
         } else if self.eat_keyword(kw::Unsafe) {
             self.parse_block_expr(None, lo, BlockCheckMode::Unsafe(ast::UserProvided), attrs)
-        } else if self.check_inline_const() {
-            self.parse_const_expr(lo.to(self.token.span))
+        } else if self.check_inline_const(0) {
+            self.parse_const_block(lo.to(self.token.span))
         } else if self.is_do_catch_block() {
             self.recover_do_catch(attrs)
         } else if self.is_try_block() {
@@ -1077,6 +1089,9 @@ impl<'a> Parser<'a> {
             self.parse_yield_expr(attrs)
         } else if self.eat_keyword(kw::Let) {
             self.parse_let_expr(attrs)
+        } else if self.eat_keyword(kw::Underscore) {
+            self.sess.gated_spans.gate(sym::destructuring_assignment, self.prev_token.span);
+            Ok(self.mk_expr(self.prev_token.span, ExprKind::Underscore, attrs))
         } else if !self.unclosed_delims.is_empty() && self.check(&token::Semi) {
             // Don't complain about bare semicolons after unclosed braces
             // recovery in order to keep the error count down. Fixing the
@@ -1116,7 +1131,7 @@ impl<'a> Parser<'a> {
     ) -> PResult<'a, P<Expr>> {
         if needs_tokens {
             let (mut expr, tokens) = self.collect_tokens(f)?;
-            expr.tokens = Some(tokens);
+            expr.tokens = tokens;
             Ok(expr)
         } else {
             f(self)
@@ -1435,10 +1450,10 @@ impl<'a> Parser<'a> {
                         .help("valid widths are 8, 16, 32, 64 and 128")
                         .emit();
                 } else {
-                    let msg = format!("invalid suffix `{}` for integer literal", suf);
+                    let msg = format!("invalid suffix `{}` for number literal", suf);
                     self.struct_span_err(span, &msg)
                         .span_label(span, format!("invalid suffix `{}`", suf))
-                        .help("the suffix must be one of the integral types (`u32`, `isize`, etc)")
+                        .help("the suffix must be one of the numeric types (`u32`, `isize`, `f32`, etc.)")
                         .emit();
                 }
             }
@@ -1715,7 +1730,7 @@ impl<'a> Parser<'a> {
         let lo = self.prev_token.span;
         let pat = self.parse_top_pat(GateOr::No)?;
         self.expect(&token::Eq)?;
-        let expr = self.with_res(Restrictions::NO_STRUCT_LITERAL, |this| {
+        let expr = self.with_res(self.restrictions | Restrictions::NO_STRUCT_LITERAL, |this| {
             this.parse_assoc_expr_with(1 + prec_let_scrutinee_needs_par(), None.into())
         })?;
         let span = lo.to(expr.span);
@@ -2075,7 +2090,7 @@ impl<'a> Parser<'a> {
         recover: bool,
     ) -> PResult<'a, P<Expr>> {
         let mut fields = Vec::new();
-        let mut base = None;
+        let mut base = ast::StructRest::None;
         let mut recover_async = false;
 
         attrs.extend(self.parse_inner_attributes()?);
@@ -2090,8 +2105,14 @@ impl<'a> Parser<'a> {
         while self.token != token::CloseDelim(token::Brace) {
             if self.eat(&token::DotDot) {
                 let exp_span = self.prev_token.span;
+                // We permit `.. }` on the left-hand side of a destructuring assignment.
+                if self.check(&token::CloseDelim(token::Brace)) {
+                    self.sess.gated_spans.gate(sym::destructuring_assignment, self.prev_token.span);
+                    base = ast::StructRest::Rest(self.prev_token.span.shrink_to_hi());
+                    break;
+                }
                 match self.parse_expr() {
-                    Ok(e) => base = Some(e),
+                    Ok(e) => base = ast::StructRest::Base(e),
                     Err(mut e) if recover => {
                         e.emit();
                         self.recover_stmt();

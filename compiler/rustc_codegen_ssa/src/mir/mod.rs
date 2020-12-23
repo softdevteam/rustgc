@@ -26,7 +26,7 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
 
     mir: &'tcx mir::Body<'tcx>,
 
-    debug_context: Option<FunctionDebugContext<Bx::DIScope>>,
+    debug_context: Option<FunctionDebugContext<Bx::DIScope, Bx::DILocation>>,
 
     llfn: Bx::Function,
 
@@ -87,20 +87,16 @@ pub struct FunctionCx<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
 }
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
-    pub fn monomorphize<T>(&self, value: &T) -> T
+    pub fn monomorphize<T>(&self, value: T) -> T
     where
         T: Copy + TypeFoldable<'tcx>,
     {
         debug!("monomorphize: self.instance={:?}", self.instance);
-        if let Some(substs) = self.instance.substs_for_mir_body() {
-            self.cx.tcx().subst_and_normalize_erasing_regions(
-                substs,
-                ty::ParamEnv::reveal_all(),
-                &value,
-            )
-        } else {
-            self.cx.tcx().normalize_erasing_regions(ty::ParamEnv::reveal_all(), *value)
-        }
+        self.instance.subst_mir_and_normalize_erasing_regions(
+            self.cx.tcx(),
+            ty::ParamEnv::reveal_all(),
+            value,
+        )
     }
 }
 
@@ -212,7 +208,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
         let mut allocate_local = |local| {
             let decl = &mir.local_decls[local];
-            let layout = bx.layout_of(fx.monomorphize(&decl.ty));
+            let layout = bx.layout_of(fx.monomorphize(decl.ty));
             assert!(!layout.ty.has_erasable_regions());
 
             if local == mir::RETURN_PLACE && fx.fn_abi.ret.is_indirect() {
@@ -368,7 +364,7 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 // to reconstruct it into a tuple local variable, from multiple
                 // individual LLVM function arguments.
 
-                let arg_ty = fx.monomorphize(&arg_decl.ty);
+                let arg_ty = fx.monomorphize(arg_decl.ty);
                 let tupled_arg_tys = match arg_ty.kind() {
                     ty::Tuple(tys) => tys,
                     _ => bug!("spread argument isn't a tuple?!"),
@@ -389,7 +385,7 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
             }
 
             if fx.fn_abi.c_variadic && arg_index == fx.fn_abi.args.len() {
-                let arg_ty = fx.monomorphize(&arg_decl.ty);
+                let arg_ty = fx.monomorphize(arg_decl.ty);
 
                 let va_list = PlaceRef::alloca(bx, bx.layout_of(arg_ty));
                 bx.va_start(va_list.llval);

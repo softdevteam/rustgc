@@ -15,7 +15,7 @@ use crate::io::{
 /// *repeated* write calls to the same file or network socket. It does not
 /// help when writing very large amounts at once, or writing just one or a few
 /// times. It also provides no advantage when writing to a destination that is
-/// in memory, like a [`Vec`]<u8>`.
+/// in memory, like a [`Vec`]`<u8>`.
 ///
 /// It is critical to call [`flush`] before `BufWriter<W>` is dropped. Though
 /// dropping will attempt to flush the contents of the buffer, any errors
@@ -59,9 +59,10 @@ use crate::io::{
 /// together by the buffer and will all be written out in one system call when
 /// the `stream` is flushed.
 ///
-/// [`TcpStream::write`]: Write::write
+// HACK(#78696): can't use `crate` for associated items
+/// [`TcpStream::write`]: super::super::super::net::TcpStream::write
 /// [`TcpStream`]: crate::net::TcpStream
-/// [`flush`]: Write::flush
+/// [`flush`]: BufWriter::flush
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct BufWriter<W: Write> {
     inner: Option<W>,
@@ -327,24 +328,57 @@ impl<W: Write> Write for BufWriter<W> {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
-        if self.buf.len() + total_len > self.buf.capacity() {
-            self.flush_buf()?;
-        }
-        // FIXME: Why no len > capacity? Why not buffer len == capacity? #72919
-        if total_len >= self.buf.capacity() {
-            self.panicked = true;
-            let r = self.get_mut().write_vectored(bufs);
-            self.panicked = false;
-            r
+        if self.get_ref().is_write_vectored() {
+            let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
+            if self.buf.len() + total_len > self.buf.capacity() {
+                self.flush_buf()?;
+            }
+            if total_len >= self.buf.capacity() {
+                self.panicked = true;
+                let r = self.get_mut().write_vectored(bufs);
+                self.panicked = false;
+                r
+            } else {
+                bufs.iter().for_each(|b| self.buf.extend_from_slice(b));
+                Ok(total_len)
+            }
         } else {
-            bufs.iter().for_each(|b| self.buf.extend_from_slice(b));
-            Ok(total_len)
+            let mut iter = bufs.iter();
+            let mut total_written = if let Some(buf) = iter.by_ref().find(|&buf| !buf.is_empty()) {
+                // This is the first non-empty slice to write, so if it does
+                // not fit in the buffer, we still get to flush and proceed.
+                if self.buf.len() + buf.len() > self.buf.capacity() {
+                    self.flush_buf()?;
+                }
+                if buf.len() >= self.buf.capacity() {
+                    // The slice is at least as large as the buffering capacity,
+                    // so it's better to write it directly, bypassing the buffer.
+                    self.panicked = true;
+                    let r = self.get_mut().write(buf);
+                    self.panicked = false;
+                    return r;
+                } else {
+                    self.buf.extend_from_slice(buf);
+                    buf.len()
+                }
+            } else {
+                return Ok(0);
+            };
+            debug_assert!(total_written != 0);
+            for buf in iter {
+                if self.buf.len() + buf.len() > self.buf.capacity() {
+                    break;
+                } else {
+                    self.buf.extend_from_slice(buf);
+                    total_written += buf.len();
+                }
+            }
+            Ok(total_written)
         }
     }
 
     fn is_write_vectored(&self) -> bool {
-        self.get_ref().is_write_vectored()
+        true
     }
 
     fn flush(&mut self) -> io::Result<()> {

@@ -94,33 +94,8 @@ use std::process;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use measureme::{EventId, EventIdBuilder, SerializableString, StringId};
+use measureme::{EventId, EventIdBuilder, Profiler, SerializableString, StringId};
 use parking_lot::RwLock;
-
-cfg_if! {
-    if #[cfg(any(windows, target_os = "wasi"))] {
-        /// FileSerializationSink is faster on Windows
-        type SerializationSink = measureme::FileSerializationSink;
-    } else if #[cfg(target_arch = "wasm32")] {
-        type SerializationSink = measureme::ByteVecSink;
-    } else {
-        /// MmapSerializatioSink is faster on macOS and Linux
-        type SerializationSink = measureme::MmapSerializationSink;
-    }
-}
-
-type Profiler = measureme::Profiler<SerializationSink>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
-pub enum ProfileCategory {
-    Parsing,
-    Expansion,
-    TypeChecking,
-    BorrowChecking,
-    Codegen,
-    Linking,
-    Other,
-}
 
 bitflags::bitflags! {
     struct EventFilter: u32 {
@@ -297,6 +272,28 @@ impl SelfProfilerRef {
         })
     }
 
+    #[inline(always)]
+    pub fn generic_activity_with_args(
+        &self,
+        event_label: &'static str,
+        event_args: &[String],
+    ) -> TimingGuard<'_> {
+        self.exec(EventFilter::GENERIC_ACTIVITIES, |profiler| {
+            let builder = EventIdBuilder::new(&profiler.profiler);
+            let event_label = profiler.get_or_alloc_cached_string(event_label);
+            let event_id = if profiler.event_filter_mask.contains(EventFilter::FUNCTION_ARGS) {
+                let event_args: Vec<_> = event_args
+                    .iter()
+                    .map(|s| profiler.get_or_alloc_cached_string(&s[..]))
+                    .collect();
+                builder.from_label_and_args(event_label, &event_args)
+            } else {
+                builder.from_label(event_label)
+            };
+            TimingGuard::start(profiler, profiler.generic_activity_event_kind, event_id)
+        })
+    }
+
     /// Start profiling a query provider. Profiling continues until the
     /// TimingGuard returned from this call is dropped.
     #[inline(always)]
@@ -400,7 +397,7 @@ impl SelfProfiler {
         output_directory: &Path,
         crate_name: Option<&str>,
         event_filters: &Option<Vec<String>>,
-    ) -> Result<SelfProfiler, Box<dyn Error>> {
+    ) -> Result<SelfProfiler, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(output_directory)?;
 
         let crate_name = crate_name.unwrap_or("unknown-crate");
@@ -511,13 +508,13 @@ impl SelfProfiler {
         self.event_filter_mask.contains(EventFilter::QUERY_KEYS)
     }
 
-    pub fn event_id_builder(&self) -> EventIdBuilder<'_, SerializationSink> {
+    pub fn event_id_builder(&self) -> EventIdBuilder<'_> {
         EventIdBuilder::new(&self.profiler)
     }
 }
 
 #[must_use]
-pub struct TimingGuard<'a>(Option<measureme::TimingGuard<'a, SerializationSink>>);
+pub struct TimingGuard<'a>(Option<measureme::TimingGuard<'a>>);
 
 impl<'a> TimingGuard<'a> {
     #[inline]

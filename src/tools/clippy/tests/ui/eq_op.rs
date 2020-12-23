@@ -6,6 +6,7 @@
 #[allow(clippy::no_effect, unused_variables, clippy::unnecessary_operation, clippy::short_circuit_statement)]
 #[allow(clippy::nonminimal_bool)]
 #[allow(unused)]
+#[allow(clippy::unnecessary_cast)]
 fn main() {
     // simple values and comparisons
     1 == 1;
@@ -84,4 +85,13 @@ fn check_ignore_macro() {
     check_if_named_foo!(foo);
     // checks if the lint ignores macros with `!` operator
     !bool_macro!(1) && !bool_macro!("");
+}
+
+struct Nested {
+    inner: ((i32,), (i32,), (i32,)),
+}
+
+fn check_nested(n1: &Nested, n2: &Nested) -> bool {
+    // `n2.inner.0.0` mistyped as `n1.inner.0.0`
+    (n1.inner.0).0 == (n1.inner.0).0 && (n1.inner.1).0 == (n2.inner.1).0 && (n1.inner.2).0 == (n2.inner.2).0
 }

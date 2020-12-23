@@ -56,3 +56,31 @@ macro_rules! option_env_unwrap_external {
         option_env!($env).expect($message)
     };
 }
+
+#[macro_export]
+macro_rules! ref_arg_binding {
+    () => {
+        let ref _y = 42;
+    };
+}
+
+#[macro_export]
+macro_rules! ref_arg_function {
+    () => {
+        fn fun_example(ref _x: usize) {}
+    };
+}
+
+#[macro_export]
+macro_rules! as_conv_with_arg {
+    (0u32 as u64) => {
+        ()
+    };
+}
+
+#[macro_export]
+macro_rules! as_conv {
+    () => {
+        0u32 as u64
+    };
+}

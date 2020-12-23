@@ -1,6 +1,7 @@
 use crate::{shim, util};
 use required_consts::RequiredConstsVisitor;
 use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::steal::Steal;
 use rustc_hir as hir;
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
@@ -8,7 +9,6 @@ use rustc_index::vec::IndexVec;
 use rustc_middle::mir::visit::Visitor as _;
 use rustc_middle::mir::{traversal, Body, ConstQualifs, MirPhase, Promoted};
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::steal::Steal;
 use rustc_middle::ty::{self, TyCtxt, TypeFoldable};
 use rustc_span::{Span, Symbol};
 use std::borrow::Cow;
@@ -22,15 +22,17 @@ pub mod check_packed_ref;
 pub mod check_unsafety;
 pub mod cleanup_post_borrowck;
 pub mod const_prop;
+pub mod coverage;
 pub mod deaggregator;
 pub mod dest_prop;
 pub mod dump_mir;
 pub mod early_otherwise_branch;
 pub mod elaborate_drops;
+pub mod function_item_references;
 pub mod generator;
 pub mod inline;
 pub mod instcombine;
-pub mod instrument_coverage;
+pub mod lower_intrinsics;
 pub mod match_branches;
 pub mod multiple_return_terminators;
 pub mod no_landing_pads;
@@ -84,7 +86,7 @@ pub(crate) fn provide(providers: &mut Providers) {
         },
         ..*providers
     };
-    instrument_coverage::provide(providers);
+    coverage::query::provide(providers);
 }
 
 fn is_mir_available(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
@@ -266,6 +268,7 @@ fn mir_const<'tcx>(
             // MIR-level lints.
             &check_packed_ref::CheckPackedRef,
             &check_const_item_mutation::CheckConstItemMutation,
+            &function_item_references::FunctionItemReferences,
             // What we need to do constant evaluation.
             &simplify::SimplifyCfg::new("initial"),
             &rustc_peek::SanityCheck,
@@ -304,7 +307,7 @@ fn mir_promoted(
     ];
 
     let opt_coverage: &[&dyn MirPass<'tcx>] = if tcx.sess.opts.debugging_opts.instrument_coverage {
-        &[&instrument_coverage::InstrumentCoverage]
+        &[&coverage::InstrumentCoverage]
     } else {
         &[]
     };
@@ -388,6 +391,7 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
     // The main optimizations that we do on MIR.
     let optimizations: &[&dyn MirPass<'tcx>] = &[
+        &lower_intrinsics::LowerIntrinsics,
         &remove_unneeded_drops::RemoveUnneededDrops,
         &match_branches::MatchBranchSimplification,
         // inst combine is after MatchBranchSimplification to clean up Ne(_1, false)
