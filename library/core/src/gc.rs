@@ -14,6 +14,10 @@ pub trait Conservative {}
 pub trait NoFinalize {}
 
 #[unstable(feature = "gc", issue = "none")]
+#[cfg_attr(not(bootstrap), lang = "notrace")]
+pub auto trait NoTrace {}
+
+#[unstable(feature = "gc", issue = "none")]
 #[cfg(not(bootstrap))]
 /// Returns a pair describing the layout of the type for use by the collector.
 ///
@@ -25,10 +29,6 @@ pub unsafe fn gc_layout<T>() -> (u64, u64) {
     let layout = crate::intrinsics::gc_layout::<T>();
     (layout[0], layout[1])
 }
-
-#[unstable(feature = "gc", issue = "none")]
-#[cfg_attr(not(bootstrap), lang = "notrace")]
-pub auto trait NoTrace {}
 
 impl !NoTrace for usize {}
 
