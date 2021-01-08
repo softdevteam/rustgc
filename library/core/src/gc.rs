@@ -4,6 +4,10 @@
 #[cfg(not(bootstrap))]
 static MAX_LAYOUT: usize = crate::mem::size_of::<usize>() * 64;
 
+#[unstable(feature = "gc", issue = "none")]
+/// A type that implements this trait will be conservatively marked by the
+/// collector. This takes precedence over `NoTrace`.
+pub trait Conservative {}
 
 #[unstable(feature = "gc", issue = "none")]
 #[cfg_attr(not(bootstrap), lang = "no_finalize")]
