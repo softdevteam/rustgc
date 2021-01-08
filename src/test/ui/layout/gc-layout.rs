@@ -1,4 +1,5 @@
 // run-pass
+// ignore-tidy-linelength
 
 #![feature(gc)]
 
@@ -6,7 +7,7 @@
 #![allow(unused_attributes)]
 #![allow(unused_imports)]
 
-use std::gc::gc_layout;
+use std::gc::{gc_layout, Trace};
 use std::mem::size_of;
 use std::mem::align_of;
 
@@ -97,21 +98,20 @@ fn main() {
     assert_eq!(size_of::<BigAlignNoTrace>(), 40);
 
     unsafe {
-                                                       // Bitmap,   Size (words)
-    assert_eq!(gc_layout::<SmallAlign>(),              (0x0000000000000000, 0));
-    assert_eq!(gc_layout::<ShuffledFields>(),          (0xFFFFFFFFFFFFFFFD, 2));
-    assert_eq!(gc_layout::<ShuffledFieldsNoTrace>(),   (0xFFFFFFFFFFFFFFFC, 2));
-    assert_eq!(gc_layout::<FixedFields>(),             (0xFFFFFFFFFFFFFFFA, 3));
-    assert_eq!(gc_layout::<FixedFieldsNoTrace>(),      (0xFFFFFFFFFFFFFFF8, 3));
-    assert_eq!(gc_layout::<MultiFields>(),             (0xFFFFFFFFFFFFFFF9, 3));
-    assert_eq!(gc_layout::<BigAlign>(),                (0xFFFFFFFFFFFFFFFF, 5));
-    assert_eq!(gc_layout::<BigAlignNoTrace>(),         (0xFFFFFFFFFFFFFFE3, 5));
+    assert_eq!(gc_layout::<SmallAlign>(),              Trace { bitmap: 0x0000000000000000, size: 0 });
+    assert_eq!(gc_layout::<ShuffledFields>(),          Trace { bitmap: 0xFFFFFFFFFFFFFFFD, size: 2 });
+    assert_eq!(gc_layout::<ShuffledFieldsNoTrace>(),   Trace { bitmap: 0xFFFFFFFFFFFFFFFC, size: 2 });
+    assert_eq!(gc_layout::<FixedFields>(),             Trace { bitmap: 0xFFFFFFFFFFFFFFFA, size: 3 });
+    assert_eq!(gc_layout::<FixedFieldsNoTrace>(),      Trace { bitmap: 0xFFFFFFFFFFFFFFF8, size: 3 });
+    assert_eq!(gc_layout::<MultiFields>(),             Trace { bitmap: 0xFFFFFFFFFFFFFFF9, size: 3 });
+    assert_eq!(gc_layout::<BigAlign>(),                Trace { bitmap: 0xFFFFFFFFFFFFFFFF, size: 5 });
+    assert_eq!(gc_layout::<BigAlignNoTrace>(),         Trace { bitmap: 0xFFFFFFFFFFFFFFE3, size: 5 });
 
-    assert_eq!(gc_layout::<NoTraceInner>(),            (0x0000000000000000, 0));
-    assert_eq!(gc_layout::<NoTraceOuter>(),            (0xFFFFFFFFFFFFFFF9, 3));
-    assert_eq!(gc_layout::<NoTraceOuter2>(),           (0x0000000000000000, 0));
+    assert_eq!(gc_layout::<NoTraceInner>(),            Trace { bitmap: 0x0000000000000000, size: 0 });
+    assert_eq!(gc_layout::<NoTraceOuter>(),            Trace { bitmap: 0xFFFFFFFFFFFFFFF9, size: 3 });
+    assert_eq!(gc_layout::<NoTraceOuter2>(),           Trace { bitmap: 0x0000000000000000, size: 0 });
 
-    assert_eq!(gc_layout::<ZST>(),                     (0x0000000000000000, 0));
+    assert_eq!(gc_layout::<ZST>(),                     Trace { bitmap: 0x0000000000000000, size: 0 });
 
     }
 }

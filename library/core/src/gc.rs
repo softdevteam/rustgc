@@ -18,16 +18,33 @@ pub trait NoFinalize {}
 pub auto trait NoTrace {}
 
 #[unstable(feature = "gc", issue = "none")]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Trace {
+    pub bitmap: u64,
+    pub size: u64,
+}
+
+#[unstable(feature = "gc", issue = "none")]
+impl Trace {
+    #[inline]
+    /// Returns true if rustgc wasn't able to create a precise descriptor for
+    /// the type.
+    pub fn must_use_conservative(&self) -> bool {
+        self.bitmap == 1 && self.size == 0
+    }
+}
+
+#[unstable(feature = "gc", issue = "none")]
 #[cfg(not(bootstrap))]
 /// Returns a pair describing the layout of the type for use by the collector.
 ///
 /// # Safety
 ///
 /// The type T must be smaller or equal in size to `size_of::<usize> * 64`.
-pub unsafe fn gc_layout<T>() -> (u64, u64) {
+pub unsafe fn gc_layout<T>() -> Trace {
     debug_assert!(crate::mem::size_of::<T>() <= MAX_LAYOUT);
     let layout = crate::intrinsics::gc_layout::<T>();
-    (layout[0], layout[1])
+    Trace { bitmap: layout[0], size: layout[1] }
 }
 
 impl !NoTrace for usize {}
