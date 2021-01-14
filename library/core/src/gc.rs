@@ -37,6 +37,18 @@ impl Trace {
 
 #[unstable(feature = "gc", issue = "none")]
 #[cfg(not(bootstrap))]
+pub fn needs_tracing<T>() -> bool {
+    crate::intrinsics::needs_tracing::<T>()
+}
+
+#[unstable(feature = "gc", issue = "none")]
+#[cfg(not(bootstrap))]
+pub fn can_trace_precisely<T>() -> bool {
+    crate::intrinsics::can_trace_precisely::<T>()
+}
+
+#[unstable(feature = "gc", issue = "none")]
+#[cfg(not(bootstrap))]
 /// Returns a pair describing the layout of the type for use by the collector.
 ///
 /// # Safety
