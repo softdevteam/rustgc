@@ -741,6 +741,12 @@ fn codegen_stmt<'tcx>(
                         .iconst(usize_type, layout.align.abi.bytes() as i64);
                     let box_layout = fx.layout_of(fx.tcx.mk_box(content_ty));
 
+                    let (bitmap, bitmap_size) =
+                        content_ty.gc_layout(fx.tcx, ty::ParamEnv::reveal_all());
+
+                    let llbitmap = fx.bcx.ins().iconst(usize_type, bitmap as i64);
+                    let llbitmap_size = fx.bcx.ins().iconst(usize_type, bitmap_size as i64);
+
                     // Allocate space:
                     let def_id = match fx
                         .tcx
@@ -756,7 +762,7 @@ fn codegen_stmt<'tcx>(
                     };
                     let instance = ty::Instance::mono(fx.tcx, def_id).polymorphize(fx.tcx);
                     let func_ref = fx.get_function_ref(instance);
-                    let call = fx.bcx.ins().call(func_ref, &[llsize, llalign]);
+                    let call = fx.bcx.ins().call(func_ref, &[llsize, llalign, llbitmap, llbitmap_size]);
                     let ptr = fx.bcx.inst_results(call)[0];
                     lval.write_cvalue(fx, CValue::by_val(ptr, box_layout));
                 }

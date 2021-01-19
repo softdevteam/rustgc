@@ -615,10 +615,18 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
                     _ => bug!(),
                 }
             }
-            mir::Rvalue::NullaryOp(mir::NullOp::Box, _) => {
+            mir::Rvalue::NullaryOp(mir::NullOp::Box, ty) => {
                 let tcx = self.tcx;
-                let exchange_malloc_fn_def_id =
-                    tcx.require_lang_item(LangItem::ExchangeMalloc, None);
+                let source_ty = self.monomorphize(ty);
+                let alloc_kind =
+                    if source_ty.is_conservative(tcx.at(DUMMY_SP), ty::ParamEnv::reveal_all()) {
+                        LangItem::ExchangeMallocConservative
+                    } else if source_ty.is_no_trace(tcx.at(DUMMY_SP), ty::ParamEnv::reveal_all()) {
+                        LangItem::ExchangeMallocUntraceable
+                    } else {
+                        LangItem::ExchangeMallocPrecise
+                    };
+                let exchange_malloc_fn_def_id = tcx.require_lang_item(alloc_kind, None);
                 let instance = Instance::mono(tcx, exchange_malloc_fn_def_id);
                 if should_codegen_locally(tcx, &instance) {
                     self.output.push(create_fn_mono_item(self.tcx, instance, span));

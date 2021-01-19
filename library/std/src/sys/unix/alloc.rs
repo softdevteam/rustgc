@@ -24,6 +24,21 @@ unsafe impl GlobalAlloc for System {
     }
 
     #[inline]
+    fn alloc_conservative(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.alloc(layout) }
+    }
+
+    #[inline]
+    unsafe fn alloc_precise(&self, layout: Layout, _bitmap: usize, _bitmap_size: usize) -> *mut u8 {
+        self.alloc(layout)
+    }
+
+    #[inline]
+    unsafe fn alloc_untraceable(&self, layout: Layout) -> *mut u8 {
+        self.alloc(layout)
+    }
+
+    #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // See the comment above in `alloc` for why this check looks the way it does.
         if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {

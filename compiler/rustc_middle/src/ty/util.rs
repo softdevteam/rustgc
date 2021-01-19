@@ -836,6 +836,8 @@ impl<'tcx> ty::TyS<'tcx> {
         let layout = tcx.layout_of(param_env.and(self)).unwrap();
         let w_size = Size::from_bytes(size_of::<usize>());
         let w_align = Align::from_bytes(w_size.bytes()).unwrap();
+        let mut bitmap: u64 = u64::MAX;
+        let adt_def = self.ty_adt_def();
 
         if layout.align.abi.bytes() < (w_size.bytes())
             || self.is_no_trace(tcx.at(DUMMY_SP), param_env)
@@ -845,8 +847,13 @@ impl<'tcx> ty::TyS<'tcx> {
             return (0, 0);
         }
 
-        let src_field_iter = self.ty_adt_def().unwrap().all_fields();
-        let mut bitmap: u64 = u64::MAX;
+        if adt_def.is_none() {
+            // FIXME: Non-ADT types are not yet supported for precise tracing,
+            // so ensure that they are scanned conservatively.
+            return (1, 0);
+        }
+
+        let src_field_iter = adt_def.unwrap().all_fields();
 
         for i in layout.fields.index_by_increasing_offset() {
             let target_offset = layout.fields.offset(usize::from(i));

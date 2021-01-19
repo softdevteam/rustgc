@@ -50,4 +50,19 @@ pub static ALLOCATOR_METHODS: &[AllocatorMethod] = &[
         inputs: &[AllocatorTy::Layout],
         output: AllocatorTy::ResultPtr,
     },
+    AllocatorMethod {
+        name: sym::alloc_untraceable,
+        inputs: &[AllocatorTy::Layout],
+        output: AllocatorTy::ResultPtr,
+    },
+    AllocatorMethod {
+        name: sym::alloc_conservative,
+        inputs: &[AllocatorTy::Layout],
+        output: AllocatorTy::ResultPtr,
+    },
+    AllocatorMethod {
+        name: sym::alloc_precise,
+        inputs: &[AllocatorTy::Layout, AllocatorTy::Usize, AllocatorTy::Usize],
+        output: AllocatorTy::ResultPtr,
+    },
 ];

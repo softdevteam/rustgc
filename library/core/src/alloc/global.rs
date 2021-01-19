@@ -205,4 +205,47 @@ pub unsafe trait GlobalAlloc {
         }
         new_ptr
     }
+
+    /// Allocates a block of memory for `layout` which is guaranteed to contains
+    /// no GC pointers.
+    ///
+    /// An untraceable allocation has the same semantics as regular `alloc` except
+    /// for one key difference which is that it tells the collector not to trace
+    /// this block during marking.
+    ///
+    /// # Safety
+    ///
+    /// The block must not contain any pointers which, either directly or
+    /// transitively, point to a GC'd value.
+    #[stable(feature = "global_alloc", since = "1.28.0")]
+    unsafe fn alloc_untraceable(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.alloc(layout) }
+    }
+
+    /// Allocates a block of memory for `layout` which is traced conservatively
+    /// by the collector during marking.
+    #[stable(feature = "global_alloc", since = "1.28.0")]
+    fn alloc_conservative(&self, layout: Layout) -> *mut u8 {
+        // ignore-tidy-undocumented-unsafe
+        unsafe { self.alloc(layout) }
+    }
+
+    /// Allocates a block of memory for `layout` where word-aligned fields are
+    /// described to the collector by `bitmap`.
+    ///
+    /// # Safety
+    ///
+    /// The size described by `layout` must be no larger than 4092 bytes.
+    ///
+    /// An incorrect `bitmap` will lead to undefined behaviour.
+    ///
+    /// The size described by `layout` must be at least as big as
+    /// `size_of::<usize> * bitmap_size`.
+    ///
+    /// The returned pointer must not be passed to `realloc` under any
+    /// circumstances.
+    #[stable(feature = "global_alloc", since = "1.28.0")]
+    unsafe fn alloc_precise(&self, layout: Layout, _bitmap: usize, _bitmap_size: usize) -> *mut u8 {
+        unsafe { self.alloc(layout) }
+    }
 }

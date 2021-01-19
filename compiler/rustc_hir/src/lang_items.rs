@@ -276,6 +276,9 @@ language_item_table! {
     BeginPanic,              sym::begin_panic,         begin_panic_fn,             Target::Fn;
 
     ExchangeMalloc,          sym::exchange_malloc,     exchange_malloc_fn,         Target::Fn;
+    ExchangeMallocConservative, sym::exchange_malloc_conservative, exchange_malloc_conservative_fn, Target::Fn;
+    ExchangeMallocPrecise,      sym::exchange_malloc_precise, exchange_malloc_precise_fn, Target::Fn;
+    ExchangeMallocUntraceable,  sym::exchange_malloc_untraceable, exchange_malloc_untraceable_fn, Target::Fn;
     BoxFree,                 sym::box_free,            box_free_fn,                Target::Fn;
     DropInPlace,             sym::drop_in_place,       drop_in_place_fn,           Target::Fn;
     Oom,                     sym::oom,                 oom,                        Target::Fn;

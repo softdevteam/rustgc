@@ -358,6 +358,41 @@ pub mod __default_lib_allocator {
     }
 
     #[rustc_std_internal_symbol]
+    pub unsafe extern "C" fn __rdl_alloc_untraceable(size: usize, align: usize) -> *mut u8 {
+        // SAFETY: see the guarantees expected by `Layout::from_size_align` and
+        // `GlobalAlloc::alloc`.
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(size, align);
+            System.alloc_untraceable(layout)
+        }
+    }
+
+    #[rustc_std_internal_symbol]
+    pub unsafe extern "C" fn __rdl_alloc_conservative(size: usize, align: usize) -> *mut u8 {
+        // SAFETY: see the guarantees expected by `Layout::from_size_align` and
+        // `GlobalAlloc::alloc`.
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(size, align);
+            System.alloc_conservative(layout)
+        }
+    }
+
+    #[rustc_std_internal_symbol]
+    pub unsafe extern "C" fn __rdl_alloc_precise(
+        size: usize,
+        align: usize,
+        bitmap: usize,
+        bitmap_size: usize,
+    ) -> *mut u8 {
+        // SAFETY: see the guarantees expected by `Layout::from_size_align` and
+        // `GlobalAlloc::alloc`.
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(size, align);
+            System.alloc_precise(layout, bitmap, bitmap_size)
+        }
+    }
+
+    #[rustc_std_internal_symbol]
     pub unsafe extern "C" fn __rdl_dealloc(ptr: *mut u8, size: usize, align: usize) {
         // SAFETY: see the guarantees expected by `Layout::from_size_align` and
         // `GlobalAlloc::dealloc`.
