@@ -18,6 +18,7 @@ pub struct DwarfReader {
 }
 
 #[repr(C, packed)]
+#[cfg_attr(not(bootstrap), allow(misaligned_gc_pointers))]
 struct Unaligned<T>(T);
 
 impl DwarfReader {

@@ -1,0 +1,30 @@
+error: packed structs must implement the `NoTrace` trait.
+  --> $DIR/lint-misaligned-gc-pointers.rs:14:1
+   |
+LL |   #[repr(packed)]
+   |   --------------- help: remove this attribute
+LL | / struct Packed {
+LL | |     x: u16,
+LL | |     y: Traceable,
+LL | | }
+   | |_^
+   |
+note: the lint level is defined here
+  --> $DIR/lint-misaligned-gc-pointers.rs:1:9
+   |
+LL | #![deny(misaligned_gc_pointers)]
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+
+error: packed structs must not implement the `Conservative` trait.
+  --> $DIR/lint-misaligned-gc-pointers.rs:26:1
+   |
+LL |   #[repr(packed)]
+   |   --------------- help: remove this attribute
+LL | / struct Packed3 {
+LL | |     x: u16,
+LL | |     y: Opaque,
+LL | | }
+   | |_^
+
+error: aborting due to 2 previous errors
+
