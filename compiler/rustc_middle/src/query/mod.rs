@@ -1001,6 +1001,10 @@ rustc_queries! {
         query is_no_trace_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
             desc { "computing whether `{}` is `NoTrace`", env.value }
         }
+        /// Query backing `TyS::is_conservative`.
+        query is_conservative_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+            desc { "computing whether `{}` is `Conservative`", env.value }
+        }
         /// Query backing `TyS::needs_drop`.
         query needs_drop_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
             desc { "computing whether `{}` needs drop", env.value }

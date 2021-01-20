@@ -207,6 +207,7 @@ language_item_table! {
     NoFinalize,              sym::no_finalize,         no_finalize_trait,          Target::Trait;
 
     NoTrace,                 sym::notrace,             no_trace_trait,             Target::Trait;
+    Conservative,            sym::conservative,        conservative_trait,         Target::Trait;
 
     CoerceUnsized,           sym::coerce_unsized,      coerce_unsized_trait,       Target::Trait;
     DispatchFromDyn,         sym::dispatch_from_dyn,   dispatch_from_dyn_trait,    Target::Trait;
