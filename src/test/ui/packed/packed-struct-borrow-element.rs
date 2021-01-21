@@ -1,5 +1,6 @@
 // run-pass (note: this is spec-UB, but it works for now)
 #![allow(dead_code)]
+#![allow(misaligned_gc_pointers)]
 // ignore-emscripten weird assertion?
 
 #[repr(packed)]

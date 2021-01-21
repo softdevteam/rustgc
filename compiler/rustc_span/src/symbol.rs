@@ -354,6 +354,7 @@ symbols! {
         compiler_builtins,
         concat,
         concat_idents,
+        conservative,
         conservative_impl_trait,
         console,
         const_allocate,

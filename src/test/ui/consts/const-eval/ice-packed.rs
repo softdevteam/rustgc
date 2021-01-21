@@ -1,5 +1,6 @@
 // Regression test for #50356: Compiler panic when using repr(packed)
 // associated constant in a match arm
+#![allow(misaligned_gc_pointers)]
 
 // check-pass
 #[derive(Copy, Clone, PartialEq, Eq)]

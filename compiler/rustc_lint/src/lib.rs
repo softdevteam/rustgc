@@ -49,6 +49,7 @@ mod array_into_iter;
 pub mod builtin;
 mod context;
 mod early;
+mod gc;
 mod internal;
 mod late;
 mod levels;
@@ -77,6 +78,7 @@ use rustc_span::Span;
 
 use array_into_iter::ArrayIntoIter;
 use builtin::*;
+use gc::*;
 use internal::*;
 use methods::*;
 use non_ascii_idents::*;
@@ -158,6 +160,7 @@ macro_rules! late_lint_passes {
                 UnstableFeatures: UnstableFeatures,
                 // Tracks state across modules
                 UnnameableTestItems: UnnameableTestItems::new(),
+                MisalignedGcPointers: MisalignedGcPointers,
                 // Tracks attributes of parents
                 MissingDoc: MissingDoc::new(),
                 // Depends on access levels

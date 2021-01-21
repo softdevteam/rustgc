@@ -723,6 +723,17 @@ impl<'tcx> ty::TyS<'tcx> {
         tcx_at.is_no_trace_raw(param_env.and(self))
     }
 
+    // Checks whether values of this type `T` implement the `Conservative` trait
+    // -- conservative types are those with contents which are opaque to the
+    // collector, and must be marked as unknown chunks of memory.
+    pub fn is_conservative(
+        &'tcx self,
+        tcx_at: TyCtxtAt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+    ) -> bool {
+        tcx_at.is_conservative_raw(param_env.and(self))
+    }
+
     /// Fast path helper for testing if a type is `Freeze`.
     ///
     /// Returning true means the type is known to be `Freeze`. Returning
