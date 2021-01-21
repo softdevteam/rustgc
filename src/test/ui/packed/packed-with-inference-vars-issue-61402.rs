@@ -6,7 +6,7 @@
 // to have problems with associated types in the last field - test
 // that this doesn't ICE.
 
-#![allow(unused_imports, dead_code)]
+#![allow(unused_imports, dead_code, misaligned_gc_pointers)]
 
 pub struct S;
 

@@ -1,4 +1,5 @@
 // run-pass
+#![allow(misaligned_gc_pointers)]
 #![allow(non_camel_case_types)]
 
 use std::mem;

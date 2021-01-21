@@ -1,7 +1,7 @@
 // run-pass
 // check that derive on a packed struct does not call field
 // methods with a misaligned field.
-
+#![allow(misaligned_gc_pointers)]
 use std::mem;
 
 #[derive(Copy, Clone)]

@@ -5,6 +5,24 @@ use rustc_hir as hir;
 use rustc_middle::ty;
 
 declare_lint! {
+    /// The `misaligned_gc_pointers` lint checks that packed structs have no
+    /// traceable fields.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #[repr(packed)]
+    /// struct S(u8, *mut u8);
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Packed structs have a min alignment of 1 byte, so fields which need to
+    /// be traced by the GC --  such as `*mut u8` -- are not guaranteed to be
+    /// word-aligned. This can cause fields to be missed by the collector and is
+    /// undefined behaviour.
     pub MISALIGNED_GC_POINTERS,
     Deny,
     "packed structs should not contain traceable values"

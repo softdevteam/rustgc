@@ -1,5 +1,6 @@
 // run-pass
 #![allow(dead_code)]
+#![allow(misaligned_gc_pointers)]
 #![feature(box_syntax)]
 
 use std::mem;

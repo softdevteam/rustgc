@@ -1139,6 +1139,7 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
+    /// #[allow(misaligned_gc_pointers)]
     /// #[repr(packed)]
     /// pub struct Unaligned<T>(pub T);
     ///
