@@ -114,7 +114,6 @@ const PERMITTED_DEPENDENCIES: &[&str] = &[
     "kernel32-sys",
     "lazy_static",
     "libc",
-    "libgc_internal",
     "libz-sys",
     "lock_api",
     "log",
