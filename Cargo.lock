@@ -37,7 +37,6 @@ version = "0.0.0"
 dependencies = [
  "compiler_builtins",
  "core",
- "libgc_internal",
  "rand",
  "rand_xorshift",
 ]
@@ -1717,15 +1716,6 @@ version = "0.2.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2448f6066e80e3bfc792e9c98bf705b4b0fc6e8ef5b43e5889aff0eaa9c58743"
 dependencies = [
- "rustc-std-workspace-core",
-]
-
-[[package]]
-name = "libgc_internal"
-version = "0.1.0"
-source = "git+https://github.com/softdevteam/libgc_internal#cbf33df99760b284fd8fbd8d00afbf35044808da"
-dependencies = [
- "compiler_builtins",
  "rustc-std-workspace-core",
 ]
 
@@ -4695,7 +4685,6 @@ dependencies = [
  "hashbrown",
  "hermit-abi",
  "libc",
- "libgc_internal",
  "miniz_oxide",
  "object",
  "panic_abort",
