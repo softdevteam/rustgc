@@ -18,10 +18,14 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_macros::HashStable;
+use rustc_span::symbol::sym;
 use rustc_span::{Span, DUMMY_SP};
-use rustc_target::abi::{Integer, Size, TargetDataLayout};
+use rustc_target::abi::{Align, Integer, Size, TargetDataLayout};
 use smallvec::SmallVec;
+use std::mem::size_of;
 use std::{cmp, fmt};
+
+use rustc_middle::ty::layout::LayoutCx;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Discr<'tcx> {
@@ -826,6 +830,62 @@ impl<'tcx> ty::TyS<'tcx> {
                 tcx.needs_finalizer_raw(param_env.and(erased))
             }
         }
+    }
+
+    pub fn gc_layout(&'tcx self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> (u64, u64) {
+        let layout = tcx.layout_of(param_env.and(self)).unwrap();
+        let w_size = Size::from_bytes(size_of::<usize>());
+        let w_align = Align::from_bytes(w_size.bytes()).unwrap();
+        let mut bitmap: u64 = u64::MAX;
+        let adt_def = self.ty_adt_def();
+
+        if layout.align.abi.bytes() < (w_size.bytes())
+            || self.is_no_trace(tcx.at(DUMMY_SP), param_env)
+        {
+            // If an ADT is aligned to a size smaller than 1 word, then it
+            // contains no fields large enough to represent a GC pointer.
+            return (0, 0);
+        }
+
+        if adt_def.is_none() {
+            // FIXME: Non-ADT types are not yet supported for precise tracing,
+            // so ensure that they are scanned conservatively.
+            return (1, 0);
+        }
+
+        let src_field_iter = adt_def.unwrap().all_fields();
+
+        for i in layout.fields.index_by_increasing_offset() {
+            let target_offset = layout.fields.offset(usize::from(i));
+
+            let layout_cx = LayoutCx { tcx, param_env };
+            let field = layout.field(&layout_cx, i).unwrap();
+
+            if field.size < w_size {
+                // If a field is smaller than a word, it will either be shuffled
+                // around in the struct or padded to the min alignment with
+                // uninitialized memory. Whatever the case, the word it lives in is
+                // never going to be a valid pointer.
+                //
+                // target_offset is the byte in the struct's layout where this field
+                // begins. Diving by w_align gives the offset in words.
+                let mask = target_offset.bytes() / w_align.bytes();
+                bitmap &= !(1 << mask);
+            }
+
+            let no_trace = field.ty.is_no_trace(tcx.at(DUMMY_SP), param_env);
+
+            if no_trace || tcx.has_attr(src_field_iter.clone().nth(i).unwrap().did, sym::no_trace) {
+                let start = target_offset.bytes() / w_align.bytes();
+                let end = start + (field.size.bytes() / w_align.bytes());
+                for n in start..end {
+                    bitmap &= !(1 << n);
+                }
+            }
+        }
+
+        let ty_size = layout.size.bytes() / w_size.bytes(); // In words
+        (bitmap, ty_size)
     }
 
     /// Returns `true` if equality for this type is both reflexive and structural.

@@ -34,6 +34,20 @@ extern "Rust" {
     fn __rust_realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8;
     #[rustc_allocator_nounwind]
     fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8;
+    #[rustc_allocator]
+    #[rustc_allocator_nounwind]
+    fn __rust_alloc_untraceable(size: usize, align: usize) -> *mut u8;
+    #[rustc_allocator]
+    #[rustc_allocator_nounwind]
+    fn __rust_alloc_conservative(size: usize, align: usize) -> *mut u8;
+    #[rustc_allocator]
+    #[rustc_allocator_nounwind]
+    fn __rust_alloc_precise(
+        size: usize,
+        align: usize,
+        bitmap: usize,
+        bitmap_size: usize,
+    ) -> *mut u8;
 }
 
 /// The global memory allocator.
@@ -155,6 +169,35 @@ pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
     unsafe { __rust_alloc_zeroed(layout.size(), layout.align()) }
 }
 
+#[stable(feature = "global_alloc", since = "1.28.0")]
+#[allow(missing_docs)]
+#[inline]
+pub unsafe fn alloc_untraceable(layout: Layout) -> *mut u8 {
+    unsafe { __rust_alloc_untraceable(layout.size(), layout.align()) }
+}
+
+#[stable(feature = "global_alloc", since = "1.28.0")]
+#[allow(missing_docs)]
+#[inline]
+pub unsafe fn alloc_conservative(layout: Layout) -> *mut u8 {
+    unsafe { __rust_alloc_conservative(layout.size(), layout.align()) }
+}
+
+#[stable(feature = "global_alloc", since = "1.28.0")]
+#[allow(missing_docs)]
+#[inline]
+pub unsafe fn alloc_precise(layout: Layout, bitmap: usize, bitmap_size: usize) -> *mut u8 {
+    unsafe { __rust_alloc_precise(layout.size(), layout.align(), bitmap, bitmap_size) }
+}
+
+#[cfg(not(bootstrap))]
+#[cfg(not(test))]
+enum AllocType {
+    Untraceable,
+    Conservative,
+    Precise(usize, usize),
+}
+
 #[cfg(not(test))]
 impl Global {
     #[inline]
@@ -164,6 +207,31 @@ impl Global {
             // SAFETY: `layout` is non-zero in size,
             size => unsafe {
                 let raw_ptr = if zeroed { alloc_zeroed(layout) } else { alloc(layout) };
+                let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;
+                Ok(NonNull::slice_from_raw_parts(ptr, size))
+            },
+        }
+    }
+
+    #[cfg(not(bootstrap))]
+    #[inline]
+    fn alloc_impl_typed(
+        &self,
+        layout: Layout,
+        _zeroed: bool,
+        aty: AllocType,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        match layout.size() {
+            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),
+            // SAFETY: `layout` is non-zero in size,
+            size => unsafe {
+                let raw_ptr = match aty {
+                    AllocType::Untraceable => alloc_untraceable(layout),
+                    AllocType::Conservative => alloc_conservative(layout),
+                    AllocType::Precise(bitmap, bitmap_size) => {
+                        alloc_precise(layout, bitmap, bitmap_size)
+                    }
+                };
                 let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;
                 Ok(NonNull::slice_from_raw_parts(ptr, size))
             },
@@ -304,16 +372,92 @@ unsafe impl Allocator for Global {
             },
         }
     }
+
+    #[cfg(not(bootstrap))]
+    #[inline]
+    fn alloc_untraceable(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl_typed(layout, false, AllocType::Untraceable)
+    }
+
+    #[cfg(not(bootstrap))]
+    #[inline]
+    fn alloc_conservative(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl_typed(layout, false, AllocType::Conservative)
+    }
+
+    #[cfg(not(bootstrap))]
+    #[inline]
+    fn alloc_precise(
+        &self,
+        layout: Layout,
+        bitmap: usize,
+        bitmap_size: usize,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl_typed(layout, false, AllocType::Precise(bitmap, bitmap_size))
+    }
+}
+#[cfg(not(test))]
+#[cfg(bootstrap)]
+#[lang = "exchange_malloc"]
+#[inline]
+#[allow(unused_variables)]
+unsafe fn old_exchange_malloc(size: usize, align: usize) -> *mut u8 {
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+    match Global.allocate(layout) {
+        Ok(ptr) => ptr.as_mut_ptr(),
+        Err(_) => handle_alloc_error(layout),
+    }
 }
 
 /// The allocator for unique pointers.
 // This function must not unwind. If it does, MIR codegen will fail.
 #[cfg(not(test))]
-#[lang = "exchange_malloc"]
+#[cfg(not(bootstrap))]
+#[lang = "exchange_malloc_precise"]
 #[inline]
-unsafe fn exchange_malloc(size: usize, align: usize) -> *mut u8 {
+#[allow(unused_variables)]
+unsafe fn exchange_malloc_precise(
+    size: usize,
+    align: usize,
+    bitmap: usize,
+    bitmap_size: usize,
+) -> *mut u8 {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-    match Global.allocate(layout) {
+    match Global.alloc_precise(layout, bitmap, bitmap_size) {
+        Ok(ptr) => ptr.as_mut_ptr(),
+        Err(_) => handle_alloc_error(layout),
+    }
+}
+
+#[cfg(not(test))]
+#[cfg_attr(not(bootstrap), lang = "exchange_malloc_untraceable")]
+#[allow(dead_code)]
+#[inline]
+unsafe fn exchange_malloc_untraceable(
+    size: usize,
+    align: usize,
+    _bitmap: usize,
+    _bitmap_size: usize,
+) -> *mut u8 {
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+    match Global.alloc_untraceable(layout) {
+        Ok(ptr) => ptr.as_mut_ptr(),
+        Err(_) => handle_alloc_error(layout),
+    }
+}
+
+#[cfg(not(test))]
+#[cfg_attr(not(bootstrap), lang = "exchange_malloc_conservative")]
+#[allow(dead_code)]
+#[inline]
+unsafe fn exchange_malloc_conservative(
+    size: usize,
+    align: usize,
+    _bitmap: usize,
+    _bitmap_size: usize,
+) -> *mut u8 {
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+    match Global.alloc_conservative(layout) {
         Ok(ptr) => ptr.as_mut_ptr(),
         Err(_) => handle_alloc_error(layout),
     }

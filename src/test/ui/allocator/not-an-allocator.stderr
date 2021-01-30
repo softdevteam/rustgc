@@ -34,6 +34,33 @@ LL | static A: usize = 0;
    = note: required by `std::alloc::GlobalAlloc::alloc_zeroed`
    = note: this error originates in an attribute macro (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: aborting due to 4 previous errors
+error[E0277]: the trait bound `usize: GlobalAlloc` is not satisfied
+  --> $DIR/not-an-allocator.rs:2:1
+   |
+LL | static A: usize = 0;
+   | ^^^^^^^^^^^^^^^^^^^^ the trait `GlobalAlloc` is not implemented for `usize`
+   |
+   = note: required by `std::alloc::GlobalAlloc::alloc_untraceable`
+   = note: this error originates in an attribute macro (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `usize: GlobalAlloc` is not satisfied
+  --> $DIR/not-an-allocator.rs:2:1
+   |
+LL | static A: usize = 0;
+   | ^^^^^^^^^^^^^^^^^^^^ the trait `GlobalAlloc` is not implemented for `usize`
+   |
+   = note: required by `std::alloc::GlobalAlloc::alloc_conservative`
+   = note: this error originates in an attribute macro (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `usize: GlobalAlloc` is not satisfied
+  --> $DIR/not-an-allocator.rs:2:1
+   |
+LL | static A: usize = 0;
+   | ^^^^^^^^^^^^^^^^^^^^ the trait `GlobalAlloc` is not implemented for `usize`
+   |
+   = note: required by `std::alloc::GlobalAlloc::alloc_precise`
+   = note: this error originates in an attribute macro (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: aborting due to 7 previous errors
 
 For more information about this error, try `rustc --explain E0277`.

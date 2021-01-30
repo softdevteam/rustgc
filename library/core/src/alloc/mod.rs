@@ -345,6 +345,23 @@ pub unsafe trait Allocator {
     fn by_ref(&self) -> &Self {
         self
     }
+
+    fn alloc_untraceable(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
+
+    fn alloc_conservative(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
+
+    fn alloc_precise(
+        &self,
+        layout: Layout,
+        _bitmap: usize,
+        _bitmap_size: usize,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
 }
 
 #[unstable(feature = "allocator_api", issue = "32838")]
