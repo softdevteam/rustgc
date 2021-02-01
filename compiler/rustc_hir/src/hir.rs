@@ -11,9 +11,9 @@ pub use rustc_ast::{CaptureBy, Movability, Mutability};
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_data_structures::sync::{par_for_each_in, Send, Sync};
 use rustc_macros::HashStable_Generic;
-use rustc_span::def_id::LocalDefId;
-use rustc_span::source_map::Spanned;
+use rustc_span::source_map::{SourceMap, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
+use rustc_span::{def_id::LocalDefId, BytePos};
 use rustc_span::{MultiSpan, Span, DUMMY_SP};
 use rustc_target::asm::InlineAsmRegOrRegClass;
 use rustc_target::spec::abi::Abi;
@@ -28,7 +28,7 @@ pub struct Lifetime {
     pub span: Span,
 
     /// Either "`'a`", referring to a named lifetime definition,
-    /// or "``" (i.e., `kw::Invalid`), for elision placeholders.
+    /// or "``" (i.e., `kw::Empty`), for elision placeholders.
     ///
     /// HIR lowering inserts these placeholders in type paths that
     /// refer to type definitions needing lifetime parameters,
@@ -231,7 +231,11 @@ impl<'hir> PathSegment<'hir> {
         PathSegment { ident, hir_id: None, res: None, infer_args: true, args: None }
     }
 
-    pub fn generic_args(&self) -> &GenericArgs<'hir> {
+    pub fn invalid() -> Self {
+        Self::from_ident(Ident::invalid())
+    }
+
+    pub fn args(&self) -> &GenericArgs<'hir> {
         if let Some(ref args) = self.args {
             args
         } else {
@@ -275,6 +279,10 @@ impl GenericArg<'_> {
         matches!(self, GenericArg::Const(_))
     }
 
+    pub fn is_synthetic(&self) -> bool {
+        matches!(self, GenericArg::Lifetime(lifetime) if lifetime.name.ident() == Ident::invalid())
+    }
+
     pub fn descr(&self) -> &'static str {
         match self {
             GenericArg::Lifetime(_) => "lifetime",
@@ -283,11 +291,11 @@ impl GenericArg<'_> {
         }
     }
 
-    pub fn short_descr(&self) -> &'static str {
+    pub fn to_ord(&self, feats: &rustc_feature::Features) -> ast::ParamKindOrd {
         match self {
-            GenericArg::Lifetime(_) => "lifetime",
-            GenericArg::Type(_) => "type",
-            GenericArg::Const(_) => "const",
+            GenericArg::Lifetime(_) => ast::ParamKindOrd::Lifetime,
+            GenericArg::Type(_) => ast::ParamKindOrd::Type,
+            GenericArg::Const(_) => ast::ParamKindOrd::Const { unordered: feats.const_generics },
         }
     }
 }
@@ -344,6 +352,39 @@ impl GenericArgs<'_> {
 
         own_counts
     }
+
+    pub fn span(&self) -> Option<Span> {
+        self.args
+            .iter()
+            .filter(|arg| !arg.is_synthetic())
+            .map(|arg| arg.span())
+            .fold_first(|span1, span2| span1.to(span2))
+    }
+
+    /// Returns span encompassing arguments and their surrounding `<>` or `()`
+    pub fn span_ext(&self, sm: &SourceMap) -> Option<Span> {
+        let mut span = self.span()?;
+
+        let (o, c) = if self.parenthesized { ('(', ')') } else { ('<', '>') };
+
+        if let Ok(snippet) = sm.span_to_snippet(span) {
+            let snippet = snippet.as_bytes();
+
+            if snippet[0] != (o as u8) || snippet[snippet.len() - 1] != (c as u8) {
+                span = sm.span_extend_to_prev_char(span, o, true);
+                span = span.with_lo(span.lo() - BytePos(1));
+
+                span = sm.span_extend_to_next_char(span, c, true);
+                span = span.with_hi(span.hi() + BytePos(1));
+            }
+        }
+
+        Some(span)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.args.is_empty()
+    }
 }
 
 /// A modifier on a bound, currently this is only used for `?Sized`, where the
@@ -378,9 +419,9 @@ impl GenericBound<'_> {
 
     pub fn span(&self) -> Span {
         match self {
-            &GenericBound::Trait(ref t, ..) => t.span,
-            &GenericBound::LangItemTrait(_, span, ..) => span,
-            &GenericBound::Outlives(ref l) => l.span,
+            GenericBound::Trait(t, ..) => t.span,
+            GenericBound::LangItemTrait(_, span, ..) => *span,
+            GenericBound::Outlives(l) => l.span,
         }
     }
 }
@@ -418,6 +459,8 @@ pub enum GenericParamKind<'hir> {
     },
     Const {
         ty: &'hir Ty<'hir>,
+        /// Optional default value for the const generic param
+        default: Option<AnonConst>,
     },
 }
 
@@ -518,7 +561,7 @@ impl WhereClause<'_> {
     ///  in `fn foo<T>(t: T) where T: Foo,` so we don't suggest two trailing commas.
     pub fn tail_span_for_suggestion(&self) -> Span {
         let end = self.span_for_predicates_or_empty_place().shrink_to_hi();
-        self.predicates.last().map(|p| p.span()).unwrap_or(end).shrink_to_hi().to(end)
+        self.predicates.last().map_or(end, |p| p.span()).shrink_to_hi().to(end)
     }
 }
 
@@ -536,9 +579,9 @@ pub enum WherePredicate<'hir> {
 impl WherePredicate<'_> {
     pub fn span(&self) -> Span {
         match self {
-            &WherePredicate::BoundPredicate(ref p) => p.span,
-            &WherePredicate::RegionPredicate(ref p) => p.span,
-            &WherePredicate::EqPredicate(ref p) => p.span,
+            WherePredicate::BoundPredicate(p) => p.span,
+            WherePredicate::RegionPredicate(p) => p.span,
+            WherePredicate::EqPredicate(p) => p.span,
         }
     }
 }
@@ -607,7 +650,7 @@ pub struct Crate<'hir> {
     // over the ids in increasing order. In principle it should not
     // matter what order we visit things in, but in *practice* it
     // does, because it can affect the order in which errors are
-    // detected, which in turn can make compile-fail tests yield
+    // detected, which in turn can make UI tests yield
     // slightly different results.
     pub items: BTreeMap<HirId, Item<'hir>>,
 
@@ -760,9 +803,9 @@ pub struct Pat<'hir> {
     pub default_binding_modes: bool,
 }
 
-impl Pat<'_> {
+impl<'hir> Pat<'hir> {
     // FIXME(#19596) this is a workaround, but there should be a better way
-    fn walk_short_(&self, it: &mut impl FnMut(&Pat<'_>) -> bool) -> bool {
+    fn walk_short_(&self, it: &mut impl FnMut(&Pat<'hir>) -> bool) -> bool {
         if !it(self) {
             return false;
         }
@@ -785,12 +828,12 @@ impl Pat<'_> {
     /// Note that when visiting e.g. `Tuple(ps)`,
     /// if visiting `ps[0]` returns `false`,
     /// then `ps[1]` will not be visited.
-    pub fn walk_short(&self, mut it: impl FnMut(&Pat<'_>) -> bool) -> bool {
+    pub fn walk_short(&self, mut it: impl FnMut(&Pat<'hir>) -> bool) -> bool {
         self.walk_short_(&mut it)
     }
 
     // FIXME(#19596) this is a workaround, but there should be a better way
-    fn walk_(&self, it: &mut impl FnMut(&Pat<'_>) -> bool) {
+    fn walk_(&self, it: &mut impl FnMut(&Pat<'hir>) -> bool) {
         if !it(self) {
             return;
         }
@@ -810,7 +853,7 @@ impl Pat<'_> {
     /// Walk the pattern in left-to-right order.
     ///
     /// If `it(pat)` returns `false`, the children are not visited.
-    pub fn walk(&self, mut it: impl FnMut(&Pat<'_>) -> bool) {
+    pub fn walk(&self, mut it: impl FnMut(&Pat<'hir>) -> bool) {
         self.walk_(&mut it)
     }
 
@@ -1160,6 +1203,7 @@ pub struct Arm<'hir> {
 #[derive(Debug, HashStable_Generic)]
 pub enum Guard<'hir> {
     If(&'hir Expr<'hir>),
+    IfLet(&'hir Pat<'hir>, &'hir Expr<'hir>),
 }
 
 #[derive(Debug, HashStable_Generic)]
@@ -1387,6 +1431,7 @@ impl Expr<'_> {
             ExprKind::Lit(_) => ExprPrecedence::Lit,
             ExprKind::Type(..) | ExprKind::Cast(..) => ExprPrecedence::Cast,
             ExprKind::DropTemps(ref expr, ..) => expr.precedence(),
+            ExprKind::If(..) => ExprPrecedence::If,
             ExprKind::Loop(..) => ExprPrecedence::Loop,
             ExprKind::Match(..) => ExprPrecedence::Match,
             ExprKind::Closure(..) => ExprPrecedence::Closure,
@@ -1448,6 +1493,7 @@ impl Expr<'_> {
             | ExprKind::MethodCall(..)
             | ExprKind::Struct(..)
             | ExprKind::Tup(..)
+            | ExprKind::If(..)
             | ExprKind::Match(..)
             | ExprKind::Closure(..)
             | ExprKind::Block(..)
@@ -1564,10 +1610,16 @@ pub enum ExprKind<'hir> {
     /// This construct only exists to tweak the drop order in HIR lowering.
     /// An example of that is the desugaring of `for` loops.
     DropTemps(&'hir Expr<'hir>),
+    /// An `if` block, with an optional else block.
+    ///
+    /// I.e., `if <expr> { <expr> } else { <expr> }`.
+    If(&'hir Expr<'hir>, &'hir Expr<'hir>, Option<&'hir Expr<'hir>>),
     /// A conditionless loop (can be exited with `break`, `continue`, or `return`).
     ///
     /// I.e., `'label: loop { <block> }`.
-    Loop(&'hir Block<'hir>, Option<Label>, LoopSource),
+    ///
+    /// The `Span` is the loop header (`for x in y`/`while let pat = expr`).
+    Loop(&'hir Block<'hir>, Option<Label>, LoopSource, Span),
     /// A `match` block, with a source that indicates whether or not it is
     /// the result of a desugaring, and if so, which kind.
     Match(&'hir Expr<'hir>, &'hir [Arm<'hir>], MatchSource),
@@ -1717,10 +1769,10 @@ pub enum LocalSource {
 pub enum MatchSource {
     /// A `match _ { .. }`.
     Normal,
-    /// An `if _ { .. }` (optionally with `else { .. }`).
-    IfDesugar { contains_else_clause: bool },
     /// An `if let _ = _ { .. }` (optionally with `else { .. }`).
     IfLetDesugar { contains_else_clause: bool },
+    /// An `if let _ = _ => { .. }` match guard.
+    IfLetGuardDesugar,
     /// A `while _ { .. }` (which was desugared to a `loop { match _ { .. } }`).
     WhileDesugar,
     /// A `while let _ = _ { .. }` (which was desugared to a
@@ -1739,7 +1791,7 @@ impl MatchSource {
         use MatchSource::*;
         match self {
             Normal => "match",
-            IfDesugar { .. } | IfLetDesugar { .. } => "if",
+            IfLetDesugar { .. } | IfLetGuardDesugar => "if",
             WhileDesugar | WhileLetDesugar => "while",
             ForLoopDesugar => "for",
             TryDesugar => "?",
@@ -2549,22 +2601,25 @@ pub enum ItemKind<'hir> {
     TraitAlias(Generics<'hir>, GenericBounds<'hir>),
 
     /// An implementation, e.g., `impl<A> Trait for Foo { .. }`.
-    Impl {
-        unsafety: Unsafety,
-        polarity: ImplPolarity,
-        defaultness: Defaultness,
-        // We do not put a `Span` in `Defaultness` because it breaks foreign crate metadata
-        // decoding as `Span`s cannot be decoded when a `Session` is not available.
-        defaultness_span: Option<Span>,
-        constness: Constness,
-        generics: Generics<'hir>,
+    Impl(Impl<'hir>),
+}
 
-        /// The trait being implemented, if any.
-        of_trait: Option<TraitRef<'hir>>,
+#[derive(Debug, HashStable_Generic)]
+pub struct Impl<'hir> {
+    pub unsafety: Unsafety,
+    pub polarity: ImplPolarity,
+    pub defaultness: Defaultness,
+    // We do not put a `Span` in `Defaultness` because it breaks foreign crate metadata
+    // decoding as `Span`s cannot be decoded when a `Session` is not available.
+    pub defaultness_span: Option<Span>,
+    pub constness: Constness,
+    pub generics: Generics<'hir>,
 
-        self_ty: &'hir Ty<'hir>,
-        items: &'hir [ImplItemRef<'hir>],
-    },
+    /// The trait being implemented, if any.
+    pub of_trait: Option<TraitRef<'hir>>,
+
+    pub self_ty: &'hir Ty<'hir>,
+    pub items: &'hir [ImplItemRef<'hir>],
 }
 
 impl ItemKind<'_> {
@@ -2577,7 +2632,7 @@ impl ItemKind<'_> {
             | ItemKind::Struct(_, ref generics)
             | ItemKind::Union(_, ref generics)
             | ItemKind::Trait(_, _, ref generics, _, _)
-            | ItemKind::Impl { ref generics, .. } => generics,
+            | ItemKind::Impl(Impl { ref generics, .. }) => generics,
             _ => return None,
         })
     }

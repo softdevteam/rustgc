@@ -57,9 +57,9 @@ impl CognitiveComplexity {
 
         let expr = &body.value;
 
-        let mut helper = CCHelper { cc: 1, returns: 0 };
+        let mut helper = CcHelper { cc: 1, returns: 0 };
         helper.visit_expr(expr);
-        let CCHelper { cc, returns } = helper;
+        let CcHelper { cc, returns } = helper;
         let ret_ty = cx.typeck_results().node_type(expr.hir_id);
         let ret_adjust = if is_type_diagnostic_item(cx, ret_ty, sym::result_type) {
             returns
@@ -136,17 +136,20 @@ impl<'tcx> LateLintPass<'tcx> for CognitiveComplexity {
     }
 }
 
-struct CCHelper {
+struct CcHelper {
     cc: u64,
     returns: u64,
 }
 
-impl<'tcx> Visitor<'tcx> for CCHelper {
+impl<'tcx> Visitor<'tcx> for CcHelper {
     type Map = Map<'tcx>;
 
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
         walk_expr(self, e);
         match e.kind {
+            ExprKind::If(_, _, _) => {
+                self.cc += 1;
+            },
             ExprKind::Match(_, ref arms, _) => {
                 if arms.len() > 1 {
                     self.cc += 1;

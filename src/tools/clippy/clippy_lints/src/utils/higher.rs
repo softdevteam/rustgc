@@ -142,7 +142,7 @@ pub fn for_loop<'tcx>(
         if let hir::ExprKind::Match(ref iterexpr, ref arms, hir::MatchSource::ForLoopDesugar) = expr.kind;
         if let hir::ExprKind::Call(_, ref iterargs) = iterexpr.kind;
         if iterargs.len() == 1 && arms.len() == 1 && arms[0].guard.is_none();
-        if let hir::ExprKind::Loop(ref block, _, _) = arms[0].body.kind;
+        if let hir::ExprKind::Loop(ref block, ..) = arms[0].body.kind;
         if block.expr.is_none();
         if let [ _, _, ref let_stmt, ref body ] = *block.stmts;
         if let hir::StmtKind::Local(ref local) = let_stmt.kind;
@@ -158,8 +158,7 @@ pub fn for_loop<'tcx>(
 /// `while cond { body }` becomes `(cond, body)`.
 pub fn while_loop<'tcx>(expr: &'tcx hir::Expr<'tcx>) -> Option<(&'tcx hir::Expr<'tcx>, &'tcx hir::Expr<'tcx>)> {
     if_chain! {
-        if let hir::ExprKind::Loop(block, _, hir::LoopSource::While) = &expr.kind;
-        if let hir::Block { expr: Some(expr), .. } = &**block;
+        if let hir::ExprKind::Loop(hir::Block { expr: Some(expr), .. }, _, hir::LoopSource::While, _) = &expr.kind;
         if let hir::ExprKind::Match(cond, arms, hir::MatchSource::WhileDesugar) = &expr.kind;
         if let hir::ExprKind::DropTemps(cond) = &cond.kind;
         if let [hir::Arm { body, .. }, ..] = &arms[..];
@@ -168,33 +167,6 @@ pub fn while_loop<'tcx>(expr: &'tcx hir::Expr<'tcx>) -> Option<(&'tcx hir::Expr<
         }
     }
     None
-}
-
-/// Recover the essential nodes of a desugared if block
-/// `if cond { then } else { els }` becomes `(cond, then, Some(els))`
-pub fn if_block<'tcx>(
-    expr: &'tcx hir::Expr<'tcx>,
-) -> Option<(
-    &'tcx hir::Expr<'tcx>,
-    &'tcx hir::Expr<'tcx>,
-    Option<&'tcx hir::Expr<'tcx>>,
-)> {
-    if let hir::ExprKind::Match(ref cond, ref arms, hir::MatchSource::IfDesugar { contains_else_clause }) = expr.kind {
-        let cond = if let hir::ExprKind::DropTemps(ref cond) = cond.kind {
-            cond
-        } else {
-            panic!("If block desugar must contain DropTemps");
-        };
-        let then = &arms[0].body;
-        let els = if contains_else_clause {
-            Some(&*arms[1].body)
-        } else {
-            None
-        };
-        Some((cond, then, els))
-    } else {
-        None
-    }
 }
 
 /// Represent the pre-expansion arguments of a `vec!` invocation.
@@ -267,12 +239,11 @@ pub fn extract_assert_macro_args<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx 
 
     if let ExprKind::Block(ref block, _) = e.kind {
         if block.stmts.len() == 1 {
-            if let StmtKind::Semi(ref matchexpr) = block.stmts[0].kind {
+            if let StmtKind::Semi(ref matchexpr) = block.stmts.get(0)?.kind {
                 // macros with unique arg: `{debug_}assert!` (e.g., `debug_assert!(some_condition)`)
                 if_chain! {
-                    if let ExprKind::Match(ref ifclause, _, _) = matchexpr.kind;
-                    if let ExprKind::DropTemps(ref droptmp) = ifclause.kind;
-                    if let ExprKind::Unary(UnOp::UnNot, condition) = droptmp.kind;
+                    if let ExprKind::If(ref clause, _, _)  = matchexpr.kind;
+                    if let ExprKind::Unary(UnOp::UnNot, condition) = clause.kind;
                     then {
                         return Some(vec![condition]);
                     }

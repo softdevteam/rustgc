@@ -1,10 +1,11 @@
+// ignore-tidy-filelength
 //! Some lints that are built in to the compiler.
 //!
 //! These are the built-in lints that are emitted direct in the main
 //! compiler code, rather than using their own custom pass. Those
 //! lints are all available in `rustc_lint::builtin`.
 
-use crate::{declare_lint, declare_lint_pass, declare_tool_lint};
+use crate::{declare_lint, declare_lint_pass};
 use rustc_span::edition::Edition;
 use rustc_span::symbol::sym;
 
@@ -221,14 +222,10 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// This lint detects code that is very likely incorrect. When possible,
-    /// the compiler will attempt to detect situations where code can be
-    /// evaluated at compile-time to generate more efficient code. While
-    /// evaluating such code, if it detects that the code will unconditionally
-    /// panic, this usually indicates that it is doing something incorrectly.
-    /// If this lint is allowed, then the code will not be evaluated at
-    /// compile-time, and instead continue to generate code to evaluate at
-    /// runtime, which may panic during runtime.
+    /// This lint detects code that is very likely incorrect because it will
+    /// always panic, such as division by zero and out-of-bounds array
+    /// accesses. Consider adjusting your code if this is a bug, or using the
+    /// `panic!` or `unreachable!` macro instead in case the panic is intended.
     pub UNCONDITIONAL_PANIC,
     Deny,
     "operation will cause a panic at runtime"
@@ -242,41 +239,22 @@ declare_lint! {
     ///
     /// ```rust,compile_fail
     /// #![allow(unconditional_panic)]
-    /// let x: &'static i32 = &(1 / 0);
+    /// const C: i32 = 1/0;
     /// ```
     ///
     /// {{produces}}
     ///
     /// ### Explanation
     ///
-    /// This lint detects code that is very likely incorrect. If this lint is
-    /// allowed, then the code will not be evaluated at compile-time, and
-    /// instead continue to generate code to evaluate at runtime, which may
-    /// panic during runtime.
+    /// This lint detects constants that fail to evaluate. Allowing the lint will accept the
+    /// constant declaration, but any use of this constant will still lead to a hard error. This is
+    /// a future incompatibility lint; the plan is to eventually entirely forbid even declaring
+    /// constants that cannot be evaluated.  See [issue #71800] for more details.
     ///
-    /// Note that this lint may trigger in either inside or outside of a
-    /// [const context]. Outside of a [const context], the compiler can
-    /// sometimes evaluate an expression at compile-time in order to generate
-    /// more efficient code. As the compiler becomes better at doing this, it
-    /// needs to decide what to do when it encounters code that it knows for
-    /// certain will panic or is otherwise incorrect. Making this a hard error
-    /// would prevent existing code that exhibited this behavior from
-    /// compiling, breaking backwards-compatibility. However, this is almost
-    /// certainly incorrect code, so this is a deny-by-default lint. For more
-    /// details, see [RFC 1229] and [issue #28238].
-    ///
-    /// Note that there are several other more specific lints associated with
-    /// compile-time evaluation, such as [`arithmetic_overflow`],
-    /// [`unconditional_panic`].
-    ///
-    /// [const context]: https://doc.rust-lang.org/reference/const_eval.html#const-context
-    /// [RFC 1229]: https://github.com/rust-lang/rfcs/blob/master/text/1229-compile-time-asserts.md
-    /// [issue #28238]: https://github.com/rust-lang/rust/issues/28238
-    /// [`arithmetic_overflow`]: deny-by-default.html#arithmetic-overflow
-    /// [`unconditional_panic`]: deny-by-default.html#unconditional-panic
+    /// [issue #71800]: https://github.com/rust-lang/rust/issues/71800
     pub CONST_ERR,
     Deny,
-    "constant evaluation detected erroneous expression",
+    "constant evaluation encountered erroneous expression",
     report_in_external_macro
 }
 
@@ -588,8 +566,8 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `overlapping_patterns` lint detects `match` arms that have
-    /// [range patterns] that overlap.
+    /// The `overlapping_range_endpoints` lint detects `match` arms that have [range patterns] that
+    /// overlap on their endpoints.
     ///
     /// [range patterns]: https://doc.rust-lang.org/nightly/reference/patterns.html#range-patterns
     ///
@@ -607,13 +585,12 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// It is likely a mistake to have range patterns in a match expression
-    /// that overlap. Check that the beginning and end values are what you
-    /// expect, and keep in mind that with `..=` the left and right bounds are
-    /// inclusive.
-    pub OVERLAPPING_PATTERNS,
+    /// It is likely a mistake to have range patterns in a match expression that overlap in this
+    /// way. Check that the beginning and end values are what you expect, and keep in mind that
+    /// with `..=` the left and right bounds are inclusive.
+    pub OVERLAPPING_RANGE_ENDPOINTS,
     Warn,
-    "detects overlapping patterns"
+    "detects range patterns with overlapping endpoints"
 }
 
 declare_lint! {
@@ -1225,6 +1202,50 @@ declare_lint! {
     "patterns in functions without body were erroneously allowed",
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #35203 <https://github.com/rust-lang/rust/issues/35203>",
+        edition: None,
+    };
+}
+
+declare_lint! {
+    /// The `missing_fragment_specifier` lint is issued when an unused pattern in a
+    /// `macro_rules!` macro definition has a meta-variable (e.g. `$e`) that is not
+    /// followed by a fragment specifier (e.g. `:expr`).
+    ///
+    /// This warning can always be fixed by removing the unused pattern in the
+    /// `macro_rules!` macro definition.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// macro_rules! foo {
+    ///    () => {};
+    ///    ($name) => { };
+    /// }
+    ///
+    /// fn main() {
+    ///    foo!();
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// To fix this, remove the unused pattern from the `macro_rules!` macro definition:
+    ///
+    /// ```rust
+    /// macro_rules! foo {
+    ///     () => {};
+    /// }
+    /// fn main() {
+    ///     foo!();
+    /// }
+    /// ```
+    pub MISSING_FRAGMENT_SPECIFIER,
+    Deny,
+    "detects missing fragment specifiers in unused `macro_rules!` patterns",
+    @future_incompatible = FutureIncompatibleInfo {
+        reference: "issue #40107 <https://github.com/rust-lang/rust/issues/40107>",
         edition: None,
     };
 }
@@ -2787,10 +2808,77 @@ declare_lint! {
     };
 }
 
-declare_tool_lint! {
-    pub rustc::INEFFECTIVE_UNSTABLE_TRAIT_IMPL,
+declare_lint! {
+    /// The `ineffective_unstable_trait_impl` lint detects `#[unstable]` attributes which are not used.
+    ///
+    /// ### Example
+    ///
+    /// ```compile_fail
+    /// #![feature(staged_api)]
+    ///
+    /// #[derive(Clone)]
+    /// #[stable(feature = "x", since = "1")]
+    /// struct S {}
+    ///
+    /// #[unstable(feature = "y", issue = "none")]
+    /// impl Copy for S {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// `staged_api` does not currently support using a stability attribute on `impl` blocks.
+    /// `impl`s are always stable if both the type and trait are stable, and always unstable otherwise.
+    pub INEFFECTIVE_UNSTABLE_TRAIT_IMPL,
     Deny,
     "detects `#[unstable]` on stable trait implementations for stable types"
+}
+
+declare_lint! {
+    /// The `semicolon_in_expressions_from_macros` lint detects trailing semicolons
+    /// in macro bodies when the macro is invoked in expression position.
+    /// This was previous accepted, but is being phased out.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(semicolon_in_expressions_from_macros)]
+    /// macro_rules! foo {
+    ///     () => { true; }
+    /// }
+    ///
+    /// fn main() {
+    ///     let val = match true {
+    ///         true => false,
+    ///         _ => foo!()
+    ///     };
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Previous, Rust ignored trailing semicolon in a macro
+    /// body when a macro was invoked in expression position.
+    /// However, this makes the treatment of semicolons in the language
+    /// inconsistent, and could lead to unexpected runtime behavior
+    /// in some circumstances (e.g. if the macro author expects
+    /// a value to be dropped).
+    ///
+    /// This is a [future-incompatible] lint to transition this
+    /// to a hard error in the future. See [issue #79813] for more details.
+    ///
+    /// [issue #79813]: https://github.com/rust-lang/rust/issues/79813
+    /// [future-incompatible]: ../index.md#future-incompatible-lints
+    pub SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
+    Allow,
+    "trailing semicolon in macro body used as expression",
+    @future_incompatible = FutureIncompatibleInfo {
+        reference: "issue #79813 <https://github.com/rust-lang/rust/issues/79813>",
+        edition: None,
+    };
 }
 
 declare_lint_pass! {
@@ -2810,7 +2898,7 @@ declare_lint_pass! {
         DEAD_CODE,
         UNREACHABLE_CODE,
         UNREACHABLE_PATTERNS,
-        OVERLAPPING_PATTERNS,
+        OVERLAPPING_RANGE_ENDPOINTS,
         BINDINGS_WITH_VARIANT_NAME,
         UNUSED_MACROS,
         WARNINGS,
@@ -2829,6 +2917,7 @@ declare_lint_pass! {
         CONST_ITEM_MUTATION,
         SAFE_PACKED_BORROWS,
         PATTERNS_IN_FNS_WITHOUT_BODY,
+        MISSING_FRAGMENT_SPECIFIER,
         LATE_BOUND_LIFETIME_ARGUMENTS,
         ORDER_DEPENDENT_TRAIT_OBJECTS,
         COHERENCE_LEAK_CHECK,
@@ -2878,6 +2967,8 @@ declare_lint_pass! {
         FUNCTION_ITEM_REFERENCES,
         USELESS_DEPRECATED,
         UNSUPPORTED_NAKED_FUNCTIONS,
+        MISSING_ABI,
+        SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
     ]
 }
 
@@ -2905,3 +2996,28 @@ declare_lint! {
 }
 
 declare_lint_pass!(UnusedDocComment => [UNUSED_DOC_COMMENTS]);
+
+declare_lint! {
+    /// The `missing_abi` lint detects cases where the ABI is omitted from
+    /// extern declarations.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(missing_abi)]
+    ///
+    /// extern fn foo() {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Historically, Rust implicitly selected C as the ABI for extern
+    /// declarations. We expect to add new ABIs, like `C-unwind`, in the future,
+    /// though this has not yet happened, and especially with their addition
+    /// seeing the ABI easily will make code review easier.
+    pub MISSING_ABI,
+    Allow,
+    "No declared ABI for extern declaration"
+}

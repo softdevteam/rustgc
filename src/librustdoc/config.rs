@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt;
@@ -35,12 +35,15 @@ crate enum OutputFormat {
     Html,
 }
 
+impl Default for OutputFormat {
+    fn default() -> OutputFormat {
+        OutputFormat::Html
+    }
+}
+
 impl OutputFormat {
     crate fn is_json(&self) -> bool {
-        match self {
-            OutputFormat::Json => true,
-            _ => false,
-        }
+        matches!(self, OutputFormat::Json)
     }
 }
 
@@ -106,6 +109,8 @@ crate struct Options {
     crate should_test: bool,
     /// List of arguments to pass to the test harness, if running tests.
     crate test_args: Vec<String>,
+    /// The working directory in which to run tests.
+    crate test_run_directory: Option<PathBuf>,
     /// Optional path to persist the doctest executables to, defaults to a
     /// temporary directory if not set.
     crate persist_doctests: Option<PathBuf>,
@@ -119,7 +124,7 @@ crate struct Options {
     crate enable_per_target_ignores: bool,
 
     /// The path to a rustc-like binary to build tests with. If not set, we
-    /// default to loading from $sysroot/bin/rustc.
+    /// default to loading from `$sysroot/bin/rustc`.
     crate test_builder: Option<PathBuf>,
 
     // Options that affect the documentation process
@@ -143,8 +148,10 @@ crate struct Options {
     crate crate_version: Option<String>,
     /// Collected options specific to outputting final pages.
     crate render_options: RenderOptions,
-    /// Output format rendering (used only for "show-coverage" option for the moment)
-    crate output_format: Option<OutputFormat>,
+    /// The format that we output when rendering.
+    ///
+    /// Currently used only for the `--show-coverage` option.
+    crate output_format: OutputFormat,
     /// If this option is set to `true`, rustdoc will only run checks and not generate
     /// documentation.
     crate run_check: bool,
@@ -178,6 +185,7 @@ impl fmt::Debug for Options {
             .field("lint_cap", &self.lint_cap)
             .field("should_test", &self.should_test)
             .field("test_args", &self.test_args)
+            .field("test_run_directory", &self.test_run_directory)
             .field("persist_doctests", &self.persist_doctests)
             .field("default_passes", &self.default_passes)
             .field("manual_passes", &self.manual_passes)
@@ -222,7 +230,7 @@ crate struct RenderOptions {
     crate extern_html_root_urls: BTreeMap<String, String>,
     /// A map of the default settings (values are as for DOM storage API). Keys should lack the
     /// `rustdoc-` prefix.
-    crate default_settings: HashMap<String, String>,
+    crate default_settings: FxHashMap<String, String>,
     /// If present, suffix added to CSS/JavaScript files when referencing them in generated pages.
     crate resource_suffix: String,
     /// Whether to run the static CSS/JavaScript through a minifier when outputting them. `true` by
@@ -261,7 +269,7 @@ crate struct RenderOptions {
 }
 
 /// Temporary storage for data obtained during `RustdocVisitor::clean()`.
-/// Later on moved into `CACHE_KEY`.
+/// Later on moved into `cache`.
 #[derive(Default, Clone)]
 crate struct RenderInfo {
     crate inlined: FxHashSet<DefId>,
@@ -271,7 +279,7 @@ crate struct RenderInfo {
     crate deref_trait_did: Option<DefId>,
     crate deref_mut_trait_did: Option<DefId>,
     crate owned_box_did: Option<DefId>,
-    crate output_format: Option<OutputFormat>,
+    crate output_format: OutputFormat,
 }
 
 impl Options {
@@ -474,7 +482,7 @@ impl Options {
         };
 
         let mut id_map = html::markdown::IdMap::new();
-        id_map.populate(html::render::initial_ids());
+        id_map.populate(&html::render::INITIAL_IDS);
         let external_html = match ExternalHtml::load(
             &matches.opt_strs("html-in-header"),
             &matches.opt_strs("html-before-content"),
@@ -537,28 +545,28 @@ impl Options {
 
         let output_format = match matches.opt_str("output-format") {
             Some(s) => match OutputFormat::try_from(s.as_str()) {
-                Ok(o) => {
-                    if o.is_json()
+                Ok(out_fmt) => {
+                    if out_fmt.is_json()
                         && !(show_coverage || nightly_options::match_is_nightly_build(matches))
                     {
                         diag.struct_err("json output format isn't supported for doc generation")
                             .emit();
                         return Err(1);
-                    } else if !o.is_json() && show_coverage {
+                    } else if !out_fmt.is_json() && show_coverage {
                         diag.struct_err(
                             "html output format isn't supported for the --show-coverage option",
                         )
                         .emit();
                         return Err(1);
                     }
-                    Some(o)
+                    out_fmt
                 }
                 Err(e) => {
                     diag.struct_err(&e).emit();
                     return Err(1);
                 }
             },
-            None => None,
+            None => OutputFormat::default(),
         };
         let crate_name = matches.opt_str("crate-name");
         let proc_macro_crate = crate_types.contains(&CrateType::ProcMacro);
@@ -575,6 +583,7 @@ impl Options {
         let enable_index_page = matches.opt_present("enable-index-page") || index_page.is_some();
         let static_root_path = matches.opt_str("static-root-path");
         let generate_search_filter = !matches.opt_present("disable-per-crate-search");
+        let test_run_directory = matches.opt_str("test-run-directory").map(PathBuf::from);
         let persist_doctests = matches.opt_str("persist-doctests").map(PathBuf::from);
         let test_builder = matches.opt_str("test-builder").map(PathBuf::from);
         let codegen_options_strs = matches.opt_strs("C");
@@ -616,6 +625,7 @@ impl Options {
             display_warnings,
             show_coverage,
             crate_version,
+            test_run_directory,
             persist_doctests,
             runtool,
             runtool_args,

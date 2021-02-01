@@ -712,8 +712,8 @@ extern "rust-intrinsic" {
     /// [`std::process::abort`](../../std/process/fn.abort.html).
     pub fn abort() -> !;
 
-    /// Tells LLVM that this point in the code is not reachable, enabling
-    /// further optimizations.
+    /// Informs the optimizer that this point in the code is not reachable,
+    /// enabling further optimizations.
     ///
     /// N.B., this is very different from the `unreachable!()` macro: Unlike the
     /// macro, which panics when it is executed, it is *undefined behavior* to
@@ -767,13 +767,6 @@ extern "rust-intrinsic" {
     /// The stabilized version of this intrinsic is [`core::mem::size_of`](crate::mem::size_of).
     #[rustc_const_stable(feature = "const_size_of", since = "1.40.0")]
     pub fn size_of<T>() -> usize;
-
-    /// Moves a value to an uninitialized memory location.
-    ///
-    /// Drop glue is not run on the destination.
-    ///
-    /// The stabilized version of this intrinsic is [`core::ptr::write`](crate::ptr::write).
-    pub fn move_val_init<T>(dst: *mut T, src: T);
 
     /// The minimum alignment of a type.
     ///
@@ -1144,7 +1137,7 @@ extern "rust-intrinsic" {
     /// This intrinsic does not have a stable counterpart.
     pub fn volatile_copy_nonoverlapping_memory<T>(dst: *mut T, src: *const T, count: usize);
     /// Equivalent to the appropriate `llvm.memmove.p0i8.0i8.*` intrinsic, with
-    /// a size of `count` * `size_of::<T>()` and an alignment of
+    /// a size of `count * size_of::<T>()` and an alignment of
     /// `min_align_of::<T>()`
     ///
     /// The volatile parameter is set to `true`, so it will not be optimized out
@@ -1153,7 +1146,7 @@ extern "rust-intrinsic" {
     /// This intrinsic does not have a stable counterpart.
     pub fn volatile_copy_memory<T>(dst: *mut T, src: *const T, count: usize);
     /// Equivalent to the appropriate `llvm.memset.p0i8.*` intrinsic, with a
-    /// size of `count` * `size_of::<T>()` and an alignment of
+    /// size of `count * size_of::<T>()` and an alignment of
     /// `min_align_of::<T>()`.
     ///
     /// The volatile parameter is set to `true`, so it will not be optimized out
@@ -1599,7 +1592,7 @@ extern "rust-intrinsic" {
     pub fn exact_div<T: Copy>(x: T, y: T) -> T;
 
     /// Performs an unchecked division, resulting in undefined behavior
-    /// where y = 0 or x = `T::MIN` and y = -1
+    /// where `y == 0` or `x == T::MIN && y == -1`
     ///
     /// Safe wrappers for this intrinsic are available on the integer
     /// primitives via the `checked_div` method. For example,
@@ -1607,7 +1600,7 @@ extern "rust-intrinsic" {
     #[rustc_const_unstable(feature = "const_int_unchecked_arith", issue = "none")]
     pub fn unchecked_div<T: Copy>(x: T, y: T) -> T;
     /// Returns the remainder of an unchecked division, resulting in
-    /// undefined behavior where y = 0 or x = `T::MIN` and y = -1
+    /// undefined behavior when `y == 0` or `x == T::MIN && y == -1`
     ///
     /// Safe wrappers for this intrinsic are available on the integer
     /// primitives via the `checked_rem` method. For example,
@@ -1616,7 +1609,7 @@ extern "rust-intrinsic" {
     pub fn unchecked_rem<T: Copy>(x: T, y: T) -> T;
 
     /// Performs an unchecked left shift, resulting in undefined behavior when
-    /// y < 0 or y >= N, where N is the width of T in bits.
+    /// `y < 0` or `y >= N`, where N is the width of T in bits.
     ///
     /// Safe wrappers for this intrinsic are available on the integer
     /// primitives via the `checked_shl` method. For example,
@@ -1624,7 +1617,7 @@ extern "rust-intrinsic" {
     #[rustc_const_stable(feature = "const_int_unchecked", since = "1.40.0")]
     pub fn unchecked_shl<T: Copy>(x: T, y: T) -> T;
     /// Performs an unchecked right shift, resulting in undefined behavior when
-    /// y < 0 or y >= N, where N is the width of T in bits.
+    /// `y < 0` or `y >= N`, where N is the width of T in bits.
     ///
     /// Safe wrappers for this intrinsic are available on the integer
     /// primitives via the `checked_shr` method. For example,
@@ -1691,14 +1684,14 @@ extern "rust-intrinsic" {
     #[rustc_const_stable(feature = "const_int_wrapping", since = "1.40.0")]
     pub fn wrapping_mul<T: Copy>(a: T, b: T) -> T;
 
-    /// Computes `a + b`, while saturating at numeric bounds.
+    /// Computes `a + b`, saturating at numeric bounds.
     ///
     /// The stabilized versions of this intrinsic are available on the integer
     /// primitives via the `saturating_add` method. For example,
     /// [`u32::saturating_add`]
     #[rustc_const_stable(feature = "const_int_saturating", since = "1.40.0")]
     pub fn saturating_add<T: Copy>(a: T, b: T) -> T;
-    /// Computes `a - b`, while saturating at numeric bounds.
+    /// Computes `a - b`, saturating at numeric bounds.
     ///
     /// The stabilized versions of this intrinsic are available on the integer
     /// primitives via the `saturating_sub` method. For example,
@@ -1707,14 +1700,14 @@ extern "rust-intrinsic" {
     pub fn saturating_sub<T: Copy>(a: T, b: T) -> T;
 
     /// Returns the value of the discriminant for the variant in 'v',
-    /// cast to a `u64`; if `T` has no discriminant, returns 0.
+    /// cast to a `u64`; if `T` has no discriminant, returns `0`.
     ///
     /// The stabilized version of this intrinsic is [`core::mem::discriminant`](crate::mem::discriminant).
     #[rustc_const_unstable(feature = "const_discriminant", issue = "69821")]
     pub fn discriminant_value<T>(v: &T) -> <T as DiscriminantKind>::Discriminant;
 
     /// Returns the number of variants of the type `T` cast to a `usize`;
-    /// if `T` has no variants, returns 0. Uninhabited variants will be counted.
+    /// if `T` has no variants, returns `0`. Uninhabited variants will be counted.
     ///
     /// The to-be-stabilized version of this intrinsic is [`mem::variant_count`].
     #[rustc_const_unstable(feature = "variant_count", issue = "73662")]
@@ -1747,7 +1740,6 @@ extern "rust-intrinsic" {
 
     /// Allocate at compile time. Should not be called at runtime.
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
-    #[cfg(not(bootstrap))]
     pub fn const_allocate(size: usize, align: usize) -> *mut u8;
 }
 
@@ -1857,20 +1849,23 @@ pub(crate) fn is_nonoverlapping<T>(src: *const T, dst: *const T, count: usize) -
 /// [`Vec::append`]: ../../std/vec/struct.Vec.html#method.append
 #[doc(alias = "memcpy")]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
 #[inline]
-pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
+pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
+        #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
         fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
     }
 
-    if cfg!(debug_assertions)
+    // FIXME: Perform these checks only at run time
+    /*if cfg!(debug_assertions)
         && !(is_aligned_and_not_null(src)
             && is_aligned_and_not_null(dst)
             && is_nonoverlapping(src, dst, count))
     {
         // Not panicking to keep codegen impact smaller.
         abort();
-    }
+    }*/
 
     // SAFETY: the safety contract for `copy_nonoverlapping` must be
     // upheld by the caller.
@@ -1939,16 +1934,19 @@ pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
 /// ```
 #[doc(alias = "memmove")]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
 #[inline]
-pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
+pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
+        #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
         fn copy<T>(src: *const T, dst: *mut T, count: usize);
     }
 
-    if cfg!(debug_assertions) && !(is_aligned_and_not_null(src) && is_aligned_and_not_null(dst)) {
+    // FIXME: Perform these checks only at run time
+    /*if cfg!(debug_assertions) && !(is_aligned_and_not_null(src) && is_aligned_and_not_null(dst)) {
         // Not panicking to keep codegen impact smaller.
         abort();
-    }
+    }*/
 
     // SAFETY: the safety contract for `copy` must be upheld by the caller.
     unsafe { copy(src, dst, count) }

@@ -23,8 +23,8 @@ pub use GenericArgs::*;
 pub use UnsafeSource::*;
 
 use crate::ptr::P;
-use crate::token::{self, CommentKind, DelimToken};
-use crate::tokenstream::{DelimSpan, LazyTokenStream, TokenStream};
+use crate::token::{self, CommentKind, DelimToken, Token};
+use crate::tokenstream::{DelimSpan, LazyTokenStream, TokenStream, TokenTree};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::stack::ensure_sufficient_stack;
@@ -167,10 +167,7 @@ pub enum GenericArgs {
 
 impl GenericArgs {
     pub fn is_angle_bracketed(&self) -> bool {
-        match *self {
-            AngleBracketed(..) => true,
-            _ => false,
-        }
+        matches!(self, AngleBracketed(..))
     }
 
     pub fn span(&self) -> Span {
@@ -245,11 +242,20 @@ impl Into<Option<P<GenericArgs>>> for ParenthesizedArgs {
 /// A path like `Foo(A, B) -> C`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct ParenthesizedArgs {
-    /// Overall span
+    /// ```text
+    /// Foo(A, B) -> C
+    /// ^^^^^^^^^^^^^^
+    /// ```
     pub span: Span,
 
     /// `(A, B)`
     pub inputs: Vec<P<Ty>>,
+
+    /// ```text
+    /// Foo(A, B) -> C
+    ///    ^^^^^^
+    /// ```
+    pub inputs_span: Span,
 
     /// `C`
     pub output: FnRetTy,
@@ -371,6 +377,8 @@ pub enum GenericParamKind {
         ty: P<Ty>,
         /// Span of the `const` keyword.
         kw_span: Span,
+        /// Optional default value for the const generic param
+        default: Option<AnonConst>,
     },
 }
 
@@ -434,9 +442,9 @@ pub enum WherePredicate {
 impl WherePredicate {
     pub fn span(&self) -> Span {
         match self {
-            &WherePredicate::BoundPredicate(ref p) => p.span,
-            &WherePredicate::RegionPredicate(ref p) => p.span,
-            &WherePredicate::EqPredicate(ref p) => p.span,
+            WherePredicate::BoundPredicate(p) => p.span,
+            WherePredicate::RegionPredicate(p) => p.span,
+            WherePredicate::EqPredicate(p) => p.span,
         }
     }
 }
@@ -629,23 +637,20 @@ impl Pat {
 
     /// Is this a `..` pattern?
     pub fn is_rest(&self) -> bool {
-        match self.kind {
-            PatKind::Rest => true,
-            _ => false,
-        }
+        matches!(self.kind, PatKind::Rest)
     }
 }
 
-/// A single field in a struct pattern
+/// A single field in a struct pattern.
 ///
-/// Patterns like the fields of Foo `{ x, ref y, ref mut z }`
-/// are treated the same as` x: x, y: ref y, z: ref mut z`,
-/// except is_shorthand is true
+/// Patterns like the fields of `Foo { x, ref y, ref mut z }`
+/// are treated the same as `x: x, y: ref y, z: ref mut z`,
+/// except when `is_shorthand` is true.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct FieldPat {
-    /// The identifier for the field
+    /// The identifier for the field.
     pub ident: Ident,
-    /// The pattern the field is destructured to
+    /// The pattern the field is destructured to.
     pub pat: P<Pat>,
     pub is_shorthand: bool,
     pub attrs: AttrVec,
@@ -852,10 +857,7 @@ impl BinOpKind {
         }
     }
     pub fn lazy(&self) -> bool {
-        match *self {
-            BinOpKind::And | BinOpKind::Or => true,
-            _ => false,
-        }
+        matches!(self, BinOpKind::And | BinOpKind::Or)
     }
 
     pub fn is_comparison(&self) -> bool {
@@ -923,16 +925,6 @@ impl Stmt {
         }
     }
 
-    pub fn set_tokens(&mut self, tokens: Option<LazyTokenStream>) {
-        match self.kind {
-            StmtKind::Local(ref mut local) => local.tokens = tokens,
-            StmtKind::Item(ref mut item) => item.tokens = tokens,
-            StmtKind::Expr(ref mut expr) | StmtKind::Semi(ref mut expr) => expr.tokens = tokens,
-            StmtKind::Empty => {}
-            StmtKind::MacCall(ref mut mac) => mac.tokens = tokens,
-        }
-    }
-
     pub fn has_trailing_semicolon(&self) -> bool {
         match &self.kind {
             StmtKind::Semi(_) => true,
@@ -963,17 +955,11 @@ impl Stmt {
     }
 
     pub fn is_item(&self) -> bool {
-        match self.kind {
-            StmtKind::Item(_) => true,
-            _ => false,
-        }
+        matches!(self.kind, StmtKind::Item(_))
     }
 
     pub fn is_expr(&self) -> bool {
-        match self.kind {
-            StmtKind::Expr(_) => true,
-            _ => false,
-        }
+        matches!(self.kind, StmtKind::Expr(_))
     }
 }
 
@@ -1107,15 +1093,9 @@ impl Expr {
         if let ExprKind::Block(ref block, _) = self.kind {
             match block.stmts.last().map(|last_stmt| &last_stmt.kind) {
                 // Implicit return
-                Some(&StmtKind::Expr(_)) => true,
-                Some(&StmtKind::Semi(ref expr)) => {
-                    if let ExprKind::Ret(_) = expr.kind {
-                        // Last statement is explicit return.
-                        true
-                    } else {
-                        false
-                    }
-                }
+                Some(StmtKind::Expr(_)) => true,
+                // Last statement is an explicit return?
+                Some(StmtKind::Semi(expr)) => matches!(expr.kind, ExprKind::Ret(_)),
                 // This is a block that doesn't end in either an implicit or explicit return.
                 _ => false,
             }
@@ -1128,7 +1108,7 @@ impl Expr {
     /// Is this expr either `N`, or `{ N }`.
     ///
     /// If this is not the case, name resolution does not resolve `N` when using
-    /// `feature(min_const_generics)` as more complex expressions are not supported.
+    /// `min_const_generics` as more complex expressions are not supported.
     pub fn is_potential_trivial_const_param(&self) -> bool {
         let this = if let ExprKind::Block(ref block, None) = self.kind {
             if block.stmts.len() == 1 {
@@ -1483,8 +1463,8 @@ pub enum MacArgs {
     Eq(
         /// Span of the `=` token.
         Span,
-        /// Token stream of the "value".
-        TokenStream,
+        /// "value" as a nonterminal token.
+        Token,
     ),
 }
 
@@ -1497,10 +1477,10 @@ impl MacArgs {
     }
 
     pub fn span(&self) -> Option<Span> {
-        match *self {
+        match self {
             MacArgs::Empty => None,
             MacArgs::Delimited(dspan, ..) => Some(dspan.entire()),
-            MacArgs::Eq(eq_span, ref tokens) => Some(eq_span.to(tokens.span().unwrap_or(eq_span))),
+            MacArgs::Eq(eq_span, token) => Some(eq_span.to(token.span)),
         }
     }
 
@@ -1509,7 +1489,8 @@ impl MacArgs {
     pub fn inner_tokens(&self) -> TokenStream {
         match self {
             MacArgs::Empty => TokenStream::default(),
-            MacArgs::Delimited(.., tokens) | MacArgs::Eq(.., tokens) => tokens.clone(),
+            MacArgs::Delimited(.., tokens) => tokens.clone(),
+            MacArgs::Eq(.., token) => TokenTree::Token(token.clone()).into(),
         }
     }
 
@@ -1652,26 +1633,17 @@ pub enum LitKind {
 impl LitKind {
     /// Returns `true` if this literal is a string.
     pub fn is_str(&self) -> bool {
-        match *self {
-            LitKind::Str(..) => true,
-            _ => false,
-        }
+        matches!(self, LitKind::Str(..))
     }
 
     /// Returns `true` if this literal is byte literal string.
     pub fn is_bytestr(&self) -> bool {
-        match self {
-            LitKind::ByteStr(_) => true,
-            _ => false,
-        }
+        matches!(self, LitKind::ByteStr(_))
     }
 
     /// Returns `true` if this is a numeric literal.
     pub fn is_numeric(&self) -> bool {
-        match *self {
-            LitKind::Int(..) | LitKind::Float(..) => true,
-            _ => false,
-        }
+        matches!(self, LitKind::Int(..) | LitKind::Float(..))
     }
 
     /// Returns `true` if this literal has no suffix.
@@ -1974,7 +1946,7 @@ impl TyKind {
     }
 
     pub fn is_unit(&self) -> bool {
-        if let TyKind::Tup(ref tys) = *self { tys.is_empty() } else { false }
+        matches!(self, TyKind::Tup(tys) if tys.is_empty())
     }
 }
 
@@ -2237,10 +2209,7 @@ impl FnDecl {
         self.inputs.get(0).map_or(false, Param::is_self)
     }
     pub fn c_variadic(&self) -> bool {
-        self.inputs.last().map_or(false, |arg| match arg.ty.kind {
-            TyKind::CVarArgs => true,
-            _ => false,
-        })
+        self.inputs.last().map_or(false, |arg| matches!(arg.ty.kind, TyKind::CVarArgs))
     }
 }
 
@@ -2911,3 +2880,69 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 }
 
 pub type ForeignItem = Item<ForeignItemKind>;
+
+pub trait HasTokens {
+    /// Called by `Parser::collect_tokens` to store the collected
+    /// tokens inside an AST node
+    fn finalize_tokens(&mut self, tokens: LazyTokenStream);
+}
+
+impl<T: HasTokens + 'static> HasTokens for P<T> {
+    fn finalize_tokens(&mut self, tokens: LazyTokenStream) {
+        (**self).finalize_tokens(tokens);
+    }
+}
+
+impl<T: HasTokens> HasTokens for Option<T> {
+    fn finalize_tokens(&mut self, tokens: LazyTokenStream) {
+        if let Some(inner) = self {
+            inner.finalize_tokens(tokens);
+        }
+    }
+}
+
+impl HasTokens for Attribute {
+    fn finalize_tokens(&mut self, tokens: LazyTokenStream) {
+        match &mut self.kind {
+            AttrKind::Normal(_, attr_tokens) => {
+                if attr_tokens.is_none() {
+                    *attr_tokens = Some(tokens);
+                }
+            }
+            AttrKind::DocComment(..) => {
+                panic!("Called finalize_tokens on doc comment attr {:?}", self)
+            }
+        }
+    }
+}
+
+impl HasTokens for Stmt {
+    fn finalize_tokens(&mut self, tokens: LazyTokenStream) {
+        let stmt_tokens = match self.kind {
+            StmtKind::Local(ref mut local) => &mut local.tokens,
+            StmtKind::Item(ref mut item) => &mut item.tokens,
+            StmtKind::Expr(ref mut expr) | StmtKind::Semi(ref mut expr) => &mut expr.tokens,
+            StmtKind::Empty => return,
+            StmtKind::MacCall(ref mut mac) => &mut mac.tokens,
+        };
+        if stmt_tokens.is_none() {
+            *stmt_tokens = Some(tokens);
+        }
+    }
+}
+
+macro_rules! derive_has_tokens {
+    ($($ty:path),*) => { $(
+        impl HasTokens for $ty {
+            fn finalize_tokens(&mut self, tokens: LazyTokenStream) {
+                if self.tokens.is_none() {
+                    self.tokens = Some(tokens);
+                }
+            }
+        }
+    )* }
+}
+
+derive_has_tokens! {
+    Item, Expr, Ty, AttrItem, Visibility, Path, Block, Pat
+}

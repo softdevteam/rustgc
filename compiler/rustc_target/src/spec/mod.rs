@@ -34,11 +34,13 @@
 //! the target's settings, though `target-feature` and `link-args` will *add*
 //! to the list specified by the target, rather than replace.
 
+use crate::abi::Endian;
 use crate::spec::abi::{lookup as lookup_abi, Abi};
 use crate::spec::crt_objects::{CrtObjects, CrtObjectsFallback};
 use rustc_serialize::json::{Json, ToJson};
 use rustc_span::symbol::{sym, Symbol};
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -407,6 +409,8 @@ pub enum LinkOutputKind {
     DynamicDylib,
     /// Dynamic library with bundled libc ("statically linked").
     StaticDylib,
+    /// WASI module with a lifetime past the _initialize entry point
+    WasiReactorExe,
 }
 
 impl LinkOutputKind {
@@ -418,6 +422,7 @@ impl LinkOutputKind {
             LinkOutputKind::StaticPicExe => "static-pic-exe",
             LinkOutputKind::DynamicDylib => "dynamic-dylib",
             LinkOutputKind::StaticDylib => "static-dylib",
+            LinkOutputKind::WasiReactorExe => "wasi-reactor-exe",
         }
     }
 
@@ -429,6 +434,7 @@ impl LinkOutputKind {
             "static-pic-exe" => LinkOutputKind::StaticPicExe,
             "dynamic-dylib" => LinkOutputKind::DynamicDylib,
             "static-dylib" => LinkOutputKind::StaticDylib,
+            "wasi-reactor-exe" => LinkOutputKind::WasiReactorExe,
             _ => return None,
         })
     }
@@ -441,6 +447,69 @@ impl fmt::Display for LinkOutputKind {
 }
 
 pub type LinkArgs = BTreeMap<LinkerFlavor, Vec<String>>;
+
+#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
+pub enum SplitDebuginfo {
+    /// Split debug-information is disabled, meaning that on supported platforms
+    /// you can find all debug information in the executable itself. This is
+    /// only supported for ELF effectively.
+    ///
+    /// * Windows - not supported
+    /// * macOS - don't run `dsymutil`
+    /// * ELF - `.dwarf_*` sections
+    Off,
+
+    /// Split debug-information can be found in a "packed" location separate
+    /// from the final artifact. This is supported on all platforms.
+    ///
+    /// * Windows - `*.pdb`
+    /// * macOS - `*.dSYM` (run `dsymutil`)
+    /// * ELF - `*.dwp` (run `rust-llvm-dwp`)
+    Packed,
+
+    /// Split debug-information can be found in individual object files on the
+    /// filesystem. The main executable may point to the object files.
+    ///
+    /// * Windows - not supported
+    /// * macOS - supported, scattered object files
+    /// * ELF - supported, scattered `*.dwo` files
+    Unpacked,
+}
+
+impl SplitDebuginfo {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SplitDebuginfo::Off => "off",
+            SplitDebuginfo::Packed => "packed",
+            SplitDebuginfo::Unpacked => "unpacked",
+        }
+    }
+}
+
+impl FromStr for SplitDebuginfo {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<SplitDebuginfo, ()> {
+        Ok(match s {
+            "off" => SplitDebuginfo::Off,
+            "unpacked" => SplitDebuginfo::Unpacked,
+            "packed" => SplitDebuginfo::Packed,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl ToJson for SplitDebuginfo {
+    fn to_json(&self) -> Json {
+        self.as_str().to_json()
+    }
+}
+
+impl fmt::Display for SplitDebuginfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 macro_rules! supported_targets {
     ( $(($( $triple:literal, )+ $module:ident ),)+ ) => {
@@ -472,6 +541,83 @@ macro_rules! supported_targets {
             )+
         }
     };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StackProbeType {
+    /// Don't emit any stack probes.
+    None,
+    /// It is harmless to use this option even on targets that do not have backend support for
+    /// stack probes as the failure mode is the same as if no stack-probe option was specified in
+    /// the first place.
+    Inline,
+    /// Call `__rust_probestack` whenever stack needs to be probed.
+    Call,
+    /// Use inline option for LLVM versions later than specified in `min_llvm_version_for_inline`
+    /// and call `__rust_probestack` otherwise.
+    InlineOrCall { min_llvm_version_for_inline: (u32, u32, u32) },
+}
+
+impl StackProbeType {
+    fn from_json(json: &Json) -> Result<Self, String> {
+        let object = json.as_object().ok_or_else(|| "expected a JSON object")?;
+        let kind = object
+            .get("kind")
+            .and_then(|o| o.as_string())
+            .ok_or_else(|| "expected `kind` to be a string")?;
+        match kind {
+            "none" => Ok(StackProbeType::None),
+            "inline" => Ok(StackProbeType::Inline),
+            "call" => Ok(StackProbeType::Call),
+            "inline-or-call" => {
+                let min_version = object
+                    .get("min-llvm-version-for-inline")
+                    .and_then(|o| o.as_array())
+                    .ok_or_else(|| "expected `min-llvm-version-for-inline` to be an array")?;
+                let mut iter = min_version.into_iter().map(|v| {
+                    let int = v.as_u64().ok_or_else(
+                        || "expected `min-llvm-version-for-inline` values to be integers",
+                    )?;
+                    u32::try_from(int)
+                        .map_err(|_| "`min-llvm-version-for-inline` values don't convert to u32")
+                });
+                let min_llvm_version_for_inline = (
+                    iter.next().unwrap_or(Ok(11))?,
+                    iter.next().unwrap_or(Ok(0))?,
+                    iter.next().unwrap_or(Ok(0))?,
+                );
+                Ok(StackProbeType::InlineOrCall { min_llvm_version_for_inline })
+            }
+            _ => Err(String::from(
+                "`kind` expected to be one of `inline-or-none`, `call` or `inline-or-call`",
+            )),
+        }
+    }
+}
+
+impl ToJson for StackProbeType {
+    fn to_json(&self) -> Json {
+        Json::Object(match self {
+            StackProbeType::None => {
+                vec![(String::from("kind"), "none".to_json())].into_iter().collect()
+            }
+            StackProbeType::Inline => {
+                vec![(String::from("kind"), "inline".to_json())].into_iter().collect()
+            }
+            StackProbeType::Call => {
+                vec![(String::from("kind"), "call".to_json())].into_iter().collect()
+            }
+            StackProbeType::InlineOrCall { min_llvm_version_for_inline } => vec![
+                (String::from("kind"), "inline-or-call".to_json()),
+                (
+                    String::from("min-llvm-version-for-inline"),
+                    min_llvm_version_for_inline.to_json(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+    }
 }
 
 supported_targets! {
@@ -705,8 +851,8 @@ pub struct TargetOptions {
     /// Whether the target is built-in or loaded from a custom target specification.
     pub is_builtin: bool,
 
-    /// String to use as the `target_endian` `cfg` variable. Defaults to "little".
-    pub endian: String,
+    /// Used as the `target_endian` `cfg` variable. Defaults to little endian.
+    pub endian: Endian,
     /// Width of c_int type. Defaults to "32".
     pub c_int_width: String,
     /// OS name to use for conditional compilation (`target_os`). Defaults to "none".
@@ -921,8 +1067,8 @@ pub struct TargetOptions {
     /// Whether or not crt-static is respected by the compiler (or is a no-op).
     pub crt_static_respected: bool,
 
-    /// Whether or not stack probes (__rust_probestack) are enabled
-    pub stack_probes: bool,
+    /// The implementation of stack probes to use.
+    pub stack_probes: StackProbeType,
 
     /// The minimum alignment for global symbols.
     pub min_global_align: Option<u64>,
@@ -1002,6 +1148,10 @@ pub struct TargetOptions {
     /// Is true if the target is an ARM architecture using thumb v1 which allows for
     /// thumb and arm interworking.
     pub has_thumb_interworking: bool,
+
+    /// How to handle split debug information, if at all. Specifying `None` has
+    /// target-specific meaning.
+    pub split_debuginfo: SplitDebuginfo,
 }
 
 impl Default for TargetOptions {
@@ -1010,7 +1160,7 @@ impl Default for TargetOptions {
     fn default() -> TargetOptions {
         TargetOptions {
             is_builtin: false,
-            endian: "little".to_string(),
+            endian: Endian::Little,
             c_int_width: "32".to_string(),
             os: "none".to_string(),
             env: String::new(),
@@ -1080,7 +1230,7 @@ impl Default for TargetOptions {
             crt_static_allows_dylibs: false,
             crt_static_default: false,
             crt_static_respected: false,
-            stack_probes: false,
+            stack_probes: StackProbeType::None,
             min_global_align: None,
             default_codegen_units: None,
             trap_unreachable: true,
@@ -1101,6 +1251,7 @@ impl Default for TargetOptions {
             use_ctors_section: false,
             eh_frame_header: true,
             has_thumb_interworking: false,
+            split_debuginfo: SplitDebuginfo::Off,
         }
     }
 }
@@ -1299,6 +1450,18 @@ impl Target {
                     Some(Ok(()))
                 })).unwrap_or(Ok(()))
             } );
+            ($key_name:ident, SplitDebuginfo) => ( {
+                let name = (stringify!($key_name)).replace("_", "-");
+                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                    match s.parse::<SplitDebuginfo>() {
+                        Ok(level) => base.$key_name = level,
+                        _ => return Some(Err(format!("'{}' is not a valid value for \
+                                                      split-debuginfo. Use 'off' or 'dsymutil'.",
+                                                      s))),
+                    }
+                    Some(Ok(()))
+                })).unwrap_or(Ok(()))
+            } );
             ($key_name:ident, list) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
                 if let Some(v) = obj.find(&name).and_then(Json::as_array) {
@@ -1356,6 +1519,18 @@ impl Target {
                     Some(Ok(()))
                 })).unwrap_or(Ok(()))
             } );
+            ($key_name:ident, StackProbeType) => ( {
+                let name = (stringify!($key_name)).replace("_", "-");
+                obj.find(&name[..]).and_then(|o| match StackProbeType::from_json(o) {
+                    Ok(v) => {
+                        base.$key_name = v;
+                        Some(Ok(()))
+                    },
+                    Err(s) => Some(Err(
+                        format!("`{:?}` is not a valid value for `{}`: {}", o, name, s)
+                    )),
+                }).unwrap_or(Ok(()))
+            } );
             ($key_name:ident, crt_objects_fallback) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
                 obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
@@ -1377,7 +1552,7 @@ impl Target {
                         let kind = LinkOutputKind::from_str(&k).ok_or_else(|| {
                             format!("{}: '{}' is not a valid value for CRT object kind. \
                                      Use '(dynamic,static)-(nopic,pic)-exe' or \
-                                     '(dynamic,static)-dylib'", name, k)
+                                     '(dynamic,static)-dylib' or 'wasi-reactor-exe'", name, k)
                         })?;
 
                         let v = v.as_array().ok_or_else(||
@@ -1439,8 +1614,10 @@ impl Target {
             } );
         }
 
+        if let Some(s) = obj.find("target-endian").and_then(Json::as_string) {
+            base.endian = s.parse()?;
+        }
         key!(is_builtin, bool);
-        key!(endian = "target-endian");
         key!(c_int_width = "target-c-int-width");
         key!(os);
         key!(env);
@@ -1509,7 +1686,7 @@ impl Target {
         key!(crt_static_allows_dylibs, bool);
         key!(crt_static_default, bool);
         key!(crt_static_respected, bool);
-        key!(stack_probes, bool);
+        key!(stack_probes, StackProbeType)?;
         key!(min_global_align, Option<u64>);
         key!(default_codegen_units, Option<u64>);
         key!(trap_unreachable, bool);
@@ -1530,6 +1707,7 @@ impl Target {
         key!(use_ctors_section, bool);
         key!(eh_frame_header, bool);
         key!(has_thumb_interworking, bool);
+        key!(split_debuginfo, SplitDebuginfo)?;
 
         // NB: The old name is deprecated, but support for it is retained for
         // compatibility.
@@ -1765,6 +1943,7 @@ impl ToJson for Target {
         target_option_val!(use_ctors_section);
         target_option_val!(eh_frame_header);
         target_option_val!(has_thumb_interworking);
+        target_option_val!(split_debuginfo);
 
         if default.unsupported_abis != self.unsupported_abis {
             d.insert(
@@ -1798,6 +1977,24 @@ impl TargetTriple {
     pub fn from_path(path: &Path) -> Result<Self, io::Error> {
         let canonicalized_path = path.canonicalize()?;
         Ok(TargetTriple::TargetPath(canonicalized_path))
+    }
+
+    /// Creates a target triple from its alias
+    pub fn from_alias(triple: String) -> Self {
+        macro_rules! target_aliases {
+            ( $(($alias:literal, $target:literal ),)+ ) => {
+                match triple.as_str() {
+                    $( $alias => TargetTriple::from_triple($target), )+
+                    _ => TargetTriple::TargetTriple(triple),
+                }
+            }
+        }
+
+        target_aliases! {
+            // `x86_64-pc-solaris` is an alias for `x86_64_sun_solaris` for backwards compatibility reasons.
+            // (See <https://github.com/rust-lang/rust/issues/40531>.)
+            ("x86_64-pc-solaris", "x86_64-sun-solaris"),
+        }
     }
 
     /// Returns a string triple for this target.

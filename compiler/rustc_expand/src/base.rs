@@ -2,8 +2,8 @@ use crate::expand::{self, AstFragment, Invocation};
 use crate::module::DirectoryOwnership;
 
 use rustc_ast::ptr::P;
-use rustc_ast::token;
-use rustc_ast::tokenstream::TokenStream;
+use rustc_ast::token::{self, Nonterminal};
+use rustc_ast::tokenstream::{CanSynthesizeMissingTokens, TokenStream};
 use rustc_ast::visit::{AssocCtxt, Visitor};
 use rustc_ast::{self as ast, Attribute, NodeId, PatKind};
 use rustc_attr::{self as attr, Deprecation, HasAttrs, Stability};
@@ -12,7 +12,7 @@ use rustc_data_structures::sync::{self, Lrc};
 use rustc_errors::{DiagnosticBuilder, ErrorReported};
 use rustc_parse::{self, nt_to_tokenstream, parser, MACRO_ARGUMENTS};
 use rustc_session::{parse::ParseSess, Limit, Session};
-use rustc_span::def_id::{DefId, LOCAL_CRATE};
+use rustc_span::def_id::DefId;
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::{AstPass, ExpnData, ExpnId, ExpnKind};
 use rustc_span::source_map::SourceMap;
@@ -119,8 +119,8 @@ impl Annotatable {
         }
     }
 
-    crate fn into_tokens(self, sess: &ParseSess) -> TokenStream {
-        let nt = match self {
+    crate fn into_nonterminal(self) -> Nonterminal {
+        match self {
             Annotatable::Item(item) => token::NtItem(item),
             Annotatable::TraitItem(item) | Annotatable::ImplItem(item) => {
                 token::NtItem(P(item.and_then(ast::AssocItem::into_item)))
@@ -137,8 +137,11 @@ impl Annotatable {
             | Annotatable::Param(..)
             | Annotatable::StructField(..)
             | Annotatable::Variant(..) => panic!("unexpected annotatable"),
-        };
-        nt_to_tokenstream(&nt, sess, DUMMY_SP)
+        }
+    }
+
+    crate fn into_tokens(self, sess: &ParseSess) -> TokenStream {
+        nt_to_tokenstream(&self.into_nonterminal(), sess, CanSynthesizeMissingTokens::No)
     }
 
     pub fn expect_item(self) -> P<ast::Item> {
@@ -725,9 +728,7 @@ pub struct SyntaxExtension {
     pub edition: Edition,
     /// Built-in macros have a couple of special properties like availability
     /// in `#[no_implicit_prelude]` modules, so we have to keep this flag.
-    pub is_builtin: bool,
-    /// We have to identify macros providing a `Copy` impl early for compatibility reasons.
-    pub is_derive_copy: bool,
+    pub builtin_name: Option<Symbol>,
 }
 
 impl SyntaxExtension {
@@ -755,8 +756,7 @@ impl SyntaxExtension {
             deprecation: None,
             helper_attrs: Vec::new(),
             edition,
-            is_builtin: false,
-            is_derive_copy: false,
+            builtin_name: None,
             kind,
         }
     }
@@ -782,7 +782,9 @@ impl SyntaxExtension {
             }
         }
 
-        let is_builtin = sess.contains_name(attrs, sym::rustc_builtin_macro);
+        let builtin_name = sess
+            .find_by_name(attrs, sym::rustc_builtin_macro)
+            .map(|a| a.value_str().unwrap_or(name));
         let (stability, const_stability) = attr::find_stability(&sess, attrs, span);
         if const_stability.is_some() {
             sess.parse_sess
@@ -800,8 +802,7 @@ impl SyntaxExtension {
             deprecation: attr::find_deprecation(&sess, attrs).map(|(d, _)| d),
             helper_attrs,
             edition,
-            is_builtin,
-            is_derive_copy: is_builtin && name == sym::Copy,
+            builtin_name,
         }
     }
 
@@ -839,19 +840,17 @@ impl SyntaxExtension {
         descr: Symbol,
         macro_def_id: Option<DefId>,
     ) -> ExpnData {
-        ExpnData {
-            kind: ExpnKind::Macro(self.macro_kind(), descr),
+        ExpnData::new(
+            ExpnKind::Macro(self.macro_kind(), descr),
             parent,
             call_site,
-            def_site: self.span,
-            allow_internal_unstable: self.allow_internal_unstable.clone(),
-            allow_internal_unsafe: self.allow_internal_unsafe,
-            local_inner_macros: self.local_inner_macros,
-            edition: self.edition,
+            self.span,
+            self.allow_internal_unstable.clone(),
+            self.allow_internal_unsafe,
+            self.local_inner_macros,
+            self.edition,
             macro_def_id,
-            krate: LOCAL_CRATE,
-            orig_id: None,
-        }
+        )
     }
 }
 
@@ -869,7 +868,7 @@ pub trait ResolverExpand {
 
     fn resolve_dollar_crates(&mut self);
     fn visit_ast_fragment_with_placeholders(&mut self, expn_id: ExpnId, fragment: &AstFragment);
-    fn register_builtin_macro(&mut self, ident: Ident, ext: SyntaxExtension);
+    fn register_builtin_macro(&mut self, name: Symbol, ext: SyntaxExtensionKind);
 
     fn expansion_for_ast_pass(
         &mut self,
@@ -930,7 +929,9 @@ pub struct ExtCtxt<'a> {
     pub force_mode: bool,
     pub expansions: FxHashMap<Span, Vec<String>>,
     /// Called directly after having parsed an external `mod foo;` in expansion.
-    pub(super) extern_mod_loaded: Option<&'a dyn Fn(&ast::Crate)>,
+    ///
+    /// `Ident` is the module name.
+    pub(super) extern_mod_loaded: Option<&'a dyn Fn(&ast::Crate, Ident)>,
 }
 
 impl<'a> ExtCtxt<'a> {
@@ -938,7 +939,7 @@ impl<'a> ExtCtxt<'a> {
         sess: &'a Session,
         ecfg: expand::ExpansionConfig<'a>,
         resolver: &'a mut dyn ResolverExpand,
-        extern_mod_loaded: Option<&'a dyn Fn(&ast::Crate)>,
+        extern_mod_loaded: Option<&'a dyn Fn(&ast::Crate, Ident)>,
     ) -> ExtCtxt<'a> {
         ExtCtxt {
             sess,

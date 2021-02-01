@@ -81,7 +81,7 @@ fn make_shim<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceDef<'tcx>) -> Body<'
         MirPhase::Const,
         &[&[
             &add_moves_for_packed_drops::AddMovesForPackedDrops,
-            &no_landing_pads::NoLandingPads::new(tcx),
+            &no_landing_pads::NoLandingPads,
             &remove_noop_landing_pads::RemoveNoopLandingPads,
             &simplify::SimplifyCfg::new("make_shim"),
             &add_call_guards::CriticalCallEdges,
@@ -165,7 +165,7 @@ fn build_drop_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, ty: Option<Ty<'tcx>>)
     let mut body =
         new_body(source, blocks, local_decls_for_sig(&sig, span), sig.inputs().len(), span);
 
-    if let Some(..) = ty {
+    if ty.is_some() {
         // The first argument (index 0), but add 1 for the return value.
         let dropee_ptr = Place::from(Local::new(1 + 0));
         if tcx.sess.opts.debugging_opts.mir_emit_retag {

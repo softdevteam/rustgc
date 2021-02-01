@@ -111,7 +111,7 @@ pub unsafe trait Step: Clone + PartialOrd + Sized {
         Step::forward(start, count)
     }
 
-    /// Returns the value that would be obtained by taking the *successor*
+    /// Returns the value that would be obtained by taking the *predecessor*
     /// of `self` `count` times.
     ///
     /// If this would overflow the range of values supported by `Self`, returns `None`.
@@ -200,6 +200,7 @@ macro_rules! step_identical_methods {
         }
 
         #[inline]
+        #[allow(arithmetic_overflow)]
         fn forward(start: Self, n: usize) -> Self {
             // In debug builds, trigger a panic on overflow.
             // This should optimize completely out in release builds.
@@ -211,6 +212,7 @@ macro_rules! step_identical_methods {
         }
 
         #[inline]
+        #[allow(arithmetic_overflow)]
         fn backward(start: Self, n: usize) -> Self {
             // In debug builds, trigger a panic on overflow.
             // This should optimize completely out in release builds.

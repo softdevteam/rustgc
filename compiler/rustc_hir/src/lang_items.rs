@@ -67,7 +67,7 @@ macro_rules! language_item_table {
             }
         }
 
-        #[derive(HashStable_Generic)]
+        #[derive(HashStable_Generic, Debug)]
         pub struct LanguageItems {
             /// Mappings from lang items to their possibly found `DefId`s.
             /// The index corresponds to the order in `LangItem`.
@@ -157,7 +157,7 @@ where
 }
 
 language_item_table! {
-//  Variant name,            Name,                    Method name,             Target;
+//  Variant name,            Name,                     Method name,                Target;
     Bool,                    sym::bool,                bool_impl,                  Target::Impl;
     Char,                    sym::char,                char_impl,                  Target::Impl;
     Str,                     sym::str,                 str_impl,                   Target::Impl;

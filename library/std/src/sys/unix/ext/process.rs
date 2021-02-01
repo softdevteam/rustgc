@@ -9,6 +9,14 @@ use crate::process;
 use crate::sys;
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 
+mod private {
+    /// This trait being unreachable from outside the crate
+    /// prevents other implementations of the `ExitStatusExt` trait,
+    /// which allows potentially adding more trait methods in the future.
+    #[stable(feature = "none", since = "1.51.0")]
+    pub trait Sealed {}
+}
+
 /// Unix-specific extensions to the [`process::Command`] builder.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait CommandExt {
@@ -29,6 +37,15 @@ pub trait CommandExt {
         &mut self,
         #[cfg(not(target_os = "vxworks"))] id: u32,
         #[cfg(target_os = "vxworks")] id: u16,
+    ) -> &mut process::Command;
+
+    /// Sets the supplementary group IDs for the calling process. Translates to
+    /// a `setgroups` call in the child process.
+    #[unstable(feature = "setgroups", issue = "38527", reason = "")]
+    fn groups(
+        &mut self,
+        #[cfg(not(target_os = "vxworks"))] groups: &[u32],
+        #[cfg(target_os = "vxworks")] groups: &[u16],
     ) -> &mut process::Command;
 
     /// Schedules a closure to be run just before the `exec` function is
@@ -141,6 +158,15 @@ impl CommandExt for process::Command {
         self
     }
 
+    fn groups(
+        &mut self,
+        #[cfg(not(target_os = "vxworks"))] groups: &[u32],
+        #[cfg(target_os = "vxworks")] groups: &[u16],
+    ) -> &mut process::Command {
+        self.as_inner_mut().groups(groups);
+        self
+    }
+
     unsafe fn pre_exec<F>(&mut self, f: F) -> &mut process::Command
     where
         F: FnMut() -> io::Result<()> + Send + Sync + 'static,
@@ -163,17 +189,47 @@ impl CommandExt for process::Command {
 }
 
 /// Unix-specific extensions to [`process::ExitStatus`].
+///
+/// This trait is sealed: it cannot be implemented outside the standard library.
+/// This is so that future additional methods are not breaking changes.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub trait ExitStatusExt {
+pub trait ExitStatusExt: private::Sealed {
     /// Creates a new `ExitStatus` from the raw underlying `i32` return value of
     /// a process.
     #[stable(feature = "exit_status_from", since = "1.12.0")]
     fn from_raw(raw: i32) -> Self;
 
     /// If the process was terminated by a signal, returns that signal.
+    ///
+    /// In other words, if `WIFSIGNALED`, this returns `WTERMSIG`.
     #[stable(feature = "rust1", since = "1.0.0")]
     fn signal(&self) -> Option<i32>;
+
+    /// If the process was terminated by a signal, says whether it dumped core.
+    #[unstable(feature = "unix_process_wait_more", issue = "80695")]
+    fn core_dumped(&self) -> bool;
+
+    /// If the process was stopped by a signal, returns that signal.
+    ///
+    /// In other words, if `WIFSTOPPED`, this returns `WSTOPSIG`.  This is only possible if the status came from
+    /// a `wait` system call which was passed `WUNTRACED`, was then converted into an `ExitStatus`.
+    #[unstable(feature = "unix_process_wait_more", issue = "80695")]
+    fn stopped_signal(&self) -> Option<i32>;
+
+    /// Whether the process was continued from a stopped status.
+    ///
+    /// Ie, `WIFCONTINUED`.  This is only possible if the status came from a `wait` system call
+    /// which was passed `WCONTINUED`, was then converted into an `ExitStatus`.
+    #[unstable(feature = "unix_process_wait_more", issue = "80695")]
+    fn continued(&self) -> bool;
+
+    /// Returns the underlying raw `wait` status.
+    #[unstable(feature = "unix_process_wait_more", issue = "80695")]
+    fn into_raw(self) -> i32;
 }
+
+#[stable(feature = "none", since = "1.51.0")]
+impl private::Sealed for process::ExitStatus {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ExitStatusExt for process::ExitStatus {
@@ -183,6 +239,22 @@ impl ExitStatusExt for process::ExitStatus {
 
     fn signal(&self) -> Option<i32> {
         self.as_inner().signal()
+    }
+
+    fn core_dumped(&self) -> bool {
+        self.as_inner().core_dumped()
+    }
+
+    fn stopped_signal(&self) -> Option<i32> {
+        self.as_inner().stopped_signal()
+    }
+
+    fn continued(&self) -> bool {
+        self.as_inner().continued()
+    }
+
+    fn into_raw(self) -> i32 {
+        self.as_inner().into_raw().into()
     }
 }
 

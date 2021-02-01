@@ -12,7 +12,7 @@ use rustc_ast::ptr::P;
 use rustc_ast::token;
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::visit::{self, AssocCtxt, Visitor};
-use rustc_ast::{self as ast, AttrItem, Block, LitKind, NodeId, PatKind, Path};
+use rustc_ast::{self as ast, AttrItem, AttrStyle, Block, LitKind, NodeId, PatKind, Path};
 use rustc_ast::{ItemKind, MacArgs, MacCallStmt, MacStmtStyle, StmtKind, Unsafe};
 use rustc_ast_pretty::pprust;
 use rustc_attr::{self as attr, is_builtin_attr, HasAttrs};
@@ -20,7 +20,7 @@ use rustc_data_structures::map_in_place::MapInPlace;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::{struct_span_err, Applicability, PResult};
 use rustc_feature::Features;
-use rustc_parse::parser::{AttemptLocalParseRecovery, Parser};
+use rustc_parse::parser::{AttemptLocalParseRecovery, ForceCollect, Parser};
 use rustc_parse::validate_attr;
 use rustc_session::lint::builtin::UNUSED_DOC_COMMENTS;
 use rustc_session::lint::BuiltinLintDiagnostics;
@@ -522,12 +522,29 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         item.visit_attrs(|attrs| attrs.retain(|a| !a.has_name(sym::derive)));
                         (item, Vec::new())
                     } else {
-                        let mut item = StripUnconfigured {
+                        let mut visitor = StripUnconfigured {
                             sess: self.cx.sess,
                             features: self.cx.ecfg.features,
-                        }
-                        .fully_configure(item);
+                            modified: false,
+                        };
+                        let mut item = visitor.fully_configure(item);
                         item.visit_attrs(|attrs| attrs.retain(|a| !a.has_name(sym::derive)));
+                        if visitor.modified && !derives.is_empty() {
+                            // Erase the tokens if cfg-stripping modified the item
+                            // This will cause us to synthesize fake tokens
+                            // when `nt_to_tokenstream` is called on this item.
+                            match &mut item {
+                                Annotatable::Item(item) => item.tokens = None,
+                                Annotatable::Stmt(stmt) => {
+                                    if let StmtKind::Item(item) = &mut stmt.kind {
+                                        item.tokens = None
+                                    } else {
+                                        panic!("Unexpected stmt {:?}", stmt);
+                                    }
+                                }
+                                _ => panic!("Unexpected annotatable {:?}", item),
+                            }
+                        }
 
                         invocations.reserve(derives.len());
                         let derive_placeholders = derives
@@ -622,7 +639,11 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
 
         let invocations = {
             let mut collector = InvocationCollector {
-                cfg: StripUnconfigured { sess: &self.cx.sess, features: self.cx.ecfg.features },
+                cfg: StripUnconfigured {
+                    sess: &self.cx.sess,
+                    features: self.cx.ecfg.features,
+                    modified: false,
+                },
                 cx: self.cx,
                 invocations: Vec::new(),
                 monotonic: self.monotonic,
@@ -716,7 +737,14 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 SyntaxExtensionKind::Attr(expander) => {
                     self.gate_proc_macro_input(&item);
                     self.gate_proc_macro_attr_item(span, &item);
-                    let tokens = item.into_tokens(&self.cx.sess.parse_sess);
+                    let tokens = match attr.style {
+                        AttrStyle::Outer => item.into_tokens(&self.cx.sess.parse_sess),
+                        // FIXME: Properly collect tokens for inner attributes
+                        AttrStyle::Inner => rustc_parse::fake_token_stream(
+                            &self.cx.sess.parse_sess,
+                            &item.into_nonterminal(),
+                        ),
+                    };
                     let attr_item = attr.unwrap_normal_item();
                     if let MacArgs::Eq(..) = attr_item.args {
                         self.cx.span_err(span, "key-value macro attributes are not supported");
@@ -885,7 +913,7 @@ pub fn parse_ast_fragment<'a>(
     Ok(match kind {
         AstFragmentKind::Items => {
             let mut items = SmallVec::new();
-            while let Some(item) = this.parse_item()? {
+            while let Some(item) = this.parse_item(ForceCollect::No)? {
                 items.push(item);
             }
             AstFragment::Items(items)
@@ -991,15 +1019,16 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
         // with exception of the derive container case which is not resolved and can get
         // its expansion data immediately.
         let expn_data = match &kind {
-            InvocationKind::DeriveContainer { item, .. } => Some(ExpnData {
-                parent: self.cx.current_expansion.id,
-                ..ExpnData::default(
+            InvocationKind::DeriveContainer { item, .. } => {
+                let mut expn_data = ExpnData::default(
                     ExpnKind::Macro(MacroKind::Attr, sym::derive),
                     item.span(),
                     self.cx.sess.parse_sess.edition,
                     None,
-                )
-            }),
+                );
+                expn_data.parent = self.cx.current_expansion.id;
+                Some(expn_data)
+            }
             _ => None,
         };
         let expn_id = ExpnId::fresh(expn_data);
@@ -1378,7 +1407,7 @@ impl<'a, 'b> MutVisitor for InvocationCollector<'a, 'b> {
                         proc_macros: vec![],
                     };
                     if let Some(extern_mod_loaded) = self.cx.extern_mod_loaded {
-                        extern_mod_loaded(&krate);
+                        extern_mod_loaded(&krate, ident);
                     }
 
                     *old_mod = krate.module;
@@ -1514,13 +1543,8 @@ impl<'a, 'b> MutVisitor for InvocationCollector<'a, 'b> {
     }
 
     fn visit_item_kind(&mut self, item: &mut ast::ItemKind) {
-        match item {
-            ast::ItemKind::MacroDef(..) => {}
-            _ => {
-                self.cfg.configure_item_kind(item);
-                noop_visit_item_kind(item, self);
-            }
-        }
+        self.cfg.configure_item_kind(item);
+        noop_visit_item_kind(item, self);
     }
 
     fn flat_map_generic_param(

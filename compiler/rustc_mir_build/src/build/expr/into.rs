@@ -10,9 +10,7 @@ use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
 use rustc_middle::middle::region;
 use rustc_middle::mir::*;
-use rustc_middle::ty::{self, CanonicalUserTypeAnnotation};
-use rustc_span::symbol::sym;
-use rustc_target::spec::abi::Abi;
+use rustc_middle::ty::{CanonicalUserTypeAnnotation};
 
 use std::slice;
 
@@ -40,11 +38,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let expr_span = expr.span;
         let source_info = this.source_info(expr_span);
 
-        let expr_is_block_or_scope = match expr.kind {
-            ExprKind::Block { .. } => true,
-            ExprKind::Scope { .. } => true,
-            _ => false,
-        };
+        let expr_is_block_or_scope = matches!(expr.kind, ExprKind::Block { .. } | ExprKind::Scope { .. });
 
         let schedule_drop = move |this: &mut Self| {
             if let Some(drop_scope) = scope {
@@ -73,6 +67,40 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::Match { scrutinee, arms } => {
                 this.match_expr(destination, scope, expr_span, block, scrutinee, arms)
             }
+            ExprKind::If { cond, then, else_opt } => {
+                let place = unpack!(block = this.as_temp(block, Some(this.local_scope()), cond, Mutability::Mut));
+                let operand = Operand::Move(Place::from(place));
+
+                let mut then_block = this.cfg.start_new_block();
+                let mut else_block = this.cfg.start_new_block();
+                let term = TerminatorKind::if_(this.hir.tcx(), operand, then_block, else_block);
+                this.cfg.terminate(block, source_info, term);
+
+                unpack!(then_block = this.into(destination, scope, then_block, then));
+                else_block = if let Some(else_opt) = else_opt {
+                    unpack!(this.into(destination, None, else_block, else_opt))
+                } else {
+                    // Body of the `if` expression without an `else` clause must return `()`, thus
+                    // we implicitly generate a `else {}` if it is not specified.
+                    let correct_si = this.source_info(expr_span.shrink_to_hi());
+                    this.cfg.push_assign_unit(else_block, correct_si, destination, this.hir.tcx());
+                    else_block
+                };
+
+                let join_block = this.cfg.start_new_block();
+                this.cfg.terminate(
+                    then_block,
+                    source_info,
+                    TerminatorKind::Goto { target: join_block },
+                );
+                this.cfg.terminate(
+                    else_block,
+                    source_info,
+                    TerminatorKind::Goto { target: join_block },
+                );
+
+                join_block.unit()
+            },
             ExprKind::NeverToAny { source } => {
                 let source = this.hir.mirror(source);
                 let is_call = matches!(source.kind, ExprKind::Call { .. } | ExprKind::InlineAsm { .. });
@@ -189,79 +217,41 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     },
                 )
             }
-            ExprKind::Call { ty, fun, args, from_hir_call, fn_span } => {
-                let intrinsic = match *ty.kind() {
-                    ty::FnDef(def_id, _) => {
-                        let f = ty.fn_sig(this.hir.tcx());
-                        if f.abi() == Abi::RustIntrinsic || f.abi() == Abi::PlatformIntrinsic {
-                            Some(this.hir.tcx().item_name(def_id))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
+            ExprKind::Call { ty: _, fun, args, from_hir_call, fn_span } => {
                 let fun = unpack!(block = this.as_local_operand(block, fun));
-                if let Some(sym::move_val_init) = intrinsic {
-                    // `move_val_init` has "magic" semantics - the second argument is
-                    // always evaluated "directly" into the first one.
+                let args: Vec<_> = args
+                    .into_iter()
+                    .map(|arg| unpack!(block = this.as_local_call_operand(block, arg)))
+                    .collect();
 
-                    let mut args = args.into_iter();
-                    let ptr = args.next().expect("0 arguments to `move_val_init`");
-                    let val = args.next().expect("1 argument to `move_val_init`");
-                    assert!(args.next().is_none(), ">2 arguments to `move_val_init`");
+                let success = this.cfg.start_new_block();
 
-                    let ptr = this.hir.mirror(ptr);
-                    let ptr_ty = ptr.ty;
-                    // Create an *internal* temp for the pointer, so that unsafety
-                    // checking won't complain about the raw pointer assignment.
-                    let ptr_temp = this
-                        .local_decls
-                        .push(LocalDecl::with_source_info(ptr_ty, source_info).internal());
-                    let ptr_temp = Place::from(ptr_temp);
-                    // No need for a scope, ptr_temp doesn't need drop
-                    let block = unpack!(this.into(ptr_temp, None, block, ptr));
-                    // Maybe we should provide a scope here so that
-                    // `move_val_init` wouldn't leak on panic even with an
-                    // arbitrary `val` expression, but `schedule_drop`,
-                    // borrowck and drop elaboration all prevent us from
-                    // dropping `ptr_temp.deref()`.
-                    this.into(this.hir.tcx().mk_place_deref(ptr_temp), None, block, val)
-                } else {
-                    let args: Vec<_> = args
-                        .into_iter()
-                        .map(|arg| unpack!(block = this.as_local_call_operand(block, arg)))
-                        .collect();
+                this.record_operands_moved(&args);
 
-                    let success = this.cfg.start_new_block();
+                debug!("into_expr: fn_span={:?}", fn_span);
 
-                    this.record_operands_moved(&args);
-
-                    debug!("into_expr: fn_span={:?}", fn_span);
-
-                    this.cfg.terminate(
-                        block,
-                        source_info,
-                        TerminatorKind::Call {
-                            func: fun,
-                            args,
-                            cleanup: None,
-                            // FIXME(varkor): replace this with an uninhabitedness-based check.
-                            // This requires getting access to the current module to call
-                            // `tcx.is_ty_uninhabited_from`, which is currently tricky to do.
-                            destination: if expr.ty.is_never() {
-                                None
-                            } else {
-                                Some((destination, success))
-                            },
-                            from_hir_call,
-                            fn_span,
+                this.cfg.terminate(
+                    block,
+                    source_info,
+                    TerminatorKind::Call {
+                        func: fun,
+                        args,
+                        cleanup: None,
+                        // FIXME(varkor): replace this with an uninhabitedness-based check.
+                        // This requires getting access to the current module to call
+                        // `tcx.is_ty_uninhabited_from`, which is currently tricky to do.
+                        destination: if expr.ty.is_never() {
+                            None
+                        } else {
+                            Some((destination, success))
                         },
-                    );
-                    this.diverge_from(block);
-                    schedule_drop(this);
-                    success.unit()
-                }
+                        from_hir_call,
+                        fn_span,
+                    },
+                );
+                this.diverge_from(block);
+                schedule_drop(this);
+                success.unit()
             }
             ExprKind::Use { source } => this.into(destination, scope, block, source),
             ExprKind::Borrow { arg, borrow_kind } => {
@@ -306,7 +296,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let field_names = this.hir.all_fields(adt_def, variant_index);
 
                 let fields: Vec<_> = if let Some(FruInfo { base, field_types }) = base {
-                    let base = unpack!(block = this.as_place(block, base));
+                    let place_builder = unpack!(block = this.as_place_builder(block, base));
 
                     // MIR does not natively support FRU, so for each
                     // base-supplied field, generate an operand that
@@ -316,9 +306,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         .zip(field_types.into_iter())
                         .map(|(n, ty)| match fields_map.get(&n) {
                             Some(v) => v.clone(),
-                            None => this.consume_by_copy_or_move(
-                                this.hir.tcx().mk_place_field(base, n, ty),
-                            ),
+                            None => {
+                                let place_builder = place_builder.clone();
+                                this.consume_by_copy_or_move(
+                                    place_builder
+                                        .field(n, ty)
+                                        .into_place(this.hir.tcx(), this.hir.typeck_results()),
+                                )
+                            },
                         })
                         .collect()
                 } else {

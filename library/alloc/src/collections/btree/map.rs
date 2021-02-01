@@ -10,7 +10,7 @@ use core::ptr;
 
 use super::borrow::DormantMutRef;
 use super::node::{self, marker, ForceResult::*, Handle, NodeRef, Root};
-use super::search::{self, SearchResult::*};
+use super::search::SearchResult::*;
 use super::unwrap_unchecked;
 
 mod entry;
@@ -51,6 +51,9 @@ pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 /// It is a logic error for a key to be modified in such a way that the key's ordering relative to
 /// any other key, as determined by the [`Ord`] trait, changes while it is in the map. This is
 /// normally only possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
+/// The behavior resulting from such a logic error is not specified, but will not result in
+/// undefined behavior. This could include panics, incorrect results, aborts, memory leaks, and
+/// non-termination.
 ///
 /// [`Cell`]: core::cell::Cell
 /// [`RefCell`]: core::cell::RefCell
@@ -227,7 +230,7 @@ where
 
     fn get(&self, key: &Q) -> Option<&K> {
         let root_node = self.root.as_ref()?.reborrow();
-        match search::search_tree(root_node, key) {
+        match root_node.search_tree(key) {
             Found(handle) => Some(handle.into_kv().0),
             GoDown(_) => None,
         }
@@ -236,7 +239,7 @@ where
     fn take(&mut self, key: &Q) -> Option<K> {
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = map.root.as_mut()?.borrow_mut();
-        match search::search_tree(root_node, key) {
+        match root_node.search_tree(key) {
             Found(handle) => {
                 Some(OccupiedEntry { handle, dormant_map, _marker: PhantomData }.remove_kv().0)
             }
@@ -247,8 +250,8 @@ where
     fn replace(&mut self, key: K) -> Option<K> {
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = Self::ensure_is_owned(&mut map.root).borrow_mut();
-        match search::search_tree::<marker::Mut<'_>, K, (), K>(root_node, &key) {
-            Found(handle) => Some(mem::replace(handle.into_key_mut(), key)),
+        match root_node.search_tree::<K>(&key) {
+            Found(mut kv) => Some(mem::replace(kv.key_mut(), key)),
             GoDown(handle) => {
                 VacantEntry { key, handle, dormant_map, _marker: PhantomData }.insert(());
                 None
@@ -297,8 +300,8 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
 /// [`into_iter`]: IntoIterator::into_iter
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<K, V> {
-    front: Option<Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>>,
-    back: Option<Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>>,
+    front: Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>,
+    back: Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>,
     length: usize,
 }
 
@@ -523,7 +526,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
         Q: Ord,
     {
         let root_node = self.root.as_ref()?.reborrow();
-        match search::search_tree(root_node, key) {
+        match root_node.search_tree(key) {
             Found(handle) => Some(handle.into_kv().1),
             GoDown(_) => None,
         }
@@ -551,7 +554,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
         Q: Ord,
     {
         let root_node = self.root.as_ref()?.reborrow();
-        match search::search_tree(root_node, k) {
+        match root_node.search_tree(k) {
             Found(handle) => Some(handle.into_kv()),
             GoDown(_) => None,
         }
@@ -759,7 +762,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
         Q: Ord,
     {
         let root_node = self.root.as_mut()?.borrow_mut();
-        match search::search_tree(root_node, key) {
+        match root_node.search_tree(key) {
             Found(handle) => Some(handle.into_val_mut()),
             GoDown(_) => None,
         }
@@ -855,7 +858,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     {
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = map.root.as_mut()?.borrow_mut();
-        match search::search_tree(root_node, key) {
+        match root_node.search_tree(key) {
             Found(handle) => {
                 Some(OccupiedEntry { handle, dormant_map, _marker: PhantomData }.remove_entry())
             }
@@ -1048,7 +1051,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
         // FIXME(@porglezomp) Avoid allocating if we don't insert
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = Self::ensure_is_owned(&mut map.root).borrow_mut();
-        match search::search_tree(root_node, &key) {
+        match root_node.search_tree(&key) {
             Found(handle) => Occupied(OccupiedEntry { handle, dormant_map, _marker: PhantomData }),
             GoDown(handle) => {
                 Vacant(VacantEntry { key, handle, dormant_map, _marker: PhantomData })
@@ -1361,7 +1364,7 @@ impl<K, V> IntoIterator for BTreeMap<K, V> {
     fn into_iter(self) -> IntoIter<K, V> {
         let mut me = ManuallyDrop::new(self);
         if let Some(root) = me.root.take() {
-            let (f, b) = root.full_range();
+            let (f, b) = root.into_dying().full_range();
 
             IntoIter { front: Some(f), back: Some(b), length: me.length }
         } else {
@@ -2132,6 +2135,7 @@ impl<K, V> BTreeMap<K, V> {
     /// a.insert(1, "a");
     /// assert_eq!(a.len(), 1);
     /// ```
+    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
     pub const fn len(&self) -> usize {

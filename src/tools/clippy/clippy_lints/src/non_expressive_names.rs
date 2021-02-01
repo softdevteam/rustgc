@@ -199,6 +199,10 @@ impl<'a, 'tcx, 'b> SimilarNamesNameVisitor<'a, 'tcx, 'b> {
             );
             return;
         }
+        if interned_name.starts_with('_') {
+            // these bindings are typically unused or represent an ignored portion of a destructuring pattern
+            return;
+        }
         let count = interned_name.chars().count();
         if count < 3 {
             if count == 1 {
@@ -409,11 +413,10 @@ fn levenstein_not_1(a_name: &str, b_name: &str) -> bool {
         if let Some(b2) = b_chars.next() {
             // check if there's just one character inserted
             return a != b2 || a_chars.ne(b_chars);
-        } else {
-            // tuple
-            // ntuple
-            return true;
         }
+        // tuple
+        // ntuple
+        return true;
     }
     // for item in items
     true

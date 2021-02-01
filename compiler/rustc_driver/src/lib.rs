@@ -546,24 +546,12 @@ impl Compilation {
 #[derive(Copy, Clone)]
 pub struct RustcDefaultCalls;
 
-// FIXME remove these and use winapi 0.3 instead
-// Duplicates: bootstrap/compile.rs, librustc_errors/emitter.rs
-#[cfg(unix)]
 fn stdout_isatty() -> bool {
-    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    atty::is(atty::Stream::Stdout)
 }
 
-#[cfg(windows)]
-fn stdout_isatty() -> bool {
-    use winapi::um::consoleapi::GetConsoleMode;
-    use winapi::um::processenv::GetStdHandle;
-    use winapi::um::winbase::STD_OUTPUT_HANDLE;
-
-    unsafe {
-        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        let mut out = 0;
-        GetConsoleMode(handle, &mut out) != 0
-    }
+fn stderr_isatty() -> bool {
+    atty::is(atty::Stream::Stderr)
 }
 
 fn handle_explain(registry: Registry, code: &str, output: ErrorOutputType) {
@@ -603,7 +591,7 @@ fn handle_explain(registry: Registry, code: &str, output: ErrorOutputType) {
     }
 }
 
-fn show_content_with_pager(content: &String) {
+fn show_content_with_pager(content: &str) {
     let pager_name = env::var_os("PAGER").unwrap_or_else(|| {
         if cfg!(windows) { OsString::from("more.com") } else { OsString::from("less") }
     });
@@ -810,7 +798,7 @@ pub fn version(binary: &str, matches: &getopts::Matches) {
         println!("commit-date: {}", unw(util::commit_date_str()));
         println!("host: {}", config::host_triple());
         println!("release: {}", unw(util::release_str()));
-        if cfg!(llvm) {
+        if cfg!(feature = "llvm") {
             get_builtin_codegen_backend("llvm")().print_version();
         }
     }
@@ -1099,7 +1087,7 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     }
 
     if cg_flags.iter().any(|x| *x == "passes=list") {
-        if cfg!(llvm) {
+        if cfg!(feature = "llvm") {
             get_builtin_codegen_backend("llvm")().print_passes();
         }
         return None;
@@ -1248,7 +1236,7 @@ pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
     }
 
     // If backtraces are enabled, also print the query stack
-    let backtrace = env::var_os("RUST_BACKTRACE").map(|x| &x != "0").unwrap_or(false);
+    let backtrace = env::var_os("RUST_BACKTRACE").map_or(false, |x| &x != "0");
 
     let num_frames = if backtrace { None } else { Some(2) };
 
@@ -1290,7 +1278,7 @@ pub fn init_env_logger(env: &str) {
         Ok(value) => match value.as_ref() {
             "always" => true,
             "never" => false,
-            "auto" => stdout_isatty(),
+            "auto" => stderr_isatty(),
             _ => early_error(
                 ErrorOutputType::default(),
                 &format!(
@@ -1299,7 +1287,7 @@ pub fn init_env_logger(env: &str) {
                 ),
             ),
         },
-        Err(std::env::VarError::NotPresent) => stdout_isatty(),
+        Err(std::env::VarError::NotPresent) => stderr_isatty(),
         Err(std::env::VarError::NotUnicode(_value)) => early_error(
             ErrorOutputType::default(),
             "non-Unicode log color value: expected one of always, never, or auto",

@@ -43,10 +43,6 @@ use rustc_trait_selection::traits::{self, ObligationCause, PredicateObligations}
 use crate::dataflow::impls::MaybeInitializedPlaces;
 use crate::dataflow::move_paths::MoveData;
 use crate::dataflow::ResultsCursor;
-use crate::transform::{
-    check_consts::ConstCx,
-    promote_consts::should_suggest_const_in_array_repeat_expressions_attribute,
-};
 
 use crate::borrow_check::{
     borrow_set::BorrowSet,
@@ -132,7 +128,7 @@ pub(crate) fn type_check<'mir, 'tcx>(
     flow_inits: &mut ResultsCursor<'mir, 'tcx, MaybeInitializedPlaces<'mir, 'tcx>>,
     move_data: &MoveData<'tcx>,
     elements: &Rc<RegionValueElements>,
-    upvars: &[Upvar],
+    upvars: &[Upvar<'tcx>],
 ) -> MirTypeckResults<'tcx> {
     let implicit_region_bound = infcx.tcx.mk_region(ty::ReVar(universal_regions.fr_fn_body));
     let mut constraints = MirTypeckRegionConstraints {
@@ -821,7 +817,7 @@ struct BorrowCheckContext<'a, 'tcx> {
     all_facts: &'a mut Option<AllFacts>,
     borrow_set: &'a BorrowSet<'tcx>,
     constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
-    upvars: &'a [Upvar],
+    upvars: &'a [Upvar<'tcx>],
 }
 
 crate struct MirTypeckResults<'tcx> {
@@ -1014,7 +1010,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     }
 
                     self.prove_predicate(
-                        ty::PredicateAtom::WellFormed(inferred_ty.into()).to_predicate(self.tcx()),
+                        ty::PredicateKind::WellFormed(inferred_ty.into()).to_predicate(self.tcx()),
                         Locations::All(span),
                         ConstraintCategory::TypeAnnotation,
                     );
@@ -1266,7 +1262,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     obligations.obligations.push(traits::Obligation::new(
                         ObligationCause::dummy(),
                         param_env,
-                        ty::PredicateAtom::WellFormed(revealed_ty.into()).to_predicate(infcx.tcx),
+                        ty::PredicateKind::WellFormed(revealed_ty.into()).to_predicate(infcx.tcx),
                     ));
                     obligations.add(
                         infcx
@@ -1611,7 +1607,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 self.check_call_dest(body, term, &sig, destination, term_location);
 
                 self.prove_predicates(
-                    sig.inputs_and_output.iter().map(|ty| ty::PredicateAtom::WellFormed(ty.into())),
+                    sig.inputs_and_output.iter().map(|ty| ty::PredicateKind::WellFormed(ty.into())),
                     term_location.to_locations(),
                     ConstraintCategory::Boring,
                 );
@@ -1855,8 +1851,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     self.assert_iscleanup(body, block_data, unwind, true);
                 }
             }
-            TerminatorKind::InlineAsm { ref destination, .. } => {
-                if let &Some(target) = destination {
+            TerminatorKind::InlineAsm { destination, .. } => {
+                if let Some(target) = destination {
                     self.assert_iscleanup(body, block_data, target, is_cleanup);
                 }
             }
@@ -1988,44 +1984,39 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 // If the length is larger than 1, the repeat expression will need to copy the
                 // element, so we require the `Copy` trait.
                 if len.try_eval_usize(tcx, self.param_env).map_or(true, |len| len > 1) {
-                    if let Operand::Move(_) = operand {
-                        // While this is located in `nll::typeck` this error is not an NLL error, it's
-                        // a required check to make sure that repeated elements implement `Copy`.
-                        let span = body.source_info(location).span;
-                        let ty = operand.ty(body, tcx);
-                        if !self.infcx.type_is_copy_modulo_regions(self.param_env, ty, span) {
-                            let ccx = ConstCx::new_with_param_env(tcx, body, self.param_env);
-                            // To determine if `const_in_array_repeat_expressions` feature gate should
-                            // be mentioned, need to check if the rvalue is promotable.
-                            let should_suggest =
-                                should_suggest_const_in_array_repeat_expressions_attribute(
-                                    &ccx, operand,
-                                );
-                            debug!("check_rvalue: should_suggest={:?}", should_suggest);
-
-                            let def_id = body.source.def_id().expect_local();
-                            self.infcx.report_selection_error(
-                                &traits::Obligation::new(
-                                    ObligationCause::new(
-                                        span,
-                                        self.tcx().hir().local_def_id_to_hir_id(def_id),
-                                        traits::ObligationCauseCode::RepeatVec(should_suggest),
-                                    ),
-                                    self.param_env,
-                                    ty::Binder::bind(ty::TraitRef::new(
-                                        self.tcx().require_lang_item(
-                                            LangItem::Copy,
-                                            Some(self.last_span),
+                    match operand {
+                        Operand::Copy(..) | Operand::Constant(..) => {
+                            // These are always okay: direct use of a const, or a value that can evidently be copied.
+                        }
+                        Operand::Move(_) => {
+                            // Make sure that repeated elements implement `Copy`.
+                            let span = body.source_info(location).span;
+                            let ty = operand.ty(body, tcx);
+                            if !self.infcx.type_is_copy_modulo_regions(self.param_env, ty, span) {
+                                let def_id = body.source.def_id().expect_local();
+                                self.infcx.report_selection_error(
+                                    &traits::Obligation::new(
+                                        ObligationCause::new(
+                                            span,
+                                            self.tcx().hir().local_def_id_to_hir_id(def_id),
+                                            traits::ObligationCauseCode::RepeatVec,
                                         ),
-                                        tcx.mk_substs_trait(ty, &[]),
-                                    ))
-                                    .without_const()
-                                    .to_predicate(self.tcx()),
-                                ),
-                                &traits::SelectionError::Unimplemented,
-                                false,
-                                false,
-                            );
+                                        self.param_env,
+                                        ty::Binder::bind(ty::TraitRef::new(
+                                            self.tcx().require_lang_item(
+                                                LangItem::Copy,
+                                                Some(self.last_span),
+                                            ),
+                                            tcx.mk_substs_trait(ty, &[]),
+                                        ))
+                                        .without_const()
+                                        .to_predicate(self.tcx()),
+                                    ),
+                                    &traits::SelectionError::Unimplemented,
+                                    false,
+                                    false,
+                                );
+                            }
                         }
                     }
                 }
@@ -2486,7 +2477,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             body,
         );
         let category = if let Some(field) = field {
-            ConstraintCategory::ClosureUpvar(self.borrowck_context.upvars[field.index()].var_hir_id)
+            let var_hir_id = self.borrowck_context.upvars[field.index()].place.get_root_variable();
+            // FIXME(project-rfc-2229#8): Use Place for better diagnostics
+            ConstraintCategory::ClosureUpvar(var_hir_id)
         } else {
             ConstraintCategory::Boring
         };
@@ -2690,7 +2683,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         category: ConstraintCategory,
     ) {
         self.prove_predicates(
-            Some(ty::PredicateAtom::Trait(
+            Some(ty::PredicateKind::Trait(
                 ty::TraitPredicate { trait_ref },
                 hir::Constness::NotConst,
             )),

@@ -44,7 +44,9 @@ fn third_party_crates() -> String {
         };
         if let Some(name) = path.file_name().and_then(OsStr::to_str) {
             for dep in CRATES {
-                if name.starts_with(&format!("lib{}-", dep)) && name.ends_with(".rlib") {
+                if name.starts_with(&format!("lib{}-", dep))
+                    && name.rsplit('.').next().map(|ext| ext.eq_ignore_ascii_case("rlib")) == Some(true)
+                {
                     if let Some(old) = crates.insert(dep, path.clone()) {
                         panic!("Found multiple rlibs for crate `{}`: `{:?}` and `{:?}", dep, old, path);
                     }
@@ -254,7 +256,7 @@ fn run_ui_cargo(config: &mut compiletest::Config) {
 
 fn prepare_env() {
     set_var("CLIPPY_DISABLE_DOCS_LINKS", "true");
-    set_var("CLIPPY_TESTS", "true");
+    set_var("__CLIPPY_INTERNAL_TESTS", "true");
     //set_var("RUST_BACKTRACE", "0");
 }
 

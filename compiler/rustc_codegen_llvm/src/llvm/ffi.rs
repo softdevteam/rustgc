@@ -1708,6 +1708,10 @@ extern "C" {
         PM: &PassManager<'_>,
     );
 
+    pub fn LLVMGetHostCPUFeatures() -> *mut c_char;
+
+    pub fn LLVMDisposeMessage(message: *mut c_char);
+
     // Stuff that's in llvm-wrapper/ because it's not upstream yet.
 
     /// Opens an object file.
@@ -1807,6 +1811,7 @@ extern "C" {
     pub fn LLVMRustDebugMetadataVersion() -> u32;
     pub fn LLVMRustVersionMajor() -> u32;
     pub fn LLVMRustVersionMinor() -> u32;
+    pub fn LLVMRustVersionPatch() -> u32;
 
     pub fn LLVMRustAddModuleFlag(M: &Module, name: *const c_char, value: u32);
 
@@ -1830,6 +1835,8 @@ extern "C" {
         SplitName: *const c_char,
         SplitNameLen: size_t,
         kind: DebugEmissionKind,
+        DWOId: u64,
+        SplitDebugInlining: bool,
     ) -> &'a DIDescriptor;
 
     pub fn LLVMRustDIBuilderCreateFile(
@@ -2096,7 +2103,6 @@ extern "C" {
     );
 
     pub fn LLVMRustDIBuilderCreateDebugLocation(
-        Context: &'a Context,
         Line: c_uint,
         Column: c_uint,
         Scope: &'a DIScope,
@@ -2151,6 +2157,7 @@ extern "C" {
         EmitStackSizeSection: bool,
         RelaxELFRelocations: bool,
         UseInitArray: bool,
+        SplitDwarfFile: *const c_char,
     ) -> Option<&'static mut TargetMachine>;
     pub fn LLVMRustDisposeTargetMachine(T: &'static mut TargetMachine);
     pub fn LLVMRustAddBuilderLibraryInfo(
@@ -2179,6 +2186,7 @@ extern "C" {
         PM: &PassManager<'a>,
         M: &'a Module,
         Output: *const c_char,
+        DwoOutput: *const c_char,
         FileType: FileType,
     ) -> LLVMRustResult;
     pub fn LLVMRustOptimizeWithNewPassManager(

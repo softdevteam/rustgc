@@ -1,8 +1,9 @@
+#[cfg(bootstrap)]
 #[doc(include = "panic.md")]
 #[macro_export]
-#[allow_internal_unstable(core_panic, const_caller_location)]
+#[allow_internal_unstable(core_panic)]
 #[stable(feature = "core", since = "1.6.0")]
-#[cfg_attr(not(bootstrap), rustc_diagnostic_item = "core_panic_macro")]
+#[rustc_diagnostic_item = "core_panic_macro"]
 macro_rules! panic {
     () => (
         $crate::panic!("explicit panic")
@@ -16,6 +17,21 @@ macro_rules! panic {
     ($fmt:expr, $($arg:tt)+) => (
         $crate::panicking::panic_fmt($crate::format_args!($fmt, $($arg)+))
     );
+}
+
+#[cfg(not(bootstrap))]
+#[doc(include = "panic.md")]
+#[macro_export]
+#[rustc_builtin_macro = "core_panic"]
+#[allow_internal_unstable(edition_panic)]
+#[stable(feature = "core", since = "1.6.0")]
+#[rustc_diagnostic_item = "core_panic_macro"]
+macro_rules! panic {
+    // Expands to either `$crate::panic::panic_2015` or `$crate::panic::panic_2021`
+    // depending on the edition of the caller.
+    ($($arg:tt)*) => {
+        /* compiler built-in */
+    };
 }
 
 /// Asserts that two expressions are equal to each other (using [`PartialEq`]).
@@ -163,7 +179,7 @@ macro_rules! assert_ne {
 /// ```
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(bootstrap), rustc_diagnostic_item = "debug_assert_macro")]
+#[rustc_diagnostic_item = "debug_assert_macro"]
 macro_rules! debug_assert {
     ($($arg:tt)*) => (if $crate::cfg!(debug_assertions) { $crate::assert!($($arg)*); })
 }
@@ -401,7 +417,7 @@ macro_rules! write {
 /// For more information, see [`write!`]. For information on the format string syntax, see
 /// [`std::fmt`].
 ///
-/// [`std::fmt`]: crate::fmt
+/// [`std::fmt`]: ../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -730,7 +746,7 @@ pub(crate) mod builtin {
     /// [`Display`]: crate::fmt::Display
     /// [`Debug`]: crate::fmt::Debug
     /// [`fmt::Arguments`]: crate::fmt::Arguments
-    /// [`std::fmt`]: crate::fmt
+    /// [`std::fmt`]: ../std/fmt/index.html
     /// [`format!`]: ../std/macro.format.html
     /// [`println!`]: ../std/macro.println.html
     ///
@@ -1194,7 +1210,7 @@ pub(crate) mod builtin {
     /// be provided with or without arguments for formatting. See [`std::fmt`]
     /// for syntax for this form.
     ///
-    /// [`std::fmt`]: crate::fmt
+    /// [`std::fmt`]: ../std/fmt/index.html
     ///
     /// # Examples
     ///
@@ -1217,7 +1233,7 @@ pub(crate) mod builtin {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_builtin_macro]
     #[macro_export]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "assert_macro")]
+    #[rustc_diagnostic_item = "assert_macro"]
     #[allow_internal_unstable(core_panic)]
     macro_rules! assert {
         ($cond:expr $(,)?) => {{ /* compiler built-in */ }};

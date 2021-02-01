@@ -8,6 +8,7 @@ edition = "2018"
 path = "lib.rs"
 
 [dependencies]
+arrayvec = { version = "0.5.1", default-features = false }
 pulldown-cmark = { version = "0.8", default-features = false }
 minifier = "0.0.33"
 rayon = { version = "0.3.0", package = "rustc-rayon" }
@@ -17,6 +18,7 @@ smallvec = "1.0"
 tempfile = "3"
 itertools = "0.9"
 regex = "1"
+rustdoc-json-types = { path = "../rustdoc-json-types" }
 
 [dev-dependencies]
 expect-test = "1.0"

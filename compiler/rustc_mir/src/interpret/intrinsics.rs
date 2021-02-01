@@ -7,7 +7,7 @@ use std::convert::TryFrom;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
     self,
-    interpret::{uabs, ConstValue, GlobalId, InterpResult, Scalar},
+    interpret::{ConstValue, GlobalId, InterpResult, Scalar},
     BinOp,
 };
 use rustc_middle::ty;
@@ -67,12 +67,11 @@ crate fn eval_nullary_intrinsic<'tcx>(
             let alloc = gc_layout::alloc_gc_layout(tcx, tp_ty, param_env);
             ConstValue::Slice { data: alloc, start: 0, end: alloc.len() }
         }
-        sym::size_of | sym::min_align_of | sym::pref_align_of => {
+        sym::min_align_of | sym::pref_align_of => {
             let layout = tcx.layout_of(param_env.and(tp_ty)).map_err(|e| err_inval!(Layout(e)))?;
             let n = match name {
                 sym::pref_align_of => layout.align.pref.bytes(),
                 sym::min_align_of => layout.align.abi.bytes(),
-                sym::size_of => layout.size.bytes(),
                 _ => bug!(),
             };
             ConstValue::from_machine_usize(n, &tcx)
@@ -131,7 +130,6 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         let (dest, ret) = match ret {
             None => match intrinsic_name {
                 sym::transmute => throw_ub_format!("transmuting to uninhabited type"),
-                sym::unreachable => throw_ub!(Unreachable),
                 sym::abort => M::abort(self, "the program aborted execution".to_owned())?,
                 // Unsupported diverging intrinsic.
                 _ => return Ok(false),
@@ -149,9 +147,11 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             }
 
             sym::min_align_of_val | sym::size_of_val => {
-                let place = self.deref_operand(args[0])?;
+                // Avoid `deref_operand` -- this is not a deref, the ptr does not have to be
+                // dereferencable!
+                let place = self.ref_to_mplace(self.read_immediate(args[0])?)?;
                 let (size, align) = self
-                    .size_and_align_of(place.meta, place.layout)?
+                    .size_and_align_of_mplace(place)?
                     .ok_or_else(|| err_unsup_format!("`extern type` does not have known layout"))?;
 
                 let result = match intrinsic_name {
@@ -167,14 +167,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             | sym::pref_align_of
             | sym::needs_drop
             | sym::needs_finalizer
-            | sym::size_of
             | sym::gc_layout
             | sym::type_id
             | sym::type_name
             | sym::variant_count => {
                 let gid = GlobalId { instance, promoted: None };
                 let ty = match intrinsic_name {
-                    sym::min_align_of | sym::pref_align_of | sym::size_of | sym::variant_count => {
+                    sym::min_align_of | sym::pref_align_of | sym::variant_count => {
                         self.tcx.types.usize
                     }
                     sym::needs_drop => self.tcx.types.bool,
@@ -225,28 +224,16 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let out_val = numeric_intrinsic(intrinsic_name, bits, kind)?;
                 self.write_scalar(out_val, dest)?;
             }
-            sym::wrapping_add
-            | sym::wrapping_sub
-            | sym::wrapping_mul
-            | sym::add_with_overflow
-            | sym::sub_with_overflow
-            | sym::mul_with_overflow => {
+            sym::add_with_overflow | sym::sub_with_overflow | sym::mul_with_overflow => {
                 let lhs = self.read_immediate(args[0])?;
                 let rhs = self.read_immediate(args[1])?;
-                let (bin_op, ignore_overflow) = match intrinsic_name {
-                    sym::wrapping_add => (BinOp::Add, true),
-                    sym::wrapping_sub => (BinOp::Sub, true),
-                    sym::wrapping_mul => (BinOp::Mul, true),
-                    sym::add_with_overflow => (BinOp::Add, false),
-                    sym::sub_with_overflow => (BinOp::Sub, false),
-                    sym::mul_with_overflow => (BinOp::Mul, false),
+                let bin_op = match intrinsic_name {
+                    sym::add_with_overflow => BinOp::Add,
+                    sym::sub_with_overflow => BinOp::Sub,
+                    sym::mul_with_overflow => BinOp::Mul,
                     _ => bug!("Already checked for int ops"),
                 };
-                if ignore_overflow {
-                    self.binop_ignore_overflow(bin_op, lhs, rhs, dest)?;
-                } else {
-                    self.binop_with_overflow(bin_op, lhs, rhs, dest)?;
-                }
+                self.binop_with_overflow(bin_op, lhs, rhs, dest)?;
             }
             sym::saturating_add | sym::saturating_sub => {
                 let l = self.read_immediate(args[0])?;
@@ -349,6 +336,29 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let truncated_bits = self.truncate(result_bits, layout);
                 let result = Scalar::from_uint(truncated_bits, layout.size);
                 self.write_scalar(result, dest)?;
+            }
+            sym::copy | sym::copy_nonoverlapping => {
+                let elem_ty = instance.substs.type_at(0);
+                let elem_layout = self.layout_of(elem_ty)?;
+                let count = self.read_scalar(args[2])?.to_machine_usize(self)?;
+                let elem_align = elem_layout.align.abi;
+
+                let size = elem_layout.size.checked_mul(count, self).ok_or_else(|| {
+                    err_ub_format!("overflow computing total size of `{}`", intrinsic_name)
+                })?;
+                let src = self.read_scalar(args[0])?.check_init()?;
+                let src = self.memory.check_ptr_access(src, size, elem_align)?;
+                let dest = self.read_scalar(args[1])?.check_init()?;
+                let dest = self.memory.check_ptr_access(dest, size, elem_align)?;
+
+                if let (Some(src), Some(dest)) = (src, dest) {
+                    self.memory.copy(
+                        src,
+                        dest,
+                        size,
+                        intrinsic_name == sym::copy_nonoverlapping,
+                    )?;
+                }
             }
             sym::offset => {
                 let ptr = self.read_scalar(args[0])?.check_init()?;
@@ -545,7 +555,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // memory between these pointers must be accessible. Note that we do not require the
         // pointers to be properly aligned (unlike a read/write operation).
         let min_ptr = if offset_bytes >= 0 { ptr } else { offset_ptr };
-        let size: u64 = uabs(offset_bytes);
+        let size = offset_bytes.unsigned_abs();
         // This call handles checking for integer/NULL pointers.
         self.memory.check_ptr_access_align(
             min_ptr,

@@ -202,8 +202,8 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     let mut has_emitted = false;
                     for &(predicate, _) in cx.tcx.explicit_item_bounds(def) {
                         // We only look at the `DefId`, so it is safe to skip the binder here.
-                        if let ty::PredicateAtom::Trait(ref poly_trait_predicate, _) =
-                            predicate.skip_binders()
+                        if let ty::PredicateKind::Trait(ref poly_trait_predicate, _) =
+                            predicate.kind().skip_binder()
                         {
                             let def_id = poly_trait_predicate.trait_ref.def_id;
                             let descr_pre =
@@ -218,8 +218,10 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 }
                 ty::Dynamic(binder, _) => {
                     let mut has_emitted = false;
-                    for predicate in binder.skip_binder().iter() {
-                        if let ty::ExistentialPredicate::Trait(ref trait_ref) = predicate {
+                    for predicate in binder.iter() {
+                        if let ty::ExistentialPredicate::Trait(ref trait_ref) =
+                            predicate.skip_binder()
+                        {
                             let def_id = trait_ref.def_id;
                             let descr_post =
                                 &format!(" trait object{}{}", plural_suffix, descr_post,);
@@ -527,8 +529,8 @@ trait UnusedDelimLint {
             pprust::expr_to_string(value)
         };
         let keep_space = (
-            left_pos.map(|s| s >= value.span.lo()).unwrap_or(false),
-            right_pos.map(|s| s <= value.span.hi()).unwrap_or(false),
+            left_pos.map_or(false, |s| s >= value.span.lo()),
+            right_pos.map_or(false, |s| s <= value.span.hi()),
         );
         self.emit_unused_delims(cx, value.span, &expr_text, ctx.into(), keep_space);
     }
@@ -860,11 +862,11 @@ impl EarlyLintPass for UnusedParens {
     }
 
     fn check_ty(&mut self, cx: &EarlyContext<'_>, ty: &ast::Ty) {
-        if let &ast::TyKind::Paren(ref r) = &ty.kind {
+        if let ast::TyKind::Paren(r) = &ty.kind {
             match &r.kind {
-                &ast::TyKind::TraitObject(..) => {}
-                &ast::TyKind::ImplTrait(_, ref bounds) if bounds.len() > 1 => {}
-                &ast::TyKind::Array(_, ref len) => {
+                ast::TyKind::TraitObject(..) => {}
+                ast::TyKind::ImplTrait(_, bounds) if bounds.len() > 1 => {}
+                ast::TyKind::Array(_, len) => {
                     self.check_unused_delims_expr(
                         cx,
                         &len.value,
@@ -975,8 +977,6 @@ impl UnusedDelimLint for UnusedBraces {
                 }
             }
             ast::ExprKind::Let(_, ref expr) => {
-                // FIXME(#60336): Properly handle `let true = (false && true)`
-                // actually needing the parenthesis.
                 self.check_unused_delims_expr(
                     cx,
                     expr,

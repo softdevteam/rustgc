@@ -401,7 +401,7 @@ mod enum_keyword {}
 ///
 /// ```rust
 /// #[no_mangle]
-/// pub extern fn callable_from_c(x: i32) -> bool {
+/// pub extern "C" fn callable_from_c(x: i32) -> bool {
 ///     x % 3 == 0
 /// }
 /// ```
@@ -2196,6 +2196,7 @@ mod where_keyword {}
 
 // 2018 Edition keywords
 
+#[doc(alias = "promise")]
 #[doc(keyword = "async")]
 //
 /// Return a [`Future`] instead of blocking the current thread.

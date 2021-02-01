@@ -234,10 +234,7 @@ impl MetaItem {
     }
 
     pub fn is_word(&self) -> bool {
-        match self.kind {
-            MetaItemKind::Word => true,
-            _ => false,
-        }
+        matches!(self.kind, MetaItemKind::Word)
     }
 
     pub fn has_name(&self, name: Symbol) -> bool {
@@ -479,7 +476,7 @@ impl MetaItemKind {
     pub fn mac_args(&self, span: Span) -> MacArgs {
         match self {
             MetaItemKind::Word => MacArgs::Empty,
-            MetaItemKind::NameValue(lit) => MacArgs::Eq(span, lit.token_tree().into()),
+            MetaItemKind::NameValue(lit) => MacArgs::Eq(span, lit.to_token()),
             MetaItemKind::List(list) => {
                 let mut tts = Vec::new();
                 for (i, item) in list.iter().enumerate() {
@@ -501,7 +498,10 @@ impl MetaItemKind {
         match *self {
             MetaItemKind::Word => vec![],
             MetaItemKind::NameValue(ref lit) => {
-                vec![TokenTree::token(token::Eq, span).into(), lit.token_tree().into()]
+                vec![
+                    TokenTree::token(token::Eq, span).into(),
+                    TokenTree::Token(lit.to_token()).into(),
+                ]
             }
             MetaItemKind::List(ref list) => {
                 let mut tokens = Vec::new();
@@ -526,7 +526,7 @@ impl MetaItemKind {
     fn list_from_tokens(tokens: TokenStream) -> Option<MetaItemKind> {
         let mut tokens = tokens.into_trees().peekable();
         let mut result = Vec::new();
-        while let Some(..) = tokens.peek() {
+        while tokens.peek().is_some() {
             let item = NestedMetaItem::from_tokens(&mut tokens)?;
             result.push(item);
             match tokens.next() {
@@ -557,10 +557,7 @@ impl MetaItemKind {
                 MetaItemKind::list_from_tokens(tokens.clone())
             }
             MacArgs::Delimited(..) => None,
-            MacArgs::Eq(_, tokens) => {
-                assert!(tokens.len() == 1);
-                MetaItemKind::name_value_from_tokens(&mut tokens.trees())
-            }
+            MacArgs::Eq(_, token) => Lit::from_token(token).ok().map(MetaItemKind::NameValue),
             MacArgs::Empty => Some(MetaItemKind::Word),
         }
     }
@@ -595,7 +592,7 @@ impl NestedMetaItem {
     fn token_trees_and_spacings(&self) -> Vec<TreeAndSpacing> {
         match *self {
             NestedMetaItem::MetaItem(ref item) => item.token_trees_and_spacings(),
-            NestedMetaItem::Literal(ref lit) => vec![lit.token_tree().into()],
+            NestedMetaItem::Literal(ref lit) => vec![TokenTree::Token(lit.to_token()).into()],
         }
     }
 

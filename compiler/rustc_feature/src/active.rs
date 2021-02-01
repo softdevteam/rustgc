@@ -36,7 +36,7 @@ macro_rules! declare_features {
             ),+];
 
         /// A set of features to be used by later passes.
-        #[derive(Clone, Default)]
+        #[derive(Clone, Default, Debug)]
         pub struct Features {
             /// `#![feature]` attrs for language features, for error reporting.
             pub declared_lang_features: Vec<(Symbol, Span, Option<Symbol>)>,
@@ -485,9 +485,6 @@ declare_features! (
     /// Allows `async || body` closures.
     (active, async_closure, "1.37.0", Some(62290), None),
 
-    /// Allows `[x; N]` where `x` is a constant (RFC 2203).
-    (active, const_in_array_repeat_expressions, "1.37.0", Some(49147), None),
-
     /// Allows `impl Trait` to be used inside type aliases (RFC 2515).
     (active, type_alias_impl_trait, "1.38.0", Some(63063), None),
 
@@ -578,13 +575,10 @@ declare_features! (
     /// Allows calling `transmute` in const fn
     (active, const_fn_transmute, "1.46.0", Some(53605), None),
 
-    /// The smallest useful subset of `const_generics`.
-    (active, min_const_generics, "1.47.0", Some(74878), None),
-
     /// Allows `if let` guard in match arms.
     (active, if_let_guard, "1.47.0", Some(51114), None),
 
-    /// Allows non-trivial generic constants which have to be manually propageted upwards.
+    /// Allows non-trivial generic constants which have to be manually propagated upwards.
     (active, const_evaluatable_checked, "1.48.0", Some(76560), None),
 
     /// Allows basic arithmetic on floating point types in a `const fn`.
@@ -623,6 +617,17 @@ declare_features! (
     /// Allows arbitrary expressions in key-value attributes at parse time.
     (active, extended_key_value_attributes, "1.50.0", Some(78835), None),
 
+    /// `:pat2018` and `:pat2021` macro matchers.
+    (active, edition_macro_pats, "1.51.0", Some(54883), None),
+
+    /// Allows const generics to have default values (e.g. `struct Foo<const N: usize = 3>(...);`).
+    (active, const_generics_defaults, "1.51.0", Some(44580), None),
+
+    /// Allows references to types with interior mutability within constants
+    (active, const_refs_to_cell, "1.51.0", Some(80384), None),
+
+    /// Allows using `pointer` and `reference` in intra-doc links
+    (active, intra_doc_pointers, "1.51.0", Some(80896), None),
     // -------------------------------------------------------------------------
     // feature-group-end: actual feature gates
     // -------------------------------------------------------------------------
@@ -647,9 +652,12 @@ pub const INCOMPLETE_FEATURES: &[Symbol] = &[
     sym::repr128,
     sym::unsized_locals,
     sym::capture_disjoint_fields,
+    sym::const_generics_defaults,
 ];
 
 /// Some features are not allowed to be used together at the same time, if
 /// the two are present, produce an error.
-pub const INCOMPATIBLE_FEATURES: &[(Symbol, Symbol)] =
-    &[(sym::const_generics, sym::min_const_generics)];
+///
+/// Currently empty, but we will probably need this again in the future,
+/// so let's keep it in for now.
+pub const INCOMPATIBLE_FEATURES: &[(Symbol, Symbol)] = &[];

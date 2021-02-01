@@ -660,6 +660,8 @@ extern "C" uint32_t LLVMRustDebugMetadataVersion() {
   return DEBUG_METADATA_VERSION;
 }
 
+extern "C" uint32_t LLVMRustVersionPatch() { return LLVM_VERSION_PATCH; }
+
 extern "C" uint32_t LLVMRustVersionMinor() { return LLVM_VERSION_MINOR; }
 
 extern "C" uint32_t LLVMRustVersionMajor() { return LLVM_VERSION_MAJOR; }
@@ -690,13 +692,14 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateCompileUnit(
     const char *Producer, size_t ProducerLen, bool isOptimized,
     const char *Flags, unsigned RuntimeVer,
     const char *SplitName, size_t SplitNameLen,
-    LLVMRustDebugEmissionKind Kind) {
+    LLVMRustDebugEmissionKind Kind,
+    uint64_t DWOId, bool SplitDebugInlining) {
   auto *File = unwrapDI<DIFile>(FileRef);
 
   return wrap(Builder->createCompileUnit(Lang, File, StringRef(Producer, ProducerLen),
                                          isOptimized, Flags, RuntimeVer,
                                          StringRef(SplitName, SplitNameLen),
-                                         fromRust(Kind)));
+                                         fromRust(Kind), DWOId, SplitDebugInlining));
 }
 
 extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateFile(
@@ -993,11 +996,9 @@ LLVMRustDICompositeTypeReplaceArrays(LLVMRustDIBuilderRef Builder,
 }
 
 extern "C" LLVMMetadataRef
-LLVMRustDIBuilderCreateDebugLocation(LLVMContextRef ContextRef, unsigned Line,
-                                     unsigned Column, LLVMMetadataRef Scope,
+LLVMRustDIBuilderCreateDebugLocation(unsigned Line, unsigned Column,
+                                     LLVMMetadataRef Scope,
                                      LLVMMetadataRef InlinedAt) {
-  LLVMContext &Context = *unwrap(ContextRef);
-
   DebugLoc debug_loc = DebugLoc::get(Line, Column, unwrapDIPtr<MDNode>(Scope),
                                      unwrapDIPtr<MDNode>(InlinedAt));
 

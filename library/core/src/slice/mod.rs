@@ -57,7 +57,10 @@ pub use iter::{ArrayChunks, ArrayChunksMut};
 #[unstable(feature = "array_windows", issue = "75027")]
 pub use iter::ArrayWindows;
 
-#[unstable(feature = "split_inclusive", issue = "72360")]
+#[unstable(feature = "slice_group_by", issue = "80552")]
+pub use iter::{GroupBy, GroupByMut};
+
+#[stable(feature = "split_inclusive", since = "1.51.0")]
 pub use iter::{SplitInclusive, SplitInclusiveMut};
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -84,6 +87,7 @@ impl<T> [T] {
     /// let a = [1, 2, 3];
     /// assert_eq!(a.len(), 3);
     /// ```
+    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_slice_len", since = "1.32.0")]
     #[inline]
@@ -538,10 +542,9 @@ impl<T> [T] {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn swap(&mut self, a: usize, b: usize) {
-        // Can't take two mutable loans from one vector, so instead just cast
-        // them to their raw pointers to do the swap.
-        let pa: *mut T = &mut self[a];
-        let pb: *mut T = &mut self[b];
+        // Can't take two mutable loans from one vector, so instead use raw pointers.
+        let pa = ptr::addr_of_mut!(self[a]);
+        let pb = ptr::addr_of_mut!(self[b]);
         // SAFETY: `pa` and `pb` have been created from safe mutable references and refer
         // to elements in the slice and therefore are guaranteed to be valid and aligned.
         // Note that accessing the elements behind `a` and `b` is checked and will
@@ -885,6 +888,46 @@ impl<T> [T] {
     }
 
     /// Splits the slice into a slice of `N`-element arrays,
+    /// assuming that there's no remainder.
+    ///
+    /// # Safety
+    ///
+    /// This may only be called when
+    /// - The slice splits exactly into `N`-element chunks (aka `self.len() % N == 0`).
+    /// - `N != 0`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let slice: &[char] = &['l', 'o', 'r', 'e', 'm', '!'];
+    /// let chunks: &[[char; 1]] =
+    ///     // SAFETY: 1-element chunks never have remainder
+    ///     unsafe { slice.as_chunks_unchecked() };
+    /// assert_eq!(chunks, &[['l'], ['o'], ['r'], ['e'], ['m'], ['!']]);
+    /// let chunks: &[[char; 3]] =
+    ///     // SAFETY: The slice length (6) is a multiple of 3
+    ///     unsafe { slice.as_chunks_unchecked() };
+    /// assert_eq!(chunks, &[['l', 'o', 'r'], ['e', 'm', '!']]);
+    ///
+    /// // These would be unsound:
+    /// // let chunks: &[[_; 5]] = slice.as_chunks_unchecked() // The slice length is not a multiple of 5
+    /// // let chunks: &[[_; 0]] = slice.as_chunks_unchecked() // Zero-length chunks are never allowed
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub unsafe fn as_chunks_unchecked<const N: usize>(&self) -> &[[T; N]] {
+        debug_assert_ne!(N, 0);
+        debug_assert_eq!(self.len() % N, 0);
+        let new_len =
+            // SAFETY: Our precondition is exactly what's needed to call this
+            unsafe { crate::intrinsics::exact_div(self.len(), N) };
+        // SAFETY: We cast a slice of `new_len * N` elements into
+        // a slice of `new_len` many `N` elements chunks.
+        unsafe { from_raw_parts(self.as_ptr().cast(), new_len) }
+    }
+
+    /// Splits the slice into a slice of `N`-element arrays,
     /// starting at the beginning of the slice,
     /// and a remainder slice with length strictly less than `N`.
     ///
@@ -908,10 +951,40 @@ impl<T> [T] {
         assert_ne!(N, 0);
         let len = self.len() / N;
         let (multiple_of_n, remainder) = self.split_at(len * N);
-        // SAFETY: We cast a slice of `len * N` elements into
-        // a slice of `len` many `N` elements chunks.
-        let array_slice: &[[T; N]] = unsafe { from_raw_parts(multiple_of_n.as_ptr().cast(), len) };
+        // SAFETY: We already panicked for zero, and ensured by construction
+        // that the length of the subslice is a multiple of N.
+        let array_slice = unsafe { multiple_of_n.as_chunks_unchecked() };
         (array_slice, remainder)
+    }
+
+    /// Splits the slice into a slice of `N`-element arrays,
+    /// starting at the end of the slice,
+    /// and a remainder slice with length strictly less than `N`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is 0. This check will most probably get changed to a compile time
+    /// error before this method gets stabilized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let slice = ['l', 'o', 'r', 'e', 'm'];
+    /// let (remainder, chunks) = slice.as_rchunks();
+    /// assert_eq!(remainder, &['l']);
+    /// assert_eq!(chunks, &[['o', 'r'], ['e', 'm']]);
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub fn as_rchunks<const N: usize>(&self) -> (&[T], &[[T; N]]) {
+        assert_ne!(N, 0);
+        let len = self.len() / N;
+        let (remainder, multiple_of_n) = self.split_at(self.len() - len * N);
+        // SAFETY: We already panicked for zero, and ensured by construction
+        // that the length of the subslice is a multiple of N.
+        let array_slice = unsafe { multiple_of_n.as_chunks_unchecked() };
+        (remainder, array_slice)
     }
 
     /// Returns an iterator over `N` elements of the slice at a time, starting at the
@@ -949,6 +1022,48 @@ impl<T> [T] {
     }
 
     /// Splits the slice into a slice of `N`-element arrays,
+    /// assuming that there's no remainder.
+    ///
+    /// # Safety
+    ///
+    /// This may only be called when
+    /// - The slice splits exactly into `N`-element chunks (aka `self.len() % N == 0`).
+    /// - `N != 0`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let slice: &mut [char] = &mut ['l', 'o', 'r', 'e', 'm', '!'];
+    /// let chunks: &mut [[char; 1]] =
+    ///     // SAFETY: 1-element chunks never have remainder
+    ///     unsafe { slice.as_chunks_unchecked_mut() };
+    /// chunks[0] = ['L'];
+    /// assert_eq!(chunks, &[['L'], ['o'], ['r'], ['e'], ['m'], ['!']]);
+    /// let chunks: &mut [[char; 3]] =
+    ///     // SAFETY: The slice length (6) is a multiple of 3
+    ///     unsafe { slice.as_chunks_unchecked_mut() };
+    /// chunks[1] = ['a', 'x', '?'];
+    /// assert_eq!(slice, &['L', 'o', 'r', 'a', 'x', '?']);
+    ///
+    /// // These would be unsound:
+    /// // let chunks: &[[_; 5]] = slice.as_chunks_unchecked_mut() // The slice length is not a multiple of 5
+    /// // let chunks: &[[_; 0]] = slice.as_chunks_unchecked_mut() // Zero-length chunks are never allowed
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub unsafe fn as_chunks_unchecked_mut<const N: usize>(&mut self) -> &mut [[T; N]] {
+        debug_assert_ne!(N, 0);
+        debug_assert_eq!(self.len() % N, 0);
+        let new_len =
+            // SAFETY: Our precondition is exactly what's needed to call this
+            unsafe { crate::intrinsics::exact_div(self.len(), N) };
+        // SAFETY: We cast a slice of `new_len * N` elements into
+        // a slice of `new_len` many `N` elements chunks.
+        unsafe { from_raw_parts_mut(self.as_mut_ptr().cast(), new_len) }
+    }
+
+    /// Splits the slice into a slice of `N`-element arrays,
     /// starting at the beginning of the slice,
     /// and a remainder slice with length strictly less than `N`.
     ///
@@ -978,11 +1093,46 @@ impl<T> [T] {
         assert_ne!(N, 0);
         let len = self.len() / N;
         let (multiple_of_n, remainder) = self.split_at_mut(len * N);
-        let array_slice: &mut [[T; N]] =
-            // SAFETY: We cast a slice of `len * N` elements into
-            // a slice of `len` many `N` elements chunks.
-            unsafe { from_raw_parts_mut(multiple_of_n.as_mut_ptr().cast(), len) };
+        // SAFETY: We already panicked for zero, and ensured by construction
+        // that the length of the subslice is a multiple of N.
+        let array_slice = unsafe { multiple_of_n.as_chunks_unchecked_mut() };
         (array_slice, remainder)
+    }
+
+    /// Splits the slice into a slice of `N`-element arrays,
+    /// starting at the end of the slice,
+    /// and a remainder slice with length strictly less than `N`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is 0. This check will most probably get changed to a compile time
+    /// error before this method gets stabilized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_as_chunks)]
+    /// let v = &mut [0, 0, 0, 0, 0];
+    /// let mut count = 1;
+    ///
+    /// let (remainder, chunks) = v.as_rchunks_mut();
+    /// remainder[0] = 9;
+    /// for chunk in chunks {
+    ///     *chunk = [count; 2];
+    ///     count += 1;
+    /// }
+    /// assert_eq!(v, &[9, 1, 1, 2, 2]);
+    /// ```
+    #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[inline]
+    pub fn as_rchunks_mut<const N: usize>(&mut self) -> (&mut [T], &mut [[T; N]]) {
+        assert_ne!(N, 0);
+        let len = self.len() / N;
+        let (remainder, multiple_of_n) = self.split_at_mut(self.len() - len * N);
+        // SAFETY: We already panicked for zero, and ensured by construction
+        // that the length of the subslice is a multiple of N.
+        let array_slice = unsafe { multiple_of_n.as_chunks_unchecked_mut() };
+        (remainder, array_slice)
     }
 
     /// Returns an iterator over `N` elements of the slice at a time, starting at the
@@ -1207,6 +1357,96 @@ impl<T> [T] {
         RChunksExactMut::new(self, chunk_size)
     }
 
+    /// Returns an iterator over the slice producing non-overlapping runs
+    /// of elements using the predicate to separate them.
+    ///
+    /// The predicate is called on two elements following themselves,
+    /// it means the predicate is called on `slice[0]` and `slice[1]`
+    /// then on `slice[1]` and `slice[2]` and so on.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_group_by)]
+    ///
+    /// let slice = &[1, 1, 1, 3, 3, 2, 2, 2];
+    ///
+    /// let mut iter = slice.group_by(|a, b| a == b);
+    ///
+    /// assert_eq!(iter.next(), Some(&[1, 1, 1][..]));
+    /// assert_eq!(iter.next(), Some(&[3, 3][..]));
+    /// assert_eq!(iter.next(), Some(&[2, 2, 2][..]));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    ///
+    /// This method can be used to extract the sorted subslices:
+    ///
+    /// ```
+    /// #![feature(slice_group_by)]
+    ///
+    /// let slice = &[1, 1, 2, 3, 2, 3, 2, 3, 4];
+    ///
+    /// let mut iter = slice.group_by(|a, b| a <= b);
+    ///
+    /// assert_eq!(iter.next(), Some(&[1, 1, 2, 3][..]));
+    /// assert_eq!(iter.next(), Some(&[2, 3][..]));
+    /// assert_eq!(iter.next(), Some(&[2, 3, 4][..]));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[unstable(feature = "slice_group_by", issue = "80552")]
+    #[inline]
+    pub fn group_by<F>(&self, pred: F) -> GroupBy<'_, T, F>
+    where
+        F: FnMut(&T, &T) -> bool,
+    {
+        GroupBy::new(self, pred)
+    }
+
+    /// Returns an iterator over the slice producing non-overlapping mutable
+    /// runs of elements using the predicate to separate them.
+    ///
+    /// The predicate is called on two elements following themselves,
+    /// it means the predicate is called on `slice[0]` and `slice[1]`
+    /// then on `slice[1]` and `slice[2]` and so on.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_group_by)]
+    ///
+    /// let slice = &mut [1, 1, 1, 3, 3, 2, 2, 2];
+    ///
+    /// let mut iter = slice.group_by_mut(|a, b| a == b);
+    ///
+    /// assert_eq!(iter.next(), Some(&mut [1, 1, 1][..]));
+    /// assert_eq!(iter.next(), Some(&mut [3, 3][..]));
+    /// assert_eq!(iter.next(), Some(&mut [2, 2, 2][..]));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    ///
+    /// This method can be used to extract the sorted subslices:
+    ///
+    /// ```
+    /// #![feature(slice_group_by)]
+    ///
+    /// let slice = &mut [1, 1, 2, 3, 2, 3, 2, 3, 4];
+    ///
+    /// let mut iter = slice.group_by_mut(|a, b| a <= b);
+    ///
+    /// assert_eq!(iter.next(), Some(&mut [1, 1, 2, 3][..]));
+    /// assert_eq!(iter.next(), Some(&mut [2, 3][..]));
+    /// assert_eq!(iter.next(), Some(&mut [2, 3, 4][..]));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[unstable(feature = "slice_group_by", issue = "80552")]
+    #[inline]
+    pub fn group_by_mut<F>(&mut self, pred: F) -> GroupByMut<'_, T, F>
+    where
+        F: FnMut(&T, &T) -> bool,
+    {
+        GroupByMut::new(self, pred)
+    }
+
     /// Divides one slice into two at an index.
     ///
     /// The first will contain all indices from `[0, mid)` (excluding
@@ -1263,14 +1503,11 @@ impl<T> [T] {
     ///
     /// ```
     /// let mut v = [1, 0, 3, 0, 5, 6];
-    /// // scoped to restrict the lifetime of the borrows
-    /// {
-    ///     let (left, right) = v.split_at_mut(2);
-    ///     assert_eq!(left, [1, 0]);
-    ///     assert_eq!(right, [3, 0, 5, 6]);
-    ///     left[1] = 2;
-    ///     right[1] = 4;
-    /// }
+    /// let (left, right) = v.split_at_mut(2);
+    /// assert_eq!(left, [1, 0]);
+    /// assert_eq!(right, [3, 0, 5, 6]);
+    /// left[1] = 2;
+    /// right[1] = 4;
     /// assert_eq!(v, [1, 2, 3, 4, 5, 6]);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1455,7 +1692,6 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(split_inclusive)]
     /// let slice = [10, 40, 33, 20];
     /// let mut iter = slice.split_inclusive(|num| num % 3 == 0);
     ///
@@ -1469,7 +1705,6 @@ impl<T> [T] {
     /// That slice will be the last item returned by the iterator.
     ///
     /// ```
-    /// #![feature(split_inclusive)]
     /// let slice = [3, 10, 40, 33];
     /// let mut iter = slice.split_inclusive(|num| num % 3 == 0);
     ///
@@ -1477,7 +1712,7 @@ impl<T> [T] {
     /// assert_eq!(iter.next().unwrap(), &[10, 40, 33]);
     /// assert!(iter.next().is_none());
     /// ```
-    #[unstable(feature = "split_inclusive", issue = "72360")]
+    #[stable(feature = "split_inclusive", since = "1.51.0")]
     #[inline]
     pub fn split_inclusive<F>(&self, pred: F) -> SplitInclusive<'_, T, F>
     where
@@ -1493,7 +1728,6 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(split_inclusive)]
     /// let mut v = [10, 40, 30, 20, 60, 50];
     ///
     /// for group in v.split_inclusive_mut(|num| *num % 3 == 0) {
@@ -1502,7 +1736,7 @@ impl<T> [T] {
     /// }
     /// assert_eq!(v, [10, 40, 1, 20, 1, 1]);
     /// ```
-    #[unstable(feature = "split_inclusive", issue = "72360")]
+    #[stable(feature = "split_inclusive", since = "1.51.0")]
     #[inline]
     pub fn split_inclusive_mut<F>(&mut self, pred: F) -> SplitInclusiveMut<'_, T, F>
     where
@@ -1778,19 +2012,24 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_strip)]
     /// let v = &[10, 40, 30];
     /// assert_eq!(v.strip_prefix(&[10]), Some(&[40, 30][..]));
     /// assert_eq!(v.strip_prefix(&[10, 40]), Some(&[30][..]));
     /// assert_eq!(v.strip_prefix(&[50]), None);
     /// assert_eq!(v.strip_prefix(&[10, 50]), None);
+    ///
+    /// let prefix : &str = "he";
+    /// assert_eq!(b"hello".strip_prefix(prefix.as_bytes()),
+    ///            Some(b"llo".as_ref()));
     /// ```
     #[must_use = "returns the subslice without modifying the original"]
-    #[unstable(feature = "slice_strip", issue = "73413")]
-    pub fn strip_prefix(&self, prefix: &[T]) -> Option<&[T]>
+    #[stable(feature = "slice_strip", since = "1.51.0")]
+    pub fn strip_prefix<P: SlicePattern<Item = T> + ?Sized>(&self, prefix: &P) -> Option<&[T]>
     where
         T: PartialEq,
     {
+        // This function will need rewriting if and when SlicePattern becomes more sophisticated.
+        let prefix = prefix.as_slice();
         let n = prefix.len();
         if n <= self.len() {
             let (head, tail) = self.split_at(n);
@@ -1811,7 +2050,6 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_strip)]
     /// let v = &[10, 40, 30];
     /// assert_eq!(v.strip_suffix(&[30]), Some(&[10, 40][..]));
     /// assert_eq!(v.strip_suffix(&[40, 30]), Some(&[10][..]));
@@ -1819,11 +2057,13 @@ impl<T> [T] {
     /// assert_eq!(v.strip_suffix(&[50, 30]), None);
     /// ```
     #[must_use = "returns the subslice without modifying the original"]
-    #[unstable(feature = "slice_strip", issue = "73413")]
-    pub fn strip_suffix(&self, suffix: &[T]) -> Option<&[T]>
+    #[stable(feature = "slice_strip", since = "1.51.0")]
+    pub fn strip_suffix<P: SlicePattern<Item = T> + ?Sized>(&self, suffix: &P) -> Option<&[T]>
     where
         T: PartialEq,
     {
+        // This function will need rewriting if and when SlicePattern becomes more sophisticated.
+        let suffix = suffix.as_slice();
         let (len, n) = (self.len(), suffix.len());
         if n <= len {
             let (head, tail) = self.split_at(len - n);
@@ -2581,14 +2821,12 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_fill)]
-    ///
     /// let mut buf = vec![0; 10];
     /// buf.fill(1);
     /// assert_eq!(buf, vec![1; 10]);
     /// ```
     #[doc(alias = "memset")]
-    #[unstable(feature = "slice_fill", issue = "70758")]
+    #[stable(feature = "slice_fill", since = "1.50.0")]
     pub fn fill(&mut self, value: T)
     where
         T: Clone,
@@ -2614,13 +2852,12 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_fill_with)]
-    ///
     /// let mut buf = vec![1; 10];
     /// buf.fill_with(Default::default);
     /// assert_eq!(buf, vec![0; 10]);
     /// ```
-    #[unstable(feature = "slice_fill_with", issue = "79221")]
+    #[doc(alias = "memset")]
+    #[stable(feature = "slice_fill_with", since = "1.51.0")]
     pub fn fill_with<F>(&mut self, mut f: F)
     where
         F: FnMut() -> T,
@@ -3216,5 +3453,37 @@ impl<T> Default for &mut [T] {
     /// Creates a mutable empty slice.
     fn default() -> Self {
         &mut []
+    }
+}
+
+#[unstable(feature = "slice_pattern", reason = "stopgap trait for slice patterns", issue = "56345")]
+/// Patterns in slices - currently, only used by `strip_prefix` and `strip_suffix`.  At a future
+/// point, we hope to generalise `core::str::Pattern` (which at the time of writing is limited to
+/// `str`) to slices, and then this trait will be replaced or abolished.
+pub trait SlicePattern {
+    /// The element type of the slice being matched on.
+    type Item;
+
+    /// Currently, the consumers of `SlicePattern` need a slice.
+    fn as_slice(&self) -> &[Self::Item];
+}
+
+#[stable(feature = "slice_strip", since = "1.51.0")]
+impl<T> SlicePattern for [T] {
+    type Item = T;
+
+    #[inline]
+    fn as_slice(&self) -> &[Self::Item] {
+        self
+    }
+}
+
+#[stable(feature = "slice_strip", since = "1.51.0")]
+impl<T, const N: usize> SlicePattern for [T; N] {
+    type Item = T;
+
+    #[inline]
+    fn as_slice(&self) -> &[Self::Item] {
+        self
     }
 }

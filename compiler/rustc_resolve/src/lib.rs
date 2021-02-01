@@ -33,7 +33,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
 use rustc_data_structures::ptr_key::PtrKey;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{struct_span_err, Applicability, DiagnosticBuilder};
-use rustc_expand::base::SyntaxExtension;
+use rustc_expand::base::{SyntaxExtension, SyntaxExtensionKind};
 use rustc_hir::def::Namespace::*;
 use rustc_hir::def::{self, CtorOf, DefKind, NonMacroAttrKind, PartialRes};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, CRATE_DEF_INDEX};
@@ -44,12 +44,13 @@ use rustc_index::vec::IndexVec;
 use rustc_metadata::creader::{CStore, CrateLoader};
 use rustc_middle::hir::exports::ExportMap;
 use rustc_middle::middle::cstore::{CrateStore, MetadataLoaderDyn};
+use rustc_middle::span_bug;
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, DefIdTree, ResolverOutputs};
-use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_session::lint::{BuiltinLintDiagnostics, LintBuffer};
 use rustc_session::Session;
+use rustc_span::edition::Edition;
 use rustc_span::hygiene::{ExpnId, ExpnKind, MacroKind, SyntaxContext, Transparency};
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
@@ -64,7 +65,7 @@ use tracing::debug;
 use diagnostics::{extend_span_to_previous_binding, find_span_of_binding_until_next_binding};
 use diagnostics::{ImportSuggestion, LabelSuggestion, Suggestion};
 use imports::{Import, ImportKind, ImportResolver, NameResolution};
-use late::{HasGenericParams, PathSource, Rib, RibKind::*};
+use late::{ConstantItemKind, HasGenericParams, PathSource, Rib, RibKind::*};
 use macros::{MacroRulesBinding, MacroRulesScope, MacroRulesScopeRef};
 
 type Res = def::Res<NodeId>;
@@ -210,11 +211,15 @@ enum ResolutionError<'a> {
     /// Error E0434: can't capture dynamic environment in a fn item.
     CannotCaptureDynamicEnvironmentInFnItem,
     /// Error E0435: attempt to use a non-constant value in a constant.
-    AttemptToUseNonConstantValueInConstant,
+    AttemptToUseNonConstantValueInConstant(
+        Ident,
+        /* suggestion */ &'static str,
+        /* current */ &'static str,
+    ),
     /// Error E0530: `X` bindings cannot shadow `Y`s.
     BindingShadowsSomethingUnacceptable(&'static str, Symbol, &'a NameBinding<'a>),
     /// Error E0128: type parameters with a default cannot use forward-declared identifiers.
-    ForwardDeclaredTyParam, // FIXME(const_generics:defaults)
+    ForwardDeclaredTyParam, // FIXME(const_generics_defaults)
     /// ERROR E0770: the type of const parameters must not depend on other generic parameters.
     ParamInTyOfConstParam(Symbol),
     /// constant values inside of type parameter defaults must not depend on generic parameters.
@@ -422,7 +427,9 @@ enum ModuleKind {
     ///
     /// This could be:
     ///
-    /// * A normal module ‒ either `mod from_file;` or `mod from_block { }`.
+    /// * A normal module – either `mod from_file;` or `mod from_block { }` –
+    ///   or the crate root (which is conceptually a top-level module).
+    ///   Note that the crate root's [name][Self::name] will be [`kw::Empty`].
     /// * A trait or an enum (it implicitly contains associated types, methods and variant
     ///   constructors).
     Def(DefKind, DefId, Symbol),
@@ -456,28 +463,42 @@ struct BindingKey {
 type Resolutions<'a> = RefCell<FxIndexMap<BindingKey, &'a RefCell<NameResolution<'a>>>>;
 
 /// One node in the tree of modules.
+///
+/// Note that a "module" in resolve is broader than a `mod` that you declare in Rust code. It may be one of these:
+///
+/// * `mod`
+/// * crate root (aka, top-level anonymous module)
+/// * `enum`
+/// * `trait`
+/// * curly-braced block with statements
+///
+/// You can use [`ModuleData::kind`] to determine the kind of module this is.
 pub struct ModuleData<'a> {
+    /// The direct parent module (it may not be a `mod`, however).
     parent: Option<Module<'a>>,
+    /// What kind of module this is, because this may not be a `mod`.
     kind: ModuleKind,
 
-    // The def id of the closest normal module (`mod`) ancestor (including this module).
-    normal_ancestor_id: DefId,
+    /// The [`DefId`] of the nearest `mod` item ancestor (which may be this module).
+    /// This may be the crate root.
+    nearest_parent_mod: DefId,
 
-    // Mapping between names and their (possibly in-progress) resolutions in this module.
-    // Resolutions in modules from other crates are not populated until accessed.
+    /// Mapping between names and their (possibly in-progress) resolutions in this module.
+    /// Resolutions in modules from other crates are not populated until accessed.
     lazy_resolutions: Resolutions<'a>,
-    // True if this is a module from other crate that needs to be populated on access.
+    /// True if this is a module from other crate that needs to be populated on access.
     populate_on_access: Cell<bool>,
 
-    // Macro invocations that can expand into items in this module.
+    /// Macro invocations that can expand into items in this module.
     unexpanded_invocations: RefCell<FxHashSet<ExpnId>>,
 
+    /// Whether `#[no_implicit_prelude]` is active.
     no_implicit_prelude: bool,
 
     glob_importers: RefCell<Vec<&'a Import<'a>>>,
     globs: RefCell<Vec<&'a Import<'a>>>,
 
-    // Used to memoize the traits in this module for faster searches through all traits in scope.
+    /// Used to memoize the traits in this module for faster searches through all traits in scope.
     traits: RefCell<Option<Box<[(Ident, &'a NameBinding<'a>)]>>>,
 
     /// Span of the module itself. Used for error reporting.
@@ -492,16 +513,16 @@ impl<'a> ModuleData<'a> {
     fn new(
         parent: Option<Module<'a>>,
         kind: ModuleKind,
-        normal_ancestor_id: DefId,
+        nearest_parent_mod: DefId,
         expansion: ExpnId,
         span: Span,
     ) -> Self {
         ModuleData {
             parent,
             kind,
-            normal_ancestor_id,
+            nearest_parent_mod,
             lazy_resolutions: Default::default(),
-            populate_on_access: Cell::new(!normal_ancestor_id.is_local()),
+            populate_on_access: Cell::new(!nearest_parent_mod.is_local()),
             unexpanded_invocations: Default::default(),
             no_implicit_prelude: false,
             glob_importers: RefCell::new(Vec::new()),
@@ -743,10 +764,13 @@ impl<'a> NameBinding<'a> {
     }
 
     fn is_variant(&self) -> bool {
-        matches!(self.kind, NameBindingKind::Res(
+        matches!(
+            self.kind,
+            NameBindingKind::Res(
                 Res::Def(DefKind::Variant | DefKind::Ctor(CtorOf::Variant, ..), _),
                 _,
-            ))
+            )
+        )
     }
 
     fn is_extern_crate(&self) -> bool {
@@ -850,7 +874,7 @@ pub struct ExternPreludeEntry<'a> {
 
 /// Used for better errors for E0773
 enum BuiltinMacroState {
-    NotYetSeen(SyntaxExtension),
+    NotYetSeen(SyntaxExtensionKind),
     AlreadySeen(Span),
 }
 
@@ -1028,7 +1052,7 @@ pub struct ResolverArenas<'a> {
 impl<'a> ResolverArenas<'a> {
     fn alloc_module(&'a self, module: ModuleData<'a>) -> Module<'a> {
         let module = self.modules.alloc(module);
-        if module.def_id().map(|def_id| def_id.is_local()).unwrap_or(true) {
+        if module.def_id().map_or(true, |def_id| def_id.is_local()) {
             self.local_modules.borrow_mut().push(module);
         }
         module
@@ -1182,12 +1206,12 @@ impl<'a> Resolver<'a> {
     ) -> Resolver<'a> {
         let root_local_def_id = LocalDefId { local_def_index: CRATE_DEF_INDEX };
         let root_def_id = root_local_def_id.to_def_id();
-        let root_module_kind = ModuleKind::Def(DefKind::Mod, root_def_id, kw::Invalid);
+        let root_module_kind = ModuleKind::Def(DefKind::Mod, root_def_id, kw::Empty);
         let graph_root = arenas.alloc_module(ModuleData {
             no_implicit_prelude: session.contains_name(&krate.attrs, sym::no_implicit_prelude),
             ..ModuleData::new(None, root_module_kind, root_def_id, ExpnId::root(), krate.span)
         });
-        let empty_module_kind = ModuleKind::Def(DefKind::Mod, root_def_id, kw::Invalid);
+        let empty_module_kind = ModuleKind::Def(DefKind::Mod, root_def_id, kw::Empty);
         let empty_module = arenas.alloc_module(ModuleData {
             no_implicit_prelude: true,
             ..ModuleData::new(
@@ -1427,7 +1451,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn is_builtin_macro(&mut self, res: Res) -> bool {
-        self.get_macro(res).map_or(false, |ext| ext.is_builtin)
+        self.get_macro(res).map_or(false, |ext| ext.builtin_name.is_some())
     }
 
     fn macro_def(&self, mut ctxt: SyntaxContext) -> DefId {
@@ -1441,61 +1465,86 @@ impl<'a> Resolver<'a> {
 
     /// Entry point to crate resolution.
     pub fn resolve_crate(&mut self, krate: &Crate) {
-        let _prof_timer = self.session.prof.generic_activity("resolve_crate");
-
-        ImportResolver { r: self }.finalize_imports();
-        self.finalize_macro_resolutions();
-
-        self.late_resolve_crate(krate);
-
-        self.check_unused(krate);
-        self.report_errors(krate);
-        self.crate_loader.postprocess(krate);
+        self.session.time("resolve_crate", || {
+            self.session.time("finalize_imports", || ImportResolver { r: self }.finalize_imports());
+            self.session.time("finalize_macro_resolutions", || self.finalize_macro_resolutions());
+            self.session.time("late_resolve_crate", || self.late_resolve_crate(krate));
+            self.session.time("resolve_check_unused", || self.check_unused(krate));
+            self.session.time("resolve_report_errors", || self.report_errors(krate));
+            self.session.time("resolve_postprocess", || self.crate_loader.postprocess(krate));
+        });
     }
 
-    fn get_traits_in_module_containing_item(
+    pub fn traits_in_scope(
         &mut self,
-        ident: Ident,
-        ns: Namespace,
-        module: Module<'a>,
-        found_traits: &mut Vec<TraitCandidate>,
+        current_trait: Option<Module<'a>>,
         parent_scope: &ParentScope<'a>,
+        ctxt: SyntaxContext,
+        assoc_item: Option<(Symbol, Namespace)>,
+    ) -> Vec<TraitCandidate> {
+        let mut found_traits = Vec::new();
+
+        if let Some(module) = current_trait {
+            if self.trait_may_have_item(Some(module), assoc_item) {
+                let def_id = module.def_id().unwrap();
+                found_traits.push(TraitCandidate { def_id, import_ids: smallvec![] });
+            }
+        }
+
+        self.visit_scopes(ScopeSet::All(TypeNS, false), parent_scope, ctxt, |this, scope, _, _| {
+            match scope {
+                Scope::Module(module) => {
+                    this.traits_in_module(module, assoc_item, &mut found_traits);
+                }
+                Scope::StdLibPrelude => {
+                    if let Some(module) = this.prelude {
+                        this.traits_in_module(module, assoc_item, &mut found_traits);
+                    }
+                }
+                Scope::ExternPrelude | Scope::ToolPrelude | Scope::BuiltinTypes => {}
+                _ => unreachable!(),
+            }
+            None::<()>
+        });
+
+        found_traits
+    }
+
+    fn traits_in_module(
+        &mut self,
+        module: Module<'a>,
+        assoc_item: Option<(Symbol, Namespace)>,
+        found_traits: &mut Vec<TraitCandidate>,
     ) {
-        assert!(ns == TypeNS || ns == ValueNS);
         module.ensure_traits(self);
         let traits = module.traits.borrow();
-
-        for &(trait_name, binding) in traits.as_ref().unwrap().iter() {
-            // Traits have pseudo-modules that can be used to search for the given ident.
-            if let Some(module) = binding.module() {
-                let mut ident = ident;
-                if ident.span.glob_adjust(module.expansion, binding.span).is_none() {
-                    continue;
-                }
-                if self
-                    .resolve_ident_in_module_unadjusted(
-                        ModuleOrUniformRoot::Module(module),
-                        ident,
-                        ns,
-                        parent_scope,
-                        false,
-                        module.span,
-                    )
-                    .is_ok()
-                {
-                    let import_ids = self.find_transitive_imports(&binding.kind, trait_name);
-                    let trait_def_id = module.def_id().unwrap();
-                    found_traits.push(TraitCandidate { def_id: trait_def_id, import_ids });
-                }
-            } else if let Res::Def(DefKind::TraitAlias, _) = binding.res() {
-                // For now, just treat all trait aliases as possible candidates, since we don't
-                // know if the ident is somewhere in the transitive bounds.
-                let import_ids = self.find_transitive_imports(&binding.kind, trait_name);
-                let trait_def_id = binding.res().def_id();
-                found_traits.push(TraitCandidate { def_id: trait_def_id, import_ids });
-            } else {
-                bug!("candidate is not trait or trait alias?")
+        for (trait_name, trait_binding) in traits.as_ref().unwrap().iter() {
+            if self.trait_may_have_item(trait_binding.module(), assoc_item) {
+                let def_id = trait_binding.res().def_id();
+                let import_ids = self.find_transitive_imports(&trait_binding.kind, *trait_name);
+                found_traits.push(TraitCandidate { def_id, import_ids });
             }
+        }
+    }
+
+    // List of traits in scope is pruned on best effort basis. We reject traits not having an
+    // associated item with the given name and namespace (if specified). This is a conservative
+    // optimization, proper hygienic type-based resolution of associated items is done in typeck.
+    // We don't reject trait aliases (`trait_module == None`) because we don't have access to their
+    // associated items.
+    fn trait_may_have_item(
+        &mut self,
+        trait_module: Option<Module<'a>>,
+        assoc_item: Option<(Symbol, Namespace)>,
+    ) -> bool {
+        match (trait_module, assoc_item) {
+            (Some(trait_module), Some((name, ns))) => {
+                self.resolutions(trait_module).borrow().iter().any(|resolution| {
+                    let (&BindingKey { ident: assoc_ident, ns: assoc_ns, .. }, _) = resolution;
+                    assoc_ns == ns && assoc_ident.name == name
+                })
+            }
+            _ => true,
         }
     }
 
@@ -1519,11 +1568,11 @@ impl<'a> Resolver<'a> {
         &self,
         parent: Module<'a>,
         kind: ModuleKind,
-        normal_ancestor_id: DefId,
+        nearest_parent_mod: DefId,
         expn_id: ExpnId,
         span: Span,
     ) -> Module<'a> {
-        let module = ModuleData::new(Some(parent), kind, normal_ancestor_id, expn_id, span);
+        let module = ModuleData::new(Some(parent), kind, nearest_parent_mod, expn_id, span);
         self.arenas.alloc_module(module)
     }
 
@@ -1610,8 +1659,13 @@ impl<'a> Resolver<'a> {
         &mut self,
         scope_set: ScopeSet,
         parent_scope: &ParentScope<'a>,
-        ident: Ident,
-        mut visitor: impl FnMut(&mut Self, Scope<'a>, /*use_prelude*/ bool, Ident) -> Option<T>,
+        ctxt: SyntaxContext,
+        mut visitor: impl FnMut(
+            &mut Self,
+            Scope<'a>,
+            /*use_prelude*/ bool,
+            SyntaxContext,
+        ) -> Option<T>,
     ) -> Option<T> {
         // General principles:
         // 1. Not controlled (user-defined) names should have higher priority than controlled names
@@ -1654,7 +1708,7 @@ impl<'a> Resolver<'a> {
         // 4c. Standard library prelude (de-facto closed, controlled).
         // 6. Language prelude: builtin attributes (closed, controlled).
 
-        let rust_2015 = ident.span.rust_2015();
+        let rust_2015 = ctxt.edition() == Edition::Edition2015;
         let (ns, macro_kind, is_absolute_path) = match scope_set {
             ScopeSet::All(ns, _) => (ns, None, false),
             ScopeSet::AbsolutePath(ns) => (ns, None, true),
@@ -1667,7 +1721,7 @@ impl<'a> Resolver<'a> {
             TypeNS | ValueNS => Scope::Module(module),
             MacroNS => Scope::DeriveHelpers(parent_scope.expansion),
         };
-        let mut ident = ident.normalize_to_macros_2_0();
+        let mut ctxt = ctxt.normalize_to_macros_2_0();
         let mut use_prelude = !module.no_implicit_prelude;
 
         loop {
@@ -1703,7 +1757,7 @@ impl<'a> Resolver<'a> {
             };
 
             if visit {
-                if let break_result @ Some(..) = visitor(self, scope, use_prelude, ident) {
+                if let break_result @ Some(..) = visitor(self, scope, use_prelude, ctxt) {
                     return break_result;
                 }
             }
@@ -1733,17 +1787,17 @@ impl<'a> Resolver<'a> {
                 },
                 Scope::CrateRoot => match ns {
                     TypeNS => {
-                        ident.span.adjust(ExpnId::root());
+                        ctxt.adjust(ExpnId::root());
                         Scope::ExternPrelude
                     }
                     ValueNS | MacroNS => break,
                 },
                 Scope::Module(module) => {
                     use_prelude = !module.no_implicit_prelude;
-                    match self.hygienic_lexical_parent(module, &mut ident.span) {
+                    match self.hygienic_lexical_parent(module, &mut ctxt) {
                         Some(parent_module) => Scope::Module(parent_module),
                         None => {
-                            ident.span.adjust(ExpnId::root());
+                            ctxt.adjust(ExpnId::root());
                             match ns {
                                 TypeNS => Scope::ExternPrelude,
                                 ValueNS => Scope::StdLibPrelude,
@@ -1797,7 +1851,7 @@ impl<'a> Resolver<'a> {
         ribs: &[Rib<'a>],
     ) -> Option<LexicalScopeBinding<'a>> {
         assert!(ns == TypeNS || ns == ValueNS);
-        if ident.name == kw::Invalid {
+        if ident.name == kw::Empty {
             return Some(LexicalScopeBinding::Res(Res::Err));
         }
         let (general_span, normalized_span) = if ident.name == kw::SelfUpper {
@@ -1821,14 +1875,16 @@ impl<'a> Resolver<'a> {
             // Use the rib kind to determine whether we are resolving parameters
             // (macro 2.0 hygiene) or local variables (`macro_rules` hygiene).
             let rib_ident = if ribs[i].kind.contains_params() { normalized_ident } else { ident };
-            if let Some(res) = ribs[i].bindings.get(&rib_ident).cloned() {
+            if let Some((original_rib_ident_def, res)) = ribs[i].bindings.get_key_value(&rib_ident)
+            {
                 // The ident resolves to a type parameter or local variable.
                 return Some(LexicalScopeBinding::Res(self.validate_res_from_ribs(
                     i,
                     rib_ident,
-                    res,
+                    *res,
                     record_used,
                     path_span,
+                    *original_rib_ident_def,
                     ribs,
                 )));
             }
@@ -1866,16 +1922,18 @@ impl<'a> Resolver<'a> {
         ident = normalized_ident;
         let mut poisoned = None;
         loop {
+            let mut span_data = ident.span.data();
             let opt_module = if let Some(node_id) = record_used_id {
                 self.hygienic_lexical_parent_with_compatibility_fallback(
                     module,
-                    &mut ident.span,
+                    &mut span_data.ctxt,
                     node_id,
                     &mut poisoned,
                 )
             } else {
-                self.hygienic_lexical_parent(module, &mut ident.span)
+                self.hygienic_lexical_parent(module, &mut span_data.ctxt)
             };
+            ident.span = span_data.span();
             module = unwrap_or!(opt_module, break);
             let adjusted_parent_scope = &ParentScope { module, ..*parent_scope };
             let result = self.resolve_ident_in_module_unadjusted(
@@ -1949,10 +2007,10 @@ impl<'a> Resolver<'a> {
     fn hygienic_lexical_parent(
         &mut self,
         module: Module<'a>,
-        span: &mut Span,
+        ctxt: &mut SyntaxContext,
     ) -> Option<Module<'a>> {
-        if !module.expansion.outer_expn_is_descendant_of(span.ctxt()) {
-            return Some(self.macro_def_scope(span.remove_mark()));
+        if !module.expansion.outer_expn_is_descendant_of(*ctxt) {
+            return Some(self.macro_def_scope(ctxt.remove_mark()));
         }
 
         if let ModuleKind::Block(..) = module.kind {
@@ -1965,11 +2023,11 @@ impl<'a> Resolver<'a> {
     fn hygienic_lexical_parent_with_compatibility_fallback(
         &mut self,
         module: Module<'a>,
-        span: &mut Span,
+        ctxt: &mut SyntaxContext,
         node_id: NodeId,
         poisoned: &mut Option<NodeId>,
     ) -> Option<Module<'a>> {
-        if let module @ Some(..) = self.hygienic_lexical_parent(module, span) {
+        if let module @ Some(..) = self.hygienic_lexical_parent(module, ctxt) {
             return module;
         }
 
@@ -1991,14 +2049,13 @@ impl<'a> Resolver<'a> {
             {
                 // The macro is a proc macro derive
                 if let Some(def_id) = module.expansion.expn_data().macro_def_id {
-                    if let Some(ext) = self.get_macro_by_def_id(def_id) {
-                        if !ext.is_builtin
-                            && ext.macro_kind() == MacroKind::Derive
-                            && parent.expansion.outer_expn_is_descendant_of(span.ctxt())
-                        {
-                            *poisoned = Some(node_id);
-                            return module.parent;
-                        }
+                    let ext = self.get_macro_by_def_id(def_id);
+                    if ext.builtin_name.is_none()
+                        && ext.macro_kind() == MacroKind::Derive
+                        && parent.expansion.outer_expn_is_descendant_of(*ctxt)
+                    {
+                        *poisoned = Some(node_id);
+                        return module.parent;
                     }
                 }
             }
@@ -2117,7 +2174,7 @@ impl<'a> Resolver<'a> {
                 return self.graph_root;
             }
         };
-        let module = self.get_module(DefId { index: CRATE_DEF_INDEX, ..module.normal_ancestor_id });
+        let module = self.get_module(DefId { index: CRATE_DEF_INDEX, ..module.nearest_parent_mod });
         debug!(
             "resolve_crate_root({:?}): got module {:?} ({:?}) (ident.span = {:?})",
             ident,
@@ -2129,10 +2186,10 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_self(&mut self, ctxt: &mut SyntaxContext, module: Module<'a>) -> Module<'a> {
-        let mut module = self.get_module(module.normal_ancestor_id);
+        let mut module = self.get_module(module.nearest_parent_mod);
         while module.span.ctxt().normalize_to_macros_2_0() != *ctxt {
             let parent = module.parent.unwrap_or_else(|| self.macro_def_scope(ctxt.remove_mark()));
-            module = self.get_module(parent.normal_ancestor_id);
+            module = self.get_module(parent.nearest_parent_mod);
         }
         module
     }
@@ -2416,15 +2473,24 @@ impl<'a> Resolver<'a> {
                     } else if i == 0 {
                         if ident
                             .name
-                            .with(|n| n.chars().next().map_or(false, |c| c.is_ascii_uppercase()))
+                            .as_str()
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_ascii_uppercase())
                         {
                             (format!("use of undeclared type `{}`", ident), None)
                         } else {
                             (format!("use of undeclared crate or module `{}`", ident), None)
                         }
                     } else {
-                        let mut msg =
-                            format!("could not find `{}` in `{}`", ident, path[i - 1].ident);
+                        let parent = path[i - 1].ident.name;
+                        let parent = if parent == kw::PathRoot {
+                            "crate root".to_owned()
+                        } else {
+                            format!("`{}`", parent)
+                        };
+
+                        let mut msg = format!("could not find `{}` in {}", ident, parent);
                         if ns == TypeNS || ns == ValueNS {
                             let ns_to_try = if ns == TypeNS { ValueNS } else { TypeNS };
                             if let FindBindingResult::Binding(Ok(binding)) =
@@ -2432,11 +2498,11 @@ impl<'a> Resolver<'a> {
                             {
                                 let mut found = |what| {
                                     msg = format!(
-                                        "expected {}, found {} `{}` in `{}`",
+                                        "expected {}, found {} `{}` in {}",
                                         ns.descr(),
                                         what,
                                         ident,
-                                        path[i - 1].ident
+                                        parent
                                     )
                                 };
                                 if binding.module().is_some() {
@@ -2538,6 +2604,7 @@ impl<'a> Resolver<'a> {
         mut res: Res,
         record_used: bool,
         span: Span,
+        original_rib_ident_def: Ident,
         all_ribs: &[Rib<'a>],
     ) -> Res {
         const CG_BUG_STR: &str = "min_const_generics resolve check didn't stop compilation";
@@ -2584,10 +2651,32 @@ impl<'a> Resolver<'a> {
                                 res_err = Some(CannotCaptureDynamicEnvironmentInFnItem);
                             }
                         }
-                        ConstantItemRibKind(_) => {
+                        ConstantItemRibKind(_, item) => {
                             // Still doesn't deal with upvars
                             if record_used {
-                                self.report_error(span, AttemptToUseNonConstantValueInConstant);
+                                let (span, resolution_error) =
+                                    if let Some((ident, constant_item_kind)) = item {
+                                        let kind_str = match constant_item_kind {
+                                            ConstantItemKind::Const => "const",
+                                            ConstantItemKind::Static => "static",
+                                        };
+                                        (
+                                            span,
+                                            AttemptToUseNonConstantValueInConstant(
+                                                ident, "let", kind_str,
+                                            ),
+                                        )
+                                    } else {
+                                        (
+                                            rib_ident.span,
+                                            AttemptToUseNonConstantValueInConstant(
+                                                original_rib_ident_def,
+                                                "const",
+                                                "let",
+                                            ),
+                                        )
+                                    };
+                                self.report_error(span, resolution_error);
                             }
                             return Res::Err;
                         }
@@ -2623,9 +2712,13 @@ impl<'a> Resolver<'a> {
                             in_ty_param_default = true;
                             continue;
                         }
-                        ConstantItemRibKind(trivial) => {
+                        ConstantItemRibKind(trivial, _) => {
+                            let features = self.session.features_untracked();
                             // HACK(min_const_generics): We currently only allow `N` or `{ N }`.
-                            if !trivial && self.session.features_untracked().min_const_generics {
+                            if !(trivial
+                                || features.const_generics
+                                || features.lazy_normalization_consts)
+                            {
                                 // HACK(min_const_generics): If we encounter `Self` in an anonymous constant
                                 // we can't easily tell if it's generic at this stage, so we instead remember
                                 // this and then enforce the self type to be concrete later on.
@@ -2712,9 +2805,13 @@ impl<'a> Resolver<'a> {
                             in_ty_param_default = true;
                             continue;
                         }
-                        ConstantItemRibKind(trivial) => {
+                        ConstantItemRibKind(trivial, _) => {
+                            let features = self.session.features_untracked();
                             // HACK(min_const_generics): We currently only allow `N` or `{ N }`.
-                            if !trivial && self.session.features_untracked().min_const_generics {
+                            if !(trivial
+                                || features.const_generics
+                                || features.lazy_normalization_consts)
+                            {
                                 if record_used {
                                     self.report_error(
                                         span,
@@ -2783,7 +2880,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn is_accessible_from(&self, vis: ty::Visibility, module: Module<'a>) -> bool {
-        vis.is_accessible_from(module.normal_ancestor_id, self)
+        vis.is_accessible_from(module.nearest_parent_mod, self)
     }
 
     fn set_binding_parent_module(&mut self, binding: &'a NameBinding<'a>, module: Module<'a>) {
@@ -2807,7 +2904,7 @@ impl<'a> Resolver<'a> {
             self.binding_parent_modules.get(&PtrKey(modularized)),
         ) {
             (Some(macro_rules), Some(modularized)) => {
-                macro_rules.normal_ancestor_id == modularized.normal_ancestor_id
+                macro_rules.nearest_parent_mod == modularized.nearest_parent_mod
                     && modularized.is_ancestor_of(macro_rules)
             }
             _ => false,
@@ -2965,7 +3062,7 @@ impl<'a> Resolver<'a> {
         let duplicate = new_binding.res().opt_def_id() == old_binding.res().opt_def_id();
         let has_dummy_span = new_binding.span.is_dummy() || old_binding.span.is_dummy();
         let from_item =
-            self.extern_prelude.get(&ident).map(|entry| entry.introduced_by_item).unwrap_or(true);
+            self.extern_prelude.get(&ident).map_or(true, |entry| entry.introduced_by_item);
         // Only suggest removing an import if both bindings are to the same def, if both spans
         // aren't dummy spans. Further, if both bindings are imports, then the ident must have
         // been introduced by a item.
@@ -3159,34 +3256,6 @@ impl<'a> Resolver<'a> {
                 )
             }
         })
-    }
-
-    /// This is equivalent to `get_traits_in_module_containing_item`, but without filtering by the associated item.
-    ///
-    /// This is used by rustdoc for intra-doc links.
-    pub fn traits_in_scope(&mut self, module_id: DefId) -> Vec<TraitCandidate> {
-        let module = self.get_module(module_id);
-        module.ensure_traits(self);
-        let traits = module.traits.borrow();
-        let to_candidate =
-            |this: &mut Self, &(trait_name, binding): &(Ident, &NameBinding<'_>)| TraitCandidate {
-                def_id: binding.res().def_id(),
-                import_ids: this.find_transitive_imports(&binding.kind, trait_name),
-            };
-
-        let mut candidates: Vec<_> =
-            traits.as_ref().unwrap().iter().map(|x| to_candidate(self, x)).collect();
-
-        if let Some(prelude) = self.prelude {
-            if !module.no_implicit_prelude {
-                prelude.ensure_traits(self);
-                candidates.extend(
-                    prelude.traits.borrow().as_ref().unwrap().iter().map(|x| to_candidate(self, x)),
-                );
-            }
-        }
-
-        candidates
     }
 
     /// Rustdoc uses this to resolve things in a recoverable way. `ResolutionError<'a>`

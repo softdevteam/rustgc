@@ -1,5 +1,4 @@
-use crate::utils::visitors::LocalUsedVisitor;
-use crate::utils::{higher, qpath_res, snippet, span_lint_and_then};
+use crate::utils::{snippet, span_lint_and_then, visitors::LocalUsedVisitor};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
@@ -64,7 +63,7 @@ impl<'tcx> LateLintPass<'tcx> for LetIfSeq {
                 if let hir::StmtKind::Local(ref local) = stmt.kind;
                 if let hir::PatKind::Binding(mode, canonical_id, ident, None) = local.pat.kind;
                 if let hir::StmtKind::Expr(ref if_) = expr.kind;
-                if let Some((ref cond, ref then, ref else_)) = higher::if_block(&if_);
+                if let hir::ExprKind::If(ref cond, ref then, ref else_) = if_.kind;
                 if !LocalUsedVisitor::new(canonical_id).check_expr(cond);
                 if let hir::ExprKind::Block(ref then, _) = then.kind;
                 if let Some(value) = check_assign(cx, canonical_id, &*then);
@@ -146,7 +145,7 @@ fn check_assign<'tcx>(
         if let hir::StmtKind::Semi(ref expr) = expr.kind;
         if let hir::ExprKind::Assign(ref var, ref value, _) = expr.kind;
         if let hir::ExprKind::Path(ref qpath) = var.kind;
-        if let Res::Local(local_id) = qpath_res(cx, qpath, var.hir_id);
+        if let Res::Local(local_id) = cx.qpath_res(qpath, var.hir_id);
         if decl == local_id;
         then {
             let mut v = LocalUsedVisitor::new(decl);

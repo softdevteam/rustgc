@@ -32,7 +32,7 @@ pub(crate) fn target_from_impl_item<'tcx>(
             let parent_hir_id = tcx.hir().get_parent_item(impl_item.hir_id);
             let containing_item = tcx.hir().expect_item(parent_hir_id);
             let containing_impl_is_for_trait = match &containing_item.kind {
-                hir::ItemKind::Impl { ref of_trait, .. } => of_trait.is_some(),
+                hir::ItemKind::Impl(impl_) => impl_.of_trait.is_some(),
                 _ => bug!("parent of an ImplItem must be an Impl"),
             };
             if containing_impl_is_for_trait {
@@ -310,7 +310,7 @@ impl CheckAttrVisitor<'tcx> {
                 .sess
                 .struct_span_err(
                     meta.name_value_literal_span().unwrap_or_else(|| meta.span()),
-                    &format!("{:?} character isn't allowed in `#[doc(alias = \"...\")]`", c,),
+                    &format!("{:?} character isn't allowed in `#[doc(alias = \"...\")]`", c),
                 )
                 .emit();
             return false;
@@ -343,7 +343,7 @@ impl CheckAttrVisitor<'tcx> {
                 // We can't link to trait impl's consts.
                 let err = "associated constant in trait implementation block";
                 match containing_item.kind {
-                    ItemKind::Impl { of_trait: Some(_), .. } => Some(err),
+                    ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }) => Some(err),
                     _ => None,
                 }
             }
@@ -354,6 +354,17 @@ impl CheckAttrVisitor<'tcx> {
                 .struct_span_err(
                     meta.span(),
                     &format!("`#[doc(alias = \"...\")]` isn't allowed on {}", err),
+                )
+                .emit();
+            return false;
+        }
+        let item_name = self.tcx.hir().name(hir_id);
+        if &*item_name.as_str() == doc_alias {
+            self.tcx
+                .sess
+                .struct_span_err(
+                    meta.span(),
+                    &format!("`#[doc(alias = \"...\")]` is the same as the item's name"),
                 )
                 .emit();
             return false;
@@ -880,6 +891,18 @@ impl Visitor<'tcx> for CheckAttrVisitor<'tcx> {
             Some(ItemLike::Item(item)),
         );
         intravisit::walk_item(self, item)
+    }
+
+    fn visit_generic_param(&mut self, generic_param: &'tcx hir::GenericParam<'tcx>) {
+        let target = Target::from_generic_param(generic_param);
+        self.check_attributes(
+            generic_param.hir_id,
+            generic_param.attrs,
+            &generic_param.span,
+            target,
+            None,
+        );
+        intravisit::walk_generic_param(self, generic_param)
     }
 
     fn visit_trait_item(&mut self, trait_item: &'tcx TraitItem<'tcx>) {

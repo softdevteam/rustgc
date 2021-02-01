@@ -384,7 +384,6 @@ impl<'a> Builder<'a> {
                 test::ExpandYamlAnchors,
                 test::Tidy,
                 test::Ui,
-                test::CompileFail,
                 test::RunPassValgrind,
                 test::MirOpt,
                 test::Codegen,
@@ -471,6 +470,7 @@ impl<'a> Builder<'a> {
                 dist::RustDev,
                 dist::Extended,
                 dist::BuildManifest,
+                dist::ReproducibleArtifacts,
             ),
             Kind::Install => describe!(
                 install::Docs,
@@ -736,10 +736,7 @@ impl<'a> Builder<'a> {
         if self.config.deny_warnings {
             cmd.arg("-Dwarnings");
         }
-        // cfg(not(bootstrap)), can be removed on the next beta bump
-        if compiler.stage != 0 {
-            cmd.arg("-Znormalize-docs");
-        }
+        cmd.arg("-Znormalize-docs");
 
         // Remove make-related flags that can cause jobserver problems.
         cmd.env_remove("MAKEFLAGS");
@@ -817,12 +814,22 @@ impl<'a> Builder<'a> {
             cargo.env("REAL_LIBRARY_PATH", e);
         }
 
+        // Found with `rg "init_env_logger\("`. If anyone uses `init_env_logger`
+        // from out of tree it shouldn't matter, since x.py is only used for
+        // building in-tree.
+        let color_logs = ["RUSTDOC_LOG_COLOR", "RUSTC_LOG_COLOR", "RUST_LOG_COLOR"];
         match self.build.config.color {
             Color::Always => {
                 cargo.arg("--color=always");
+                for log in &color_logs {
+                    cargo.env(log, "always");
+                }
             }
             Color::Never => {
                 cargo.arg("--color=never");
+                for log in &color_logs {
+                    cargo.env(log, "never");
+                }
             }
             Color::Auto => {} // nothing to do
         }
@@ -1126,6 +1133,27 @@ impl<'a> Builder<'a> {
             },
         );
 
+        // `dsymutil` adds time to builds on Apple platforms for no clear benefit, and also makes
+        // it more difficult for debuggers to find debug info. The compiler currently defaults to
+        // running `dsymutil` to preserve its historical default, but when compiling the compiler
+        // itself, we skip it by default since we know it's safe to do so in that case.
+        // See https://github.com/rust-lang/rust/issues/79361 for more info on this flag.
+        if target.contains("apple") {
+            if stage == 0 {
+                if self.config.rust_run_dsymutil {
+                    rustflags.arg("-Zrun-dsymutil=yes");
+                } else {
+                    rustflags.arg("-Zrun-dsymutil=no");
+                }
+            } else {
+                if self.config.rust_run_dsymutil {
+                    rustflags.arg("-Csplit-debuginfo=packed");
+                } else {
+                    rustflags.arg("-Csplit-debuginfo=unpacked");
+                }
+            }
+        }
+
         if self.config.cmd.bless() {
             // Bless `expect!` tests.
             cargo.env("UPDATE_EXPECT", "1");
@@ -1230,6 +1258,12 @@ impl<'a> Builder<'a> {
             // some code doesn't go through this `rustc` wrapper.
             lint_flags.push("-Wrust_2018_idioms");
             lint_flags.push("-Wunused_lifetimes");
+            // cfg(bootstrap): unconditionally enable this warning after the next beta bump
+            // This is currently disabled for the stage1 libstd, since build scripts
+            // will end up using the bootstrap compiler (which doesn't yet support this lint)
+            if compiler.stage != 0 && mode != Mode::Std {
+                lint_flags.push("-Wsemicolon_in_expressions_from_macros");
+            }
 
             if self.config.deny_warnings {
                 lint_flags.push("-Dwarnings");
@@ -1524,7 +1558,7 @@ impl Rustflags {
     fn arg(&mut self, arg: &str) -> &mut Self {
         assert_eq!(arg.split(' ').count(), 1);
         if !self.0.is_empty() {
-            self.0.push_str(" ");
+            self.0.push(' ');
         }
         self.0.push_str(arg);
         self

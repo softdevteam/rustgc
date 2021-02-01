@@ -119,6 +119,7 @@ pub struct ParseSess {
     pub unstable_features: UnstableFeatures,
     pub config: CrateConfig,
     pub edition: Edition,
+    pub missing_fragment_specifiers: Lock<FxHashMap<Span, NodeId>>,
     /// Places where raw identifiers were used. This is used for feature-gating raw identifiers.
     pub raw_identifier_spans: Lock<Vec<Span>>,
     /// Used to determine and report recursive module inclusions.
@@ -137,6 +138,8 @@ pub struct ParseSess {
     pub env_depinfo: Lock<FxHashSet<(Symbol, Option<Symbol>)>>,
     /// All the type ascriptions expressions that have had a suggestion for likely path typo.
     pub type_ascription_path_suggestions: Lock<FxHashSet<Span>>,
+    /// Whether cfg(version) should treat the current release as incomplete
+    pub assume_incomplete_release: bool,
 }
 
 impl ParseSess {
@@ -152,6 +155,7 @@ impl ParseSess {
             unstable_features: UnstableFeatures::from_environment(None),
             config: FxHashSet::default(),
             edition: ExpnId::root().expn_data().edition,
+            missing_fragment_specifiers: Default::default(),
             raw_identifier_spans: Lock::new(Vec::new()),
             included_mod_stack: Lock::new(vec![]),
             source_map,
@@ -162,6 +166,7 @@ impl ParseSess {
             reached_eof: Lock::new(false),
             env_depinfo: Default::default(),
             type_ascription_path_suggestions: Default::default(),
+            assume_incomplete_release: false,
         }
     }
 

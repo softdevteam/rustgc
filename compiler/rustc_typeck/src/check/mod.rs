@@ -52,13 +52,13 @@ The types of top-level items, which never contain unbound type
 variables, are stored directly into the `tcx` typeck_results.
 
 N.B., a type variable is not the same thing as a type parameter.  A
-type variable is rather an "instance" of a type parameter: that is,
-given a generic function `fn foo<T>(t: T)`: while checking the
+type variable is an instance of a type parameter. That is,
+given a generic function `fn foo<T>(t: T)`, while checking the
 function `foo`, the type `ty_param(0)` refers to the type `T`, which
-is treated in abstract.  When `foo()` is called, however, `T` will be
+is treated in abstract. However, when `foo()` is called, `T` will be
 substituted for a fresh type variable `N`.  This variable will
 eventually be resolved to some concrete type (which might itself be
-type parameter).
+a type parameter).
 
 */
 
@@ -184,14 +184,14 @@ impl UnsafetyState {
         UnsafetyState { def, unsafety, unsafe_push_count: 0, from_fn: true }
     }
 
-    pub fn recurse(&mut self, blk: &hir::Block<'_>) -> UnsafetyState {
+    pub fn recurse(self, blk: &hir::Block<'_>) -> UnsafetyState {
         use hir::BlockCheckMode;
         match self.unsafety {
             // If this unsafe, then if the outer function was already marked as
             // unsafe we shouldn't attribute the unsafe'ness to the block. This
             // way the block can be warned about instead of ignoring this
             // extraneous block (functions are never warned about).
-            hir::Unsafety::Unsafe if self.from_fn => *self,
+            hir::Unsafety::Unsafe if self.from_fn => self,
 
             unsafety => {
                 let (unsafety, def, count) = match blk.rules {
@@ -270,7 +270,7 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
 
 /// If this `DefId` is a "primary tables entry", returns
 /// `Some((body_id, header, decl))` with information about
-/// it's body-id, fn-header and fn-decl (if any). Otherwise,
+/// its body-id, fn-header and fn-decl (if any). Otherwise,
 /// returns `None`.
 ///
 /// If this function returns `Some`, then `typeck_results(def_id)` will
@@ -864,9 +864,9 @@ fn bounds_from_generic_predicates<'tcx>(
     let mut projections = vec![];
     for (predicate, _) in predicates.predicates {
         debug!("predicate {:?}", predicate);
-        let bound_predicate = predicate.bound_atom();
+        let bound_predicate = predicate.kind();
         match bound_predicate.skip_binder() {
-            ty::PredicateAtom::Trait(trait_predicate, _) => {
+            ty::PredicateKind::Trait(trait_predicate, _) => {
                 let entry = types.entry(trait_predicate.self_ty()).or_default();
                 let def_id = trait_predicate.def_id();
                 if Some(def_id) != tcx.lang_items().sized_trait() {
@@ -875,7 +875,7 @@ fn bounds_from_generic_predicates<'tcx>(
                     entry.push(trait_predicate.def_id());
                 }
             }
-            ty::PredicateAtom::Projection(projection_pred) => {
+            ty::PredicateKind::Projection(projection_pred) => {
                 projections.push(bound_predicate.rebind(projection_pred));
             }
             _ => {}

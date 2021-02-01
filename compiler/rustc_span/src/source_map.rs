@@ -1,9 +1,11 @@
-//! The `SourceMap` tracks all the source code used within a single crate, mapping
+//! Types for tracking pieces of source code within a crate.
+//!
+//! The [`SourceMap`] tracks all the source code used within a single crate, mapping
 //! from integer byte positions to the original source code location. Each bit
 //! of source parsed during crate parsing (typically files, in-memory strings,
 //! or various bits of macro expansion) cover a continuous range of bytes in the
-//! `SourceMap` and are represented by `SourceFile`s. Byte positions are stored in
-//! `Span` and used pervasively in the compiler. They are absolute positions
+//! `SourceMap` and are represented by [`SourceFile`]s. Byte positions are stored in
+//! [`Span`] and used pervasively in the compiler. They are absolute positions
 //! within the `SourceMap`, which upon request can be converted to line and column
 //! information, source code snippets, etc.
 
@@ -537,7 +539,7 @@ impl SourceMap {
 
     pub fn is_line_before_span_empty(&self, sp: Span) -> bool {
         match self.span_to_prev_source(sp) {
-            Ok(s) => s.split('\n').last().map(|l| l.trim_start().is_empty()).unwrap_or(false),
+            Ok(s) => s.split('\n').last().map_or(false, |l| l.trim_start().is_empty()),
             Err(_) => false,
         }
     }
@@ -566,7 +568,7 @@ impl SourceMap {
         // asserting that the line numbers here are all indeed 1-based.
         let hi_line = hi.line.saturating_sub(1);
         for line_index in lo.line.saturating_sub(1)..hi_line {
-            let line_len = lo.file.get_line(line_index).map(|s| s.chars().count()).unwrap_or(0);
+            let line_len = lo.file.get_line(line_index).map_or(0, |s| s.chars().count());
             lines.push(LineInfo { line_index, start_col, end_col: CharPos::from_usize(line_len) });
             start_col = CharPos::from_usize(0);
         }
@@ -580,9 +582,9 @@ impl SourceMap {
     /// Extracts the source surrounding the given `Span` using the `extract_source` function. The
     /// extract function takes three arguments: a string slice containing the source, an index in
     /// the slice for the beginning of the span and an index in the slice for the end of the span.
-    fn span_to_source<F>(&self, sp: Span, extract_source: F) -> Result<String, SpanSnippetError>
+    fn span_to_source<F, T>(&self, sp: Span, extract_source: F) -> Result<T, SpanSnippetError>
     where
-        F: Fn(&str, usize, usize) -> Result<String, SpanSnippetError>,
+        F: Fn(&str, usize, usize) -> Result<T, SpanSnippetError>,
     {
         let local_begin = self.lookup_byte_offset(sp.lo());
         let local_end = self.lookup_byte_offset(sp.hi());
@@ -646,10 +648,10 @@ impl SourceMap {
 
     /// Extends the given `Span` to just after the previous occurrence of `c`. Return the same span
     /// if no character could be found or if an error occurred while retrieving the code snippet.
-    pub fn span_extend_to_prev_char(&self, sp: Span, c: char) -> Span {
+    pub fn span_extend_to_prev_char(&self, sp: Span, c: char, accept_newlines: bool) -> Span {
         if let Ok(prev_source) = self.span_to_prev_source(sp) {
-            let prev_source = prev_source.rsplit(c).next().unwrap_or("").trim_start();
-            if !prev_source.is_empty() && !prev_source.contains('\n') {
+            let prev_source = prev_source.rsplit(c).next().unwrap_or("");
+            if !prev_source.is_empty() && (!prev_source.contains('\n') || accept_newlines) {
                 return sp.with_lo(BytePos(sp.lo().0 - prev_source.len() as u32));
             }
         }
@@ -669,9 +671,30 @@ impl SourceMap {
             let pat = pat.to_owned() + ws;
             if let Ok(prev_source) = self.span_to_prev_source(sp) {
                 let prev_source = prev_source.rsplit(&pat).next().unwrap_or("").trim_start();
-                if !prev_source.is_empty() && (!prev_source.contains('\n') || accept_newlines) {
+                if prev_source.is_empty() && sp.lo().0 != 0 {
+                    return sp.with_lo(BytePos(sp.lo().0 - 1));
+                } else if !prev_source.contains('\n') || accept_newlines {
                     return sp.with_lo(BytePos(sp.lo().0 - prev_source.len() as u32));
                 }
+            }
+        }
+
+        sp
+    }
+
+    /// Returns the source snippet as `String` after the given `Span`.
+    pub fn span_to_next_source(&self, sp: Span) -> Result<String, SpanSnippetError> {
+        self.span_to_source(sp, |src, _, end_index| {
+            src.get(end_index..).map(|s| s.to_string()).ok_or(SpanSnippetError::IllFormedSpan(sp))
+        })
+    }
+
+    /// Extends the given `Span` to just after the next occurrence of `c`.
+    pub fn span_extend_to_next_char(&self, sp: Span, c: char, accept_newlines: bool) -> Span {
+        if let Ok(next_source) = self.span_to_next_source(sp) {
+            let next_source = next_source.split(c).next().unwrap_or("");
+            if !next_source.is_empty() && (!next_source.contains('\n') || accept_newlines) {
+                return sp.with_hi(BytePos(sp.hi().0 + next_source.len() as u32));
             }
         }
 
@@ -868,8 +891,10 @@ impl SourceMap {
     }
 
     pub fn get_source_file(&self, filename: &FileName) -> Option<Lrc<SourceFile>> {
+        // Remap filename before lookup
+        let filename = self.path_mapping().map_filename_prefix(filename).0;
         for sf in self.files.borrow().source_files.iter() {
-            if *filename == sf.name {
+            if filename == sf.name {
                 return Some(sf.clone());
             }
         }
@@ -1036,5 +1061,16 @@ impl FilePathMapping {
         }
 
         (path, false)
+    }
+
+    fn map_filename_prefix(&self, file: &FileName) -> (FileName, bool) {
+        match file {
+            FileName::Real(realfile) => {
+                let path = realfile.local_path();
+                let (path, mapped) = self.map_prefix(path.to_path_buf());
+                (FileName::Real(RealFileName::Named(path)), mapped)
+            }
+            other => (other.clone(), false),
+        }
     }
 }

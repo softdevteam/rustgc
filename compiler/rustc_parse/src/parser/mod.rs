@@ -19,8 +19,8 @@ use rustc_ast::token::{self, DelimToken, Token, TokenKind};
 use rustc_ast::tokenstream::{self, DelimSpan, LazyTokenStream, Spacing};
 use rustc_ast::tokenstream::{CreateTokenStream, TokenStream, TokenTree, TreeAndSpacing};
 use rustc_ast::DUMMY_NODE_ID;
-use rustc_ast::{self as ast, AnonConst, AttrStyle, AttrVec, Const, CrateSugar, Extern, Unsafe};
-use rustc_ast::{Async, Expr, ExprKind, MacArgs, MacDelimiter, Mutability, StrLit};
+use rustc_ast::{self as ast, AnonConst, AttrStyle, AttrVec, Const, CrateSugar, Extern, HasTokens};
+use rustc_ast::{Async, Expr, ExprKind, MacArgs, MacDelimiter, Mutability, StrLit, Unsafe};
 use rustc_ast::{Visibility, VisibilityKind};
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::sync::Lrc;
@@ -52,6 +52,18 @@ enum SemiColonMode {
 enum BlockMode {
     Break,
     Ignore,
+}
+
+/// Whether or not we should force collection of tokens for an AST node,
+/// regardless of whether or not it has attributes
+pub enum ForceCollect {
+    Yes,
+    No,
+}
+
+pub enum TrailingToken {
+    None,
+    Semi,
 }
 
 /// Like `maybe_whole_expr`, but for things other than expressions.
@@ -265,7 +277,7 @@ impl TokenCursor {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum TokenType {
     Token(TokenKind),
     Keyword(Symbol),
@@ -720,13 +732,9 @@ impl<'a> Parser<'a> {
                                 Ok(t) => {
                                     // Parsed successfully, therefore most probably the code only
                                     // misses a separator.
-                                    let mut exp_span = self.sess.source_map().next_point(sp);
-                                    if self.sess.source_map().is_multiline(exp_span) {
-                                        exp_span = sp;
-                                    }
                                     expect_err
                                         .span_suggestion_short(
-                                            exp_span,
+                                            sp,
                                             &format!("missing `{}`", token_str),
                                             token_str,
                                             Applicability::MaybeIncorrect,
@@ -972,12 +980,8 @@ impl<'a> Parser<'a> {
                         }
                     }
 
-                    // The value here is never passed to macros as tokens by itself (not as a part
-                    // of the whole attribute), so we don't collect tokens here. If this changes,
-                    // then token will need to be collected. One catch here is that we are using
-                    // a nonterminal for keeping the expression, but this nonterminal should not
-                    // be wrapped into a group when converting to token stream.
-                    let expr = self.parse_expr()?;
+                    // Collect tokens because they are used during lowering to HIR.
+                    let expr = self.collect_tokens(|this| this.parse_expr())?;
                     let span = expr.span;
 
                     match &expr.kind {
@@ -987,8 +991,8 @@ impl<'a> Parser<'a> {
                         _ => self.sess.gated_spans.gate(sym::extended_key_value_attributes, span),
                     }
 
-                    let token = token::Interpolated(Lrc::new(token::NtExpr(expr)));
-                    MacArgs::Eq(eq_span, TokenTree::token(token, span).into())
+                    let token_kind = token::Interpolated(Lrc::new(token::NtExpr(expr)));
+                    MacArgs::Eq(eq_span, Token::new(token_kind, span))
                 } else {
                     MacArgs::Empty
                 }
@@ -1222,6 +1226,13 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn collect_tokens<R: HasTokens>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> PResult<'a, R>,
+    ) -> PResult<'a, R> {
+        self.collect_tokens_trailing_token(|this| Ok((f(this)?, TrailingToken::None)))
+    }
+
     /// Records all tokens consumed by the provided callback,
     /// including the current token. These tokens are collected
     /// into a `LazyTokenStream`, and returned along with the result
@@ -1238,14 +1249,14 @@ impl<'a> Parser<'a> {
     /// This restriction shouldn't be an issue in practice,
     /// since this function is used to record the tokens for
     /// a parsed AST item, which always has matching delimiters.
-    pub fn collect_tokens<R>(
+    pub fn collect_tokens_trailing_token<R: HasTokens>(
         &mut self,
-        f: impl FnOnce(&mut Self) -> PResult<'a, R>,
-    ) -> PResult<'a, (R, Option<LazyTokenStream>)> {
+        f: impl FnOnce(&mut Self) -> PResult<'a, (R, TrailingToken)>,
+    ) -> PResult<'a, R> {
         let start_token = (self.token.clone(), self.token_spacing);
         let cursor_snapshot = self.token_cursor.clone();
 
-        let ret = f(self)?;
+        let (mut ret, trailing_token) = f(self)?;
 
         // Produces a `TokenStream` on-demand. Using `cursor_snapshot`
         // and `num_calls`, we can reconstruct the `TokenStream` seen
@@ -1264,15 +1275,10 @@ impl<'a> Parser<'a> {
             cursor_snapshot: TokenCursor,
             num_calls: usize,
             desugar_doc_comments: bool,
-            trailing_semi: bool,
             append_unglued_token: Option<TreeAndSpacing>,
         }
         impl CreateTokenStream for LazyTokenStreamImpl {
             fn create_token_stream(&self) -> TokenStream {
-                let mut num_calls = self.num_calls;
-                if self.trailing_semi {
-                    num_calls += 1;
-                }
                 // The token produced by the final call to `next` or `next_desugared`
                 // was not actually consumed by the callback. The combination
                 // of chaining the initial token and using `take` produces the desired
@@ -1280,42 +1286,37 @@ impl<'a> Parser<'a> {
                 // and omit the final token otherwise.
                 let mut cursor_snapshot = self.cursor_snapshot.clone();
                 let tokens = std::iter::once(self.start_token.clone())
-                    .chain((0..num_calls).map(|_| {
+                    .chain((0..self.num_calls).map(|_| {
                         if self.desugar_doc_comments {
                             cursor_snapshot.next_desugared()
                         } else {
                             cursor_snapshot.next()
                         }
                     }))
-                    .take(num_calls);
+                    .take(self.num_calls);
 
                 make_token_stream(tokens, self.append_unglued_token.clone())
             }
-            fn add_trailing_semi(&self) -> Box<dyn CreateTokenStream> {
-                if self.trailing_semi {
-                    panic!("Called `add_trailing_semi` twice!");
-                }
-                if self.append_unglued_token.is_some() {
-                    panic!(
-                        "Cannot call `add_trailing_semi` when we have an unglued token {:?}",
-                        self.append_unglued_token
-                    );
-                }
-                let mut new = self.clone();
-                new.trailing_semi = true;
-                Box::new(new)
+        }
+
+        let mut num_calls = self.token_cursor.num_next_calls - cursor_snapshot.num_next_calls;
+        match trailing_token {
+            TrailingToken::None => {}
+            TrailingToken::Semi => {
+                assert_eq!(self.token.kind, token::Semi);
+                num_calls += 1;
             }
         }
 
         let lazy_impl = LazyTokenStreamImpl {
             start_token,
-            num_calls: self.token_cursor.num_next_calls - cursor_snapshot.num_next_calls,
+            num_calls,
             cursor_snapshot,
             desugar_doc_comments: self.desugar_doc_comments,
-            trailing_semi: false,
             append_unglued_token: self.token_cursor.append_unglued_token.clone(),
         };
-        Ok((ret, Some(LazyTokenStream::new(lazy_impl))))
+        ret.finalize_tokens(LazyTokenStream::new(lazy_impl));
+        Ok(ret)
     }
 
     /// `::{` or `::*`
@@ -1407,4 +1408,17 @@ fn make_token_stream(
     final_buf.inner.extend(append_unglued_token);
     assert!(stack.is_empty(), "Stack should be empty: final_buf={:?} stack={:?}", final_buf, stack);
     TokenStream::new(final_buf.inner)
+}
+
+#[macro_export]
+macro_rules! maybe_collect_tokens {
+    ($self:ident, $force_collect:expr, $attrs:expr, $f:expr) => {
+        if matches!($force_collect, ForceCollect::Yes)
+            || $crate::parser::attr::maybe_needs_tokens($attrs)
+        {
+            $self.collect_tokens_trailing_token($f)
+        } else {
+            Ok($f($self)?.0)
+        }
+    };
 }

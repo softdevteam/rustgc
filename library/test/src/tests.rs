@@ -228,21 +228,30 @@ fn test_should_panic_non_string_message_type() {
 #[test]
 #[cfg(not(target_os = "emscripten"))]
 fn test_should_panic_but_succeeds() {
-    fn f() {}
-    let desc = TestDescAndFn {
-        desc: TestDesc {
-            name: StaticTestName("whatever"),
-            ignore: false,
-            should_panic: ShouldPanic::Yes,
-            allow_fail: false,
-            test_type: TestType::Unknown,
-        },
-        testfn: DynTestFn(Box::new(f)),
-    };
-    let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, desc, RunStrategy::InProcess, tx, Concurrent::No);
-    let result = rx.recv().unwrap().result;
-    assert_eq!(result, TrFailedMsg("test did not panic as expected".to_string()));
+    let should_panic_variants = [ShouldPanic::Yes, ShouldPanic::YesWithMessage("error message")];
+
+    for &should_panic in should_panic_variants.iter() {
+        fn f() {}
+        let desc = TestDescAndFn {
+            desc: TestDesc {
+                name: StaticTestName("whatever"),
+                ignore: false,
+                should_panic,
+                allow_fail: false,
+                test_type: TestType::Unknown,
+            },
+            testfn: DynTestFn(Box::new(f)),
+        };
+        let (tx, rx) = channel();
+        run_test(&TestOpts::new(), false, desc, RunStrategy::InProcess, tx, Concurrent::No);
+        let result = rx.recv().unwrap().result;
+        assert_eq!(
+            result,
+            TrFailedMsg("test did not panic as expected".to_string()),
+            "should_panic == {:?}",
+            should_panic
+        );
+    }
 }
 
 fn report_time_test_template(report_time: bool) -> Option<TestExecTime> {
@@ -382,12 +391,7 @@ fn parse_show_output_flag() {
 
 #[test]
 fn parse_include_ignored_flag() {
-    let args = vec![
-        "progname".to_string(),
-        "filter".to_string(),
-        "-Zunstable-options".to_string(),
-        "--include-ignored".to_string(),
-    ];
+    let args = vec!["progname".to_string(), "filter".to_string(), "--include-ignored".to_string()];
     let opts = parse_opts(&args).unwrap().unwrap();
     assert_eq!(opts.run_ignored, RunIgnored::Yes);
 }

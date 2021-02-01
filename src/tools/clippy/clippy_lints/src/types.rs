@@ -5,10 +5,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use if_chain::if_chain;
-use rustc_ast::{FloatTy, IntTy, LitFloatType, LitIntType, LitKind, UintTy};
+use rustc_ast::{LitFloatType, LitIntType, LitKind};
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
-use rustc_hir::def::Res;
 use rustc_hir::intravisit::{walk_body, walk_expr, walk_ty, FnKind, NestedVisitorMap, Visitor};
 use rustc_hir::{
     BinOpKind, Block, Body, Expr, ExprKind, FnDecl, FnRetTy, FnSig, GenericArg, GenericBounds, GenericParamKind, HirId,
@@ -19,7 +18,8 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::map::Map;
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::TypeFoldable;
-use rustc_middle::ty::{self, InferTy, Ty, TyCtxt, TyS, TypeckResults};
+use rustc_middle::ty::{self, FloatTy, InferTy, IntTy, Ty, TyCtxt, TyS, TypeAndMut, TypeckResults, UintTy};
+use rustc_semver::RustcVersion;
 use rustc_session::{declare_lint_pass, declare_tool_lint, impl_lint_pass};
 use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::source_map::Span;
@@ -30,11 +30,13 @@ use rustc_typeck::hir_ty_to_ty;
 
 use crate::consts::{constant, Constant};
 use crate::utils::paths;
+use crate::utils::sugg::Sugg;
 use crate::utils::{
-    clip, comparisons, differing_macro_contexts, higher, in_constant, indent_of, int_bits, is_type_diagnostic_item,
-    last_path_segment, match_def_path, match_path, method_chain_args, multispan_sugg, numeric_literal::NumericLiteral,
-    qpath_res, reindent_multiline, sext, snippet, snippet_opt, snippet_with_applicability, snippet_with_macro_callsite,
-    span_lint, span_lint_and_help, span_lint_and_sugg, span_lint_and_then, unsext,
+    clip, comparisons, differing_macro_contexts, higher, in_constant, indent_of, int_bits, is_hir_ty_cfg_dependant,
+    is_type_diagnostic_item, last_path_segment, match_def_path, match_path, meets_msrv, method_chain_args,
+    multispan_sugg, numeric_literal::NumericLiteral, reindent_multiline, sext, snippet, snippet_opt,
+    snippet_with_applicability, snippet_with_macro_callsite, span_lint, span_lint_and_help, span_lint_and_sugg,
+    span_lint_and_then, unsext,
 };
 
 declare_clippy_lint! {
@@ -73,7 +75,7 @@ declare_clippy_lint! {
     /// **Why is this bad?** `Vec` already keeps its contents in a separate area on
     /// the heap. So if you `Box` its contents, you just add another level of indirection.
     ///
-    /// **Known problems:** Vec<Box<T: Sized>> makes sense if T is a large type (see #3530,
+    /// **Known problems:** Vec<Box<T: Sized>> makes sense if T is a large type (see [#3530](https://github.com/rust-lang/rust-clippy/issues/3530),
     /// 1st comment).
     ///
     /// **Example:**
@@ -258,7 +260,7 @@ impl<'tcx> LateLintPass<'tcx> for Types {
     fn check_fn(&mut self, cx: &LateContext<'_>, _: FnKind<'_>, decl: &FnDecl<'_>, _: &Body<'_>, _: Span, id: HirId) {
         // Skip trait implementations; see issue #605.
         if let Some(hir::Node::Item(item)) = cx.tcx.hir().find(cx.tcx.hir().get_parent_item(id)) {
-            if let ItemKind::Impl { of_trait: Some(_), .. } = item.kind {
+            if let ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }) = item.kind {
                 return;
             }
         }
@@ -296,7 +298,7 @@ fn match_type_parameter(cx: &LateContext<'_>, qpath: &QPath<'_>, path: &[&str]) 
             _ => None,
         });
         if let TyKind::Path(ref qpath) = ty.kind;
-        if let Some(did) = qpath_res(cx, qpath, ty.hir_id).opt_def_id();
+        if let Some(did) = cx.qpath_res(qpath, ty.hir_id).opt_def_id();
         if match_def_path(cx, did, path);
         then {
             return Some(ty.span);
@@ -363,7 +365,7 @@ impl Types {
         match hir_ty.kind {
             TyKind::Path(ref qpath) if !is_local => {
                 let hir_id = hir_ty.hir_id;
-                let res = qpath_res(cx, qpath, hir_id);
+                let res = cx.qpath_res(qpath, hir_id);
                 if let Some(def_id) = res.opt_def_id() {
                     if Some(def_id) == cx.tcx.lang_items().owned_box() {
                         if let Some(span) = match_borrows_parameter(cx, qpath) {
@@ -533,7 +535,7 @@ impl Types {
                             });
                             // ty is now _ at this point
                             if let TyKind::Path(ref ty_qpath) = ty.kind;
-                            let res = qpath_res(cx, ty_qpath, ty.hir_id);
+                            let res = cx.qpath_res(ty_qpath, ty.hir_id);
                             if let Some(def_id) = res.opt_def_id();
                             if Some(def_id) == cx.tcx.lang_items().owned_box();
                             // At this point, we know ty is Box<T>, now get T
@@ -650,7 +652,7 @@ impl Types {
         match mut_ty.ty.kind {
             TyKind::Path(ref qpath) => {
                 let hir_id = mut_ty.ty.hir_id;
-                let def = qpath_res(cx, qpath, hir_id);
+                let def = cx.qpath_res(qpath, hir_id);
                 if_chain! {
                     if let Some(def_id) = def.opt_def_id();
                     if Some(def_id) == cx.tcx.lang_items().owned_box();
@@ -737,7 +739,7 @@ fn is_any_trait(t: &hir::Ty<'_>) -> bool {
 
 fn get_bounds_if_impl_trait<'tcx>(cx: &LateContext<'tcx>, qpath: &QPath<'_>, id: HirId) -> Option<GenericBounds<'tcx>> {
     if_chain! {
-        if let Some(did) = qpath_res(cx, qpath, id).opt_def_id();
+        if let Some(did) = cx.qpath_res(qpath, id).opt_def_id();
         if let Some(Node::GenericParam(generic_param)) = cx.tcx.hir().get_if_local(did);
         if let GenericParamKind::Type { synthetic, .. } = generic_param.kind;
         if synthetic == Some(SyntheticTyParamKind::ImplTrait);
@@ -1277,8 +1279,8 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for casts from a less-strictly-aligned pointer to a
-    /// more-strictly-aligned pointer
+    /// **What it does:** Checks for casts, using `as` or `pointer::cast`,
+    /// from a less-strictly-aligned pointer to a more-strictly-aligned pointer
     ///
     /// **Why is this bad?** Dereferencing the resulting pointer may be undefined
     /// behavior.
@@ -1291,6 +1293,9 @@ declare_clippy_lint! {
     /// ```rust
     /// let _ = (&1u8 as *const u8) as *const u16;
     /// let _ = (&mut 1u8 as *mut u8) as *mut u16;
+    ///
+    /// (&1u8 as *const u8).cast::<u16>();
+    /// (&mut 1u8 as *mut u8).cast::<u16>();
     /// ```
     pub CAST_PTR_ALIGNMENT,
     pedantic,
@@ -1632,12 +1637,8 @@ impl<'tcx> LateLintPass<'tcx> for Casts {
             return;
         }
         if let ExprKind::Cast(ref ex, cast_to) = expr.kind {
-            if let TyKind::Path(QPath::Resolved(_, path)) = cast_to.kind {
-                if let Res::Def(_, def_id) = path.res {
-                    if cx.tcx.has_attr(def_id, sym::cfg) || cx.tcx.has_attr(def_id, sym::cfg_attr) {
-                        return;
-                    }
-                }
+            if is_hir_ty_cfg_dependant(cx, cast_to) {
+                return;
             }
             let (cast_from, cast_to) = (cx.typeck_results().expr_ty(ex), cx.typeck_results().expr_ty(expr));
             lint_fn_to_numeric_cast(cx, expr, ex, cast_from, cast_to);
@@ -1687,6 +1688,19 @@ impl<'tcx> LateLintPass<'tcx> for Casts {
             }
 
             lint_cast_ptr_alignment(cx, expr, cast_from, cast_to);
+        } else if let ExprKind::MethodCall(method_path, _, args, _) = expr.kind {
+            if_chain! {
+            if method_path.ident.name == sym!(cast);
+            if let Some(generic_args) = method_path.args;
+            if let [GenericArg::Type(cast_to)] = generic_args.args;
+            // There probably is no obvious reason to do this, just to be consistent with `as` cases.
+            if !is_hir_ty_cfg_dependant(cx, cast_to);
+            then {
+                let (cast_from, cast_to) =
+                    (cx.typeck_results().expr_ty(&args[0]), cx.typeck_results().expr_ty(expr));
+                lint_cast_ptr_alignment(cx, expr, cast_from, cast_to);
+            }
+            }
         }
     }
 }
@@ -2556,21 +2570,16 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
         }
 
         match item.kind {
-            ItemKind::Impl {
-                ref generics,
-                self_ty: ref ty,
-                ref items,
-                ..
-            } => {
+            ItemKind::Impl(ref impl_) => {
                 let mut vis = ImplicitHasherTypeVisitor::new(cx);
-                vis.visit_ty(ty);
+                vis.visit_ty(impl_.self_ty);
 
                 for target in &vis.found {
                     if differing_macro_contexts(item.span, target.span()) {
                         return;
                     }
 
-                    let generics_suggestion_span = generics.span.substitute_dummy({
+                    let generics_suggestion_span = impl_.generics.span.substitute_dummy({
                         let pos = snippet_opt(cx, item.span.until(target.span()))
                             .and_then(|snip| Some(item.span.lo() + BytePos(snip.find("impl")? as u32 + 4)));
                         if let Some(pos) = pos {
@@ -2581,7 +2590,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                     });
 
                     let mut ctr_vis = ImplicitHasherConstructorVisitor::new(cx, target);
-                    for item in items.iter().map(|item| cx.tcx.hir().impl_item(item.id)) {
+                    for item in impl_.items.iter().map(|item| cx.tcx.hir().impl_item(item.id)) {
                         ctr_vis.visit_impl_item(item);
                     }
 
@@ -2594,7 +2603,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                             target.type_name()
                         ),
                         move |diag| {
-                            suggestion(cx, diag, generics.span, generics_suggestion_span, target, ctr_vis);
+                            suggestion(cx, diag, impl_.generics.span, generics_suggestion_span, target, ctr_vis);
                         },
                     );
                 }
@@ -2875,4 +2884,94 @@ impl<'tcx> LateLintPass<'tcx> for RefToMut {
             }
         }
     }
+}
+
+const PTR_AS_PTR_MSRV: RustcVersion = RustcVersion::new(1, 38, 0);
+
+declare_clippy_lint! {
+    /// **What it does:**
+    /// Checks for `as` casts between raw pointers without changing its mutability,
+    /// namely `*const T` to `*const U` and `*mut T` to `*mut U`.
+    ///
+    /// **Why is this bad?**
+    /// Though `as` casts between raw pointers is not terrible, `pointer::cast` is safer because
+    /// it cannot accidentally change the pointer's mutability nor cast the pointer to other types like `usize`.
+    ///
+    /// **Known problems:** None.
+    ///
+    /// **Example:**
+    ///
+    /// ```rust
+    /// let ptr: *const u32 = &42_u32;
+    /// let mut_ptr: *mut u32 = &mut 42_u32;
+    /// let _ = ptr as *const i32;
+    /// let _ = mut_ptr as *mut i32;
+    /// ```
+    /// Use instead:
+    /// ```rust
+    /// let ptr: *const u32 = &42_u32;
+    /// let mut_ptr: *mut u32 = &mut 42_u32;
+    /// let _ = ptr.cast::<i32>();
+    /// let _ = mut_ptr.cast::<i32>();
+    /// ```
+    pub PTR_AS_PTR,
+    pedantic,
+    "casting using `as` from and to raw pointers that doesn't change its mutability, where `pointer::cast` could take the place of `as`"
+}
+
+pub struct PtrAsPtr {
+    msrv: Option<RustcVersion>,
+}
+
+impl PtrAsPtr {
+    #[must_use]
+    pub fn new(msrv: Option<RustcVersion>) -> Self {
+        Self { msrv }
+    }
+}
+
+impl_lint_pass!(PtrAsPtr => [PTR_AS_PTR]);
+
+impl<'tcx> LateLintPass<'tcx> for PtrAsPtr {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
+        if !meets_msrv(self.msrv.as_ref(), &PTR_AS_PTR_MSRV) {
+            return;
+        }
+
+        if expr.span.from_expansion() {
+            return;
+        }
+
+        if_chain! {
+            if let ExprKind::Cast(cast_expr, cast_to_hir_ty) = expr.kind;
+            let (cast_from, cast_to) = (cx.typeck_results().expr_ty(cast_expr), cx.typeck_results().expr_ty(expr));
+            if let ty::RawPtr(TypeAndMut { mutbl: from_mutbl, .. }) = cast_from.kind();
+            if let ty::RawPtr(TypeAndMut { ty: to_pointee_ty, mutbl: to_mutbl }) = cast_to.kind();
+            if matches!((from_mutbl, to_mutbl),
+                (Mutability::Not, Mutability::Not) | (Mutability::Mut, Mutability::Mut));
+            // The `U` in `pointer::cast` have to be `Sized`
+            // as explained here: https://github.com/rust-lang/rust/issues/60602.
+            if to_pointee_ty.is_sized(cx.tcx.at(expr.span), cx.param_env);
+            then {
+                let mut applicability = Applicability::MachineApplicable;
+                let cast_expr_sugg = Sugg::hir_with_applicability(cx, cast_expr, "_", &mut applicability);
+                let turbofish = match &cast_to_hir_ty.kind {
+                        TyKind::Infer => Cow::Borrowed(""),
+                        TyKind::Ptr(mut_ty) if matches!(mut_ty.ty.kind, TyKind::Infer) => Cow::Borrowed(""),
+                        _ => Cow::Owned(format!("::<{}>", to_pointee_ty)),
+                    };
+                span_lint_and_sugg(
+                    cx,
+                    PTR_AS_PTR,
+                    expr.span,
+                    "`as` casting between raw pointers without changing its mutability",
+                    "try `pointer::cast`, a safer alternative",
+                    format!("{}.cast{}()", cast_expr_sugg.maybe_par(), turbofish),
+                    applicability,
+                );
+            }
+        }
+    }
+
+    extract_msrv_attr!(LateContext);
 }

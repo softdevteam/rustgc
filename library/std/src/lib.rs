@@ -175,7 +175,7 @@
 //! [`str`]: prim@str
 //! [`mpsc`]: sync::mpsc
 //! [`std::cmp`]: cmp
-//! [`std::slice`]: slice
+//! [`std::slice`]: mod@slice
 //! [`use std::env`]: env/index.html
 //! [`use`]: ../book/ch07-02-defining-modules-to-control-scope-and-privacy.html
 //! [crates.io]: https://crates.io
@@ -185,7 +185,8 @@
 //! [other]: #what-is-in-the-standard-library-documentation
 //! [primitive types]: ../book/ch03-02-data-types.html
 //! [rust-discord]: https://discord.gg/rust-lang
-
+#![cfg_attr(not(bootstrap), doc = "[array]: prim@array")]
+#![cfg_attr(not(bootstrap), doc = "[slice]: prim@slice")]
 #![cfg_attr(not(feature = "restricted-std"), stable(feature = "rust1", since = "1.0.0"))]
 #![cfg_attr(feature = "restricted-std", unstable(feature = "restricted_std", issue = "none"))]
 #![doc(
@@ -223,6 +224,7 @@
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
+#![feature(async_stream)]
 #![feature(arbitrary_self_types)]
 #![feature(array_error_internals)]
 #![feature(asm)]
@@ -257,6 +259,7 @@
 #![feature(dropck_eyepatch)]
 #![feature(duration_constants)]
 #![feature(duration_zero)]
+#![feature(edition_panic)]
 #![feature(exact_size_is_empty)]
 #![feature(exhaustive_patterns)]
 #![feature(extend_one)]
@@ -288,8 +291,7 @@
 #![feature(nll)]
 #![feature(nonnull_slice_from_raw_parts)]
 #![feature(once_cell)]
-#![cfg_attr(bootstrap, feature(optin_builtin_traits))]
-#![cfg_attr(not(bootstrap), feature(auto_traits))]
+#![feature(auto_traits)]
 #![feature(or_patterns)]
 #![feature(panic_info_message)]
 #![feature(panic_internals)]
@@ -298,17 +300,14 @@
 #![feature(prelude_import)]
 #![feature(ptr_internals)]
 #![feature(raw)]
-#![feature(raw_ref_macros)]
 #![feature(ready_macro)]
 #![feature(rustc_attrs)]
 #![feature(rustc_private)]
 #![feature(shrink_to)]
 #![feature(slice_concat_ext)]
-#![feature(slice_fill)]
 #![feature(slice_internals)]
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
-#![feature(slice_strip)]
 #![feature(staged_api)]
 #![feature(std_internals)]
 #![feature(stdsimd)]
@@ -325,7 +324,6 @@
 #![feature(try_reserve)]
 #![feature(unboxed_closures)]
 #![feature(unsafe_block_in_unsafe_fn)]
-#![feature(unsafe_cell_get_mut)]
 #![feature(unsafe_cell_raw_get)]
 #![feature(unwind_attributes)]
 #![feature(vec_into_raw_parts)]
@@ -410,23 +408,31 @@ pub use core::cmp;
 pub use core::convert;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::default;
+#[stable(feature = "futures_api", since = "1.36.0")]
+pub use core::future;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::hash;
 #[stable(feature = "core_hint", since = "1.27.0")]
 pub use core::hint;
 #[stable(feature = "i128", since = "1.26.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::i128;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::i16;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::i32;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::i64;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::i8;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::intrinsics;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::isize;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::iter;
@@ -446,17 +452,25 @@ pub use core::ptr;
 pub use core::raw;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::result;
+#[unstable(feature = "async_stream", issue = "79024")]
+pub use core::stream;
 #[stable(feature = "i128", since = "1.26.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::u128;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::u16;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::u32;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::u64;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::u8;
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
 pub use core::usize;
 
 pub mod f32;
@@ -498,9 +512,6 @@ pub mod task {
     #[unstable(feature = "wake_trait", issue = "69912")]
     pub use alloc::task::*;
 }
-
-#[stable(feature = "futures_api", since = "1.36.0")]
-pub mod future;
 
 // Platform-abstraction modules
 #[macro_use]

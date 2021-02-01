@@ -28,7 +28,7 @@ use rustc_span::source_map::{FileLoader, MultiSpan, RealFileLoader, SourceMap, S
 use rustc_span::{sym, SourceFileHashAlgorithm, Symbol};
 use rustc_target::asm::InlineAsmArch;
 use rustc_target::spec::{CodeModel, PanicStrategy, RelocModel, RelroLevel};
-use rustc_target::spec::{Target, TargetTriple, TlsModel};
+use rustc_target::spec::{SplitDebuginfo, Target, TargetTriple, TlsModel};
 
 use std::cell::{self, RefCell};
 use std::env;
@@ -796,6 +796,22 @@ impl Session {
         self.opts.debugging_opts.tls_model.unwrap_or(self.target.tls_model)
     }
 
+    pub fn is_wasi_reactor(&self) -> bool {
+        self.target.options.os == "wasi"
+            && matches!(
+                self.opts.debugging_opts.wasi_exec_model,
+                Some(config::WasiExecModel::Reactor)
+            )
+    }
+
+    pub fn split_debuginfo(&self) -> SplitDebuginfo {
+        self.opts.cg.split_debuginfo.unwrap_or(self.target.split_debuginfo)
+    }
+
+    pub fn target_can_use_split_dwarf(&self) -> bool {
+        !self.target.is_like_windows && !self.target.is_like_osx
+    }
+
     pub fn must_not_eliminate_frame_pointers(&self) -> bool {
         // "mcount" function relies on stack pointer.
         // See <https://sourceware.org/binutils/docs/gprof/Implementation.html>.
@@ -1076,6 +1092,11 @@ impl Session {
         self.opts.edition >= Edition::Edition2018
     }
 
+    /// Are we allowed to use features from the Rust 2021 edition?
+    pub fn rust_2021(&self) -> bool {
+        self.opts.edition >= Edition::Edition2021
+    }
+
     pub fn edition(&self) -> Edition {
         self.opts.edition
     }
@@ -1323,7 +1344,8 @@ pub fn build_session(
         None
     };
 
-    let parse_sess = ParseSess::with_span_handler(span_diagnostic, source_map);
+    let mut parse_sess = ParseSess::with_span_handler(span_diagnostic, source_map);
+    parse_sess.assume_incomplete_release = sopts.debugging_opts.assume_incomplete_release;
     let sysroot = match &sopts.maybe_sysroot {
         Some(sysroot) => sysroot.clone(),
         None => filesearch::get_or_default_sysroot(),
@@ -1345,7 +1367,7 @@ pub fn build_session(
 
     let optimization_fuel_crate = sopts.debugging_opts.fuel.as_ref().map(|i| i.0.clone());
     let optimization_fuel = Lock::new(OptimizationFuel {
-        remaining: sopts.debugging_opts.fuel.as_ref().map(|i| i.1).unwrap_or(0),
+        remaining: sopts.debugging_opts.fuel.as_ref().map_or(0, |i| i.1),
         out_of_fuel: false,
     });
     let print_fuel_crate = sopts.debugging_opts.print_fuel.clone();
@@ -1517,6 +1539,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     const ASAN_SUPPORTED_TARGETS: &[&str] = &[
+        "aarch64-apple-darwin",
         "aarch64-fuchsia",
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
@@ -1524,11 +1547,16 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         "x86_64-unknown-freebsd",
         "x86_64-unknown-linux-gnu",
     ];
-    const LSAN_SUPPORTED_TARGETS: &[&str] =
-        &["aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"];
+    const LSAN_SUPPORTED_TARGETS: &[&str] = &[
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ];
     const MSAN_SUPPORTED_TARGETS: &[&str] =
         &["aarch64-unknown-linux-gnu", "x86_64-unknown-freebsd", "x86_64-unknown-linux-gnu"];
     const TSAN_SUPPORTED_TARGETS: &[&str] = &[
+        "aarch64-apple-darwin",
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "x86_64-unknown-freebsd",

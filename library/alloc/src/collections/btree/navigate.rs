@@ -5,14 +5,14 @@ use core::ops::RangeBounds;
 use core::ptr;
 
 use super::node::{marker, ForceResult::*, Handle, NodeRef};
-use super::search::{self, SearchResult};
+use super::search::SearchResult;
 use super::unwrap_unchecked;
 
 /// Finds the leaf edges delimiting a specified range in or underneath a node.
 ///
 /// The result is meaningful only if the tree is ordered by key, like the tree
 /// in a `BTreeMap` is.
-fn range_search<BorrowType, K, V, Q, R>(
+fn range_search<BorrowType: marker::BorrowType, K, V, Q, R>(
     root1: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
     root2: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
     range: R,
@@ -25,7 +25,12 @@ where
     K: Borrow<Q>,
     R: RangeBounds<Q>,
 {
-    match (range.start_bound(), range.end_bound()) {
+    // WARNING: Inlining these variables would be unsound (#81138)
+    // We assume the bounds reported by `range` remain the same, but
+    // an adversarial implementation could change between calls
+    let start = range.start_bound();
+    let end = range.end_bound();
+    match (start, end) {
         (Excluded(s), Excluded(e)) if s == e => {
             panic!("range start and end are equal and excluded in BTreeMap")
         }
@@ -41,15 +46,16 @@ where
     let mut max_found = false;
 
     loop {
-        let front = match (min_found, range.start_bound()) {
-            (false, Included(key)) => match search::search_node(min_node, key) {
+        // Using `range` again would be unsound (#81138)
+        let front = match (min_found, start) {
+            (false, Included(key)) => match min_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     min_found = true;
                     kv.left_edge()
                 }
                 SearchResult::GoDown(edge) => edge,
             },
-            (false, Excluded(key)) => match search::search_node(min_node, key) {
+            (false, Excluded(key)) => match min_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     min_found = true;
                     kv.right_edge()
@@ -61,15 +67,16 @@ where
             (_, Unbounded) => min_node.first_edge(),
         };
 
-        let back = match (max_found, range.end_bound()) {
-            (false, Included(key)) => match search::search_node(max_node, key) {
+        // Using `range` again would be unsound (#81138)
+        let back = match (max_found, end) {
+            (false, Included(key)) => match max_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     max_found = true;
                     kv.right_edge()
                 }
                 SearchResult::GoDown(edge) => edge,
             },
-            (false, Excluded(key)) => match search::search_node(max_node, key) {
+            (false, Excluded(key)) => match max_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     max_found = true;
                     kv.left_edge()
@@ -98,7 +105,7 @@ where
 }
 
 /// Equivalent to `range_search(k, v, ..)` but without the `Ord` bound.
-fn full_range<BorrowType, K, V>(
+fn full_range<BorrowType: marker::BorrowType, K, V>(
     root1: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
     root2: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
 ) -> (
@@ -195,15 +202,15 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::ValMut<'a>, K, V, marker::LeafOrInternal>
     }
 }
 
-impl<K, V> NodeRef<marker::Owned, K, V, marker::LeafOrInternal> {
+impl<K, V> NodeRef<marker::Dying, K, V, marker::LeafOrInternal> {
     /// Splits a unique reference into a pair of leaf edges delimiting the full range of the tree.
     /// The results are non-unique references allowing massively destructive mutation, so must be
     /// used with the utmost care.
     pub fn full_range(
         self,
     ) -> (
-        Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>,
-        Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>,
+        Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>,
+        Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>,
     ) {
         // We duplicate the root NodeRef here -- we will never access it in a way
         // that overlaps references obtained from the root.
@@ -212,7 +219,9 @@ impl<K, V> NodeRef<marker::Owned, K, V, marker::LeafOrInternal> {
     }
 }
 
-impl<BorrowType, K, V> Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> {
+impl<BorrowType: marker::BorrowType, K, V>
+    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>
+{
     /// Given a leaf edge handle, returns [`Result::Ok`] with a handle to the neighboring KV
     /// on the right side, which is either in the same leaf node or in an ancestor node.
     /// If the leaf edge is the last one in the tree, returns [`Result::Err`] with the root node.
@@ -256,7 +265,9 @@ impl<BorrowType, K, V> Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::E
     }
 }
 
-impl<BorrowType, K, V> Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge> {
+impl<BorrowType: marker::BorrowType, K, V>
+    Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>
+{
     /// Given an internal edge handle, returns [`Result::Ok`] with a handle to the neighboring KV
     /// on the right side, which is either in the same internal node or in an ancestor node.
     /// If the internal edge is the last one in the tree, returns [`Result::Err`] with the root node.
@@ -290,8 +301,8 @@ macro_rules! def_next_kv_uncheched_dealloc {
         /// - The node carrying the next KV returned must not have been deallocated by a
         ///   previous call on any handle obtained for this tree.
         unsafe fn $name <K, V>(
-            leaf_edge: Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>,
-        ) -> Handle<NodeRef<marker::Owned, K, V, marker::LeafOrInternal>, marker::KV> {
+            leaf_edge: Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>,
+        ) -> Handle<NodeRef<marker::Dying, K, V, marker::LeafOrInternal>, marker::KV> {
             let mut edge = leaf_edge.forget_node_type();
             loop {
                 edge = match edge.$adjacent_kv() {
@@ -371,7 +382,7 @@ impl<'a, K, V> Handle<NodeRef<marker::ValMut<'a>, K, V, marker::Leaf>, marker::E
     }
 }
 
-impl<K, V> Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge> {
+impl<K, V> Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge> {
     /// Moves the leaf edge handle to the next leaf edge and returns the key and value
     /// in between, deallocating any node left behind while leaving the corresponding
     /// edge in its parent node dangling.
@@ -415,7 +426,7 @@ impl<K, V> Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge> {
     }
 }
 
-impl<BorrowType, K, V> NodeRef<BorrowType, K, V, marker::LeafOrInternal> {
+impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::LeafOrInternal> {
     /// Returns the leftmost leaf edge in or underneath a node - in other words, the edge
     /// you need first when navigating forward (or last when navigating backward).
     #[inline]
@@ -496,7 +507,9 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> 
     }
 }
 
-impl<BorrowType, K, V> Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, marker::KV> {
+impl<BorrowType: marker::BorrowType, K, V>
+    Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, marker::KV>
+{
     /// Returns the leaf edge closest to a KV for forward navigation.
     pub fn next_leaf_edge(self) -> Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> {
         match self.force() {

@@ -69,16 +69,16 @@ impl IntercrateAmbiguityCause {
 
     pub fn intercrate_ambiguity_hint(&self) -> String {
         match self {
-            &IntercrateAmbiguityCause::DownstreamCrate { ref trait_desc, ref self_desc } => {
-                let self_desc = if let &Some(ref ty) = self_desc {
+            IntercrateAmbiguityCause::DownstreamCrate { trait_desc, self_desc } => {
+                let self_desc = if let Some(ty) = self_desc {
                     format!(" for type `{}`", ty)
                 } else {
                     String::new()
                 };
                 format!("downstream crates may implement trait `{}`{}", trait_desc, self_desc)
             }
-            &IntercrateAmbiguityCause::UpstreamCrateUpdate { ref trait_desc, ref self_desc } => {
-                let self_desc = if let &Some(ref ty) = self_desc {
+            IntercrateAmbiguityCause::UpstreamCrateUpdate { trait_desc, self_desc } => {
+                let self_desc = if let Some(ty) = self_desc {
                     format!(" for type `{}`", ty)
                 } else {
                     String::new()
@@ -89,7 +89,7 @@ impl IntercrateAmbiguityCause {
                     trait_desc, self_desc
                 )
             }
-            &IntercrateAmbiguityCause::ReservationImpl { ref message } => message.clone(),
+            IntercrateAmbiguityCause::ReservationImpl { message } => message.clone(),
         }
     }
 }
@@ -450,16 +450,16 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         let result = ensure_sufficient_stack(|| {
-            let bound_predicate = obligation.predicate.bound_atom();
+            let bound_predicate = obligation.predicate.kind();
             match bound_predicate.skip_binder() {
-                ty::PredicateAtom::Trait(t, _) => {
+                ty::PredicateKind::Trait(t, _) => {
                     let t = bound_predicate.rebind(t);
                     debug_assert!(!t.has_escaping_bound_vars());
                     let obligation = obligation.with(t);
                     self.evaluate_trait_predicate_recursively(previous_stack, obligation)
                 }
 
-                ty::PredicateAtom::Subtype(p) => {
+                ty::PredicateKind::Subtype(p) => {
                     let p = bound_predicate.rebind(p);
                     // Does this code ever run?
                     match self.infcx.subtype_predicate(&obligation.cause, obligation.param_env, p) {
@@ -475,7 +475,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateAtom::WellFormed(arg) => match wf::obligations(
+                ty::PredicateKind::WellFormed(arg) => match wf::obligations(
                     self.infcx,
                     obligation.param_env,
                     obligation.cause.body_id,
@@ -490,12 +490,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     None => Ok(EvaluatedToAmbig),
                 },
 
-                ty::PredicateAtom::TypeOutlives(..) | ty::PredicateAtom::RegionOutlives(..) => {
+                ty::PredicateKind::TypeOutlives(..) | ty::PredicateKind::RegionOutlives(..) => {
                     // We do not consider region relationships when evaluating trait matches.
                     Ok(EvaluatedToOkModuloRegions)
                 }
 
-                ty::PredicateAtom::ObjectSafe(trait_def_id) => {
+                ty::PredicateKind::ObjectSafe(trait_def_id) => {
                     if self.tcx().is_object_safe(trait_def_id) {
                         Ok(EvaluatedToOk)
                     } else {
@@ -503,7 +503,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateAtom::Projection(data) => {
+                ty::PredicateKind::Projection(data) => {
                     let data = bound_predicate.rebind(data);
                     let project_obligation = obligation.with(data);
                     match project::poly_project_and_unify_type(self, &project_obligation) {
@@ -524,7 +524,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateAtom::ClosureKind(_, closure_substs, kind) => {
+                ty::PredicateKind::ClosureKind(_, closure_substs, kind) => {
                     match self.infcx.closure_kind(closure_substs) {
                         Some(closure_kind) => {
                             if closure_kind.extends(kind) {
@@ -537,7 +537,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateAtom::ConstEvaluatable(def_id, substs) => {
+                ty::PredicateKind::ConstEvaluatable(def_id, substs) => {
                     match const_evaluatable::is_const_evaluatable(
                         self.infcx,
                         def_id,
@@ -551,7 +551,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateAtom::ConstEquate(c1, c2) => {
+                ty::PredicateKind::ConstEquate(c1, c2) => {
                     debug!(?c1, ?c2, "evaluate_predicate_recursively: equating consts");
 
                     let evaluate = |c: &'tcx ty::Const<'tcx>| {
@@ -594,7 +594,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         }
                     }
                 }
-                ty::PredicateAtom::TypeWellFormedFromEnv(..) => {
+                ty::PredicateKind::TypeWellFormedFromEnv(..) => {
                     bug!("TypeWellFormedFromEnv is only used for chalk")
                 }
             }
@@ -841,8 +841,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     }
 
     fn coinductive_predicate(&self, predicate: ty::Predicate<'tcx>) -> bool {
-        let result = match predicate.skip_binders() {
-            ty::PredicateAtom::Trait(ref data, _) => self.tcx().trait_is_auto(data.def_id()),
+        let result = match predicate.kind().skip_binder() {
+            ty::PredicateKind::Trait(ref data, _) => self.tcx().trait_is_auto(data.def_id()),
             _ => false,
         };
         debug!(?predicate, ?result, "coinductive_predicate");
@@ -1170,8 +1170,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             .iter()
             .enumerate()
             .filter_map(|(idx, bound)| {
-                let bound_predicate = bound.bound_atom();
-                if let ty::PredicateAtom::Trait(pred, _) = bound_predicate.skip_binder() {
+                let bound_predicate = bound.kind();
+                if let ty::PredicateKind::Trait(pred, _) = bound_predicate.skip_binder() {
                     let bound = bound_predicate.rebind(pred.trait_ref);
                     if self.infcx.probe(|_| {
                         match self.match_normalize_trait_ref(
@@ -1276,7 +1276,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         // FIXME(generic_associated_types): Compare the whole projections
         let data_poly_trait_ref = projection_ty.map_bound(|proj| proj.trait_ref(self.tcx()));
-        let obligation_poly_trait_ref = obligation_trait_ref.to_poly_trait_ref();
+        let obligation_poly_trait_ref = ty::Binder::dummy(*obligation_trait_ref);
         self.infcx
             .at(&obligation.cause, obligation.param_env)
             .sup(obligation_poly_trait_ref, data_poly_trait_ref)
@@ -1648,8 +1648,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     /// Bar<i32> where struct Bar<T> { x: T, y: u32 } -> [i32, u32]
     /// Zed<i32> where enum Zed { A(T), B(u32) } -> [i32, u32]
     /// ```
-    fn constituent_types_for_ty(&self, t: Ty<'tcx>) -> Vec<Ty<'tcx>> {
-        match *t.kind() {
+    fn constituent_types_for_ty(&self, t: ty::Binder<Ty<'tcx>>) -> ty::Binder<Vec<Ty<'tcx>>> {
+        match *t.skip_binder().kind() {
             ty::Uint(_)
             | ty::Int(_)
             | ty::Bool
@@ -1660,7 +1660,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::Error(_)
             | ty::Infer(ty::IntVar(_) | ty::FloatVar(_))
             | ty::Never
-            | ty::Char => Vec::new(),
+            | ty::Char => ty::Binder::dummy(Vec::new()),
 
             ty::Placeholder(..)
             | ty::Dynamic(..)
@@ -1673,44 +1673,44 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             }
 
             ty::RawPtr(ty::TypeAndMut { ty: element_ty, .. }) | ty::Ref(_, element_ty, _) => {
-                vec![element_ty]
+                t.rebind(vec![element_ty])
             }
 
-            ty::Array(element_ty, _) | ty::Slice(element_ty) => vec![element_ty],
+            ty::Array(element_ty, _) | ty::Slice(element_ty) => t.rebind(vec![element_ty]),
 
             ty::Tuple(ref tys) => {
                 // (T1, ..., Tn) -- meets any bound that all of T1...Tn meet
-                tys.iter().map(|k| k.expect_ty()).collect()
+                t.rebind(tys.iter().map(|k| k.expect_ty()).collect())
             }
 
             ty::Closure(_, ref substs) => {
                 let ty = self.infcx.shallow_resolve(substs.as_closure().tupled_upvars_ty());
-                vec![ty]
+                t.rebind(vec![ty])
             }
 
             ty::Generator(_, ref substs, _) => {
                 let ty = self.infcx.shallow_resolve(substs.as_generator().tupled_upvars_ty());
                 let witness = substs.as_generator().witness();
-                vec![ty].into_iter().chain(iter::once(witness)).collect()
+                t.rebind(vec![ty].into_iter().chain(iter::once(witness)).collect())
             }
 
             ty::GeneratorWitness(types) => {
-                // This is sound because no regions in the witness can refer to
-                // the binder outside the witness. So we'll effectivly reuse
-                // the implicit binder around the witness.
-                types.skip_binder().to_vec()
+                debug_assert!(!types.has_escaping_bound_vars());
+                types.map_bound(|types| types.to_vec())
             }
 
             // For `PhantomData<T>`, we pass `T`.
-            ty::Adt(def, substs) if def.is_phantom_data() => substs.types().collect(),
+            ty::Adt(def, substs) if def.is_phantom_data() => t.rebind(substs.types().collect()),
 
-            ty::Adt(def, substs) => def.all_fields().map(|f| f.ty(self.tcx(), substs)).collect(),
+            ty::Adt(def, substs) => {
+                t.rebind(def.all_fields().map(|f| f.ty(self.tcx(), substs)).collect())
+            }
 
             ty::Opaque(def_id, substs) => {
                 // We can resolve the `impl Trait` to its concrete type,
                 // which enforces a DAG between the functions requiring
                 // the auto trait bounds in question.
-                vec![self.tcx().type_of(def_id).subst(self.tcx(), substs)]
+                t.rebind(vec![self.tcx().type_of(def_id).subst(self.tcx(), substs)])
             }
         }
     }
@@ -1738,10 +1738,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         // 3. Re-bind the regions back to `for<'a> &'a i32 : Copy`
 
         types
+            .as_ref()
             .skip_binder() // binder moved -\
             .iter()
             .flat_map(|ty| {
-                let ty: ty::Binder<Ty<'tcx>> = ty::Binder::bind(ty); // <----/
+                let ty: ty::Binder<Ty<'tcx>> = types.rebind(ty); // <----/
 
                 self.infcx.commit_unconditionally(|_| {
                     let placeholder_ty = self.infcx.replace_bound_vars_with_placeholders(ty);

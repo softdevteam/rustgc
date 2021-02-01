@@ -7,20 +7,20 @@ use rustc_session::config::{build_configuration, build_session_options, to_crate
 use rustc_session::config::{rustc_optgroups, ErrorOutputType, ExternLocation, Options, Passes};
 use rustc_session::config::{CFGuard, ExternEntry, LinkerPluginLto, LtoCli, SwitchWithOptPath};
 use rustc_session::config::{
-    Externs, OutputType, OutputTypes, SanitizerSet, SymbolManglingVersion,
+    Externs, OutputType, OutputTypes, SanitizerSet, SymbolManglingVersion, WasiExecModel,
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
-use rustc_session::utils::NativeLibKind;
+use rustc_session::utils::{CanonicalizedPath, NativeLibKind};
 use rustc_session::{build_session, getopts, DiagnosticOutput, Session};
 use rustc_span::edition::{Edition, DEFAULT_EDITION};
 use rustc_span::symbol::sym;
 use rustc_span::SourceFileHashAlgorithm;
 use rustc_target::spec::{CodeModel, LinkerFlavor, MergeFunctions, PanicStrategy};
-use rustc_target::spec::{RelocModel, RelroLevel, TlsModel};
+use rustc_target::spec::{RelocModel, RelroLevel, SplitDebuginfo, TlsModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 type CfgSpecs = FxHashSet<(String, Option<String>)>;
 
@@ -50,7 +50,8 @@ where
     S: Into<String>,
     I: IntoIterator<Item = S>,
 {
-    let locations: BTreeSet<_> = locations.into_iter().map(|s| s.into()).collect();
+    let locations: BTreeSet<CanonicalizedPath> =
+        locations.into_iter().map(|s| CanonicalizedPath::new(Path::new(&s.into()))).collect();
 
     ExternEntry {
         location: ExternLocation::ExactPaths(locations),
@@ -446,6 +447,7 @@ fn test_codegen_options_tracking_hash() {
     tracked!(profile_use, Some(PathBuf::from("abc")));
     tracked!(relocation_model, Some(RelocModel::Pic));
     tracked!(soft_float, true);
+    tracked!(split_debuginfo, Some(SplitDebuginfo::Packed));
     tracked!(target_cpu, Some(String::from("abc")));
     tracked!(target_feature, String::from("all the features, all of them"));
 }
@@ -538,6 +540,7 @@ fn test_debugging_options_tracking_hash() {
     // This list is in alphabetical order.
     tracked!(allow_features, Some(vec![String::from("lang_items")]));
     tracked!(always_encode_mir, true);
+    tracked!(assume_incomplete_release, true);
     tracked!(asm_comments, true);
     tracked!(binary_dep_depinfo, true);
     tracked!(chalk, true);
@@ -579,7 +582,6 @@ fn test_debugging_options_tracking_hash() {
     tracked!(relax_elf_relocations, Some(true));
     tracked!(relro_level, Some(RelroLevel::Full));
     tracked!(report_delayed_bugs, true);
-    tracked!(run_dsymutil, false);
     tracked!(sanitizer, SanitizerSet::ADDRESS);
     tracked!(sanitizer_memory_track_origins, 2);
     tracked!(sanitizer_recover, SanitizerSet::ADDRESS);
@@ -587,7 +589,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(share_generics, Some(true));
     tracked!(show_span, Some(String::from("abc")));
     tracked!(src_hash_algorithm, Some(SourceFileHashAlgorithm::Sha1));
-    tracked!(symbol_mangling_version, SymbolManglingVersion::V0);
+    tracked!(symbol_mangling_version, Some(SymbolManglingVersion::V0));
     tracked!(teach, true);
     tracked!(thinlto, Some(true));
     tracked!(tune_cpu, Some(String::from("abc")));
@@ -597,6 +599,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(unleash_the_miri_inside_of_you, true);
     tracked!(use_ctors_section, Some(true));
     tracked!(verify_llvm_ir, true);
+    tracked!(wasi_exec_model, Some(WasiExecModel::Reactor));
 }
 
 #[test]

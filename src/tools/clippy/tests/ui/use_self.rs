@@ -3,7 +3,7 @@
 
 #![warn(clippy::use_self)]
 #![allow(dead_code)]
-#![allow(clippy::should_implement_trait)]
+#![allow(clippy::should_implement_trait, clippy::upper_case_acronyms)]
 
 fn main() {}
 
@@ -71,6 +71,7 @@ mod lifetimes {
 
 mod issue2894 {
     trait IntoBytes {
+        #[allow(clippy::wrong_self_convention)]
         fn into_bytes(&self) -> Vec<u8>;
     }
 
