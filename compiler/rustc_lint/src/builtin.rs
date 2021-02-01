@@ -43,6 +43,7 @@ use rustc_index::vec::Idx;
 use rustc_middle::lint::LintDiagnosticBuilder;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::subst::{GenericArgKind, Subst};
+use rustc_middle::ty::Instance;
 use rustc_middle::ty::{self, layout::LayoutError, Ty, TyCtxt};
 use rustc_session::Session;
 use rustc_span::edition::Edition;
@@ -95,18 +96,24 @@ fn pierce_parens(mut expr: &ast::Expr) -> &ast::Expr {
 
 impl EarlyLintPass for WhileTrue {
     fn check_expr(&mut self, cx: &EarlyContext<'_>, e: &ast::Expr) {
-        if let ast::ExprKind::While(cond, ..) = &e.kind {
+        if let ast::ExprKind::While(cond, _, label) = &e.kind {
             if let ast::ExprKind::Lit(ref lit) = pierce_parens(cond).kind {
                 if let ast::LitKind::Bool(true) = lit.kind {
                     if !lit.span.from_expansion() {
                         let msg = "denote infinite loops with `loop { ... }`";
-                        let condition_span = cx.sess.source_map().guess_head_span(e.span);
+                        let condition_span = e.span.with_hi(cond.span.hi());
                         cx.struct_span_lint(WHILE_TRUE, condition_span, |lint| {
                             lint.build(msg)
                                 .span_suggestion_short(
                                     condition_span,
                                     "use `loop`",
-                                    "loop".to_owned(),
+                                    format!(
+                                        "{}loop",
+                                        label.map_or_else(String::new, |label| format!(
+                                            "{}: ",
+                                            label.ident,
+                                        ))
+                                    ),
                                     Applicability::MachineApplicable,
                                 )
                                 .emit();
@@ -541,7 +548,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
                     return;
                 }
             }
-            hir::ItemKind::Impl { of_trait: Some(ref trait_ref), items, .. } => {
+            hir::ItemKind::Impl(hir::Impl { of_trait: Some(ref trait_ref), items, .. }) => {
                 // If the trait is private, add the impl items to `private_traits` so they don't get
                 // reported for missing docs.
                 let real_trait = trait_ref.path.res.def_id();
@@ -868,7 +875,7 @@ impl EarlyLintPass for AnonymousParameters {
         if let ast::AssocItemKind::Fn(_, ref sig, _, _) = it.kind {
             for arg in sig.decl.inputs.iter() {
                 if let ast::PatKind::Ident(_, ident, None) = arg.pat.kind {
-                    if ident.name == kw::Invalid {
+                    if ident.name == kw::Empty {
                         cx.struct_span_lint(ANONYMOUS_PARAMETERS, arg.pat.span, |lint| {
                             let ty_snip = cx.sess.source_map().span_to_snippet(arg.ty.span);
 
@@ -938,8 +945,8 @@ impl EarlyLintPass for DeprecatedAttr {
             if attr.ident().map(|ident| ident.name) == Some(n) {
                 if let &AttributeGate::Gated(
                     Stability::Deprecated(link, suggestion),
-                    ref name,
-                    ref reason,
+                    name,
+                    reason,
                     _,
                 ) = g
                 {
@@ -1549,13 +1556,13 @@ declare_lint_pass!(
 impl<'tcx> LateLintPass<'tcx> for TrivialConstraints {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::Item<'tcx>) {
         use rustc_middle::ty::fold::TypeFoldable;
-        use rustc_middle::ty::PredicateAtom::*;
+        use rustc_middle::ty::PredicateKind::*;
 
         if cx.tcx.features().trivial_bounds {
             let def_id = cx.tcx.hir().local_def_id(item.hir_id);
             let predicates = cx.tcx.predicates_of(def_id);
             for &(predicate, span) in predicates.predicates {
-                let predicate_kind_name = match predicate.skip_binders() {
+                let predicate_kind_name = match predicate.kind().skip_binder() {
                     Trait(..) => "Trait",
                     TypeOutlives(..) |
                     RegionOutlives(..) => "Lifetime",
@@ -1935,8 +1942,8 @@ impl ExplicitOutlivesRequirements {
     ) -> Vec<ty::Region<'tcx>> {
         inferred_outlives
             .iter()
-            .filter_map(|(pred, _)| match pred.skip_binders() {
-                ty::PredicateAtom::RegionOutlives(ty::OutlivesPredicate(a, b)) => match a {
+            .filter_map(|(pred, _)| match pred.kind().skip_binder() {
+                ty::PredicateKind::RegionOutlives(ty::OutlivesPredicate(a, b)) => match a {
                     ty::ReEarlyBound(ebr) if ebr.index == index => Some(b),
                     _ => None,
                 },
@@ -1951,8 +1958,8 @@ impl ExplicitOutlivesRequirements {
     ) -> Vec<ty::Region<'tcx>> {
         inferred_outlives
             .iter()
-            .filter_map(|(pred, _)| match pred.skip_binders() {
-                ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(a, b)) => {
+            .filter_map(|(pred, _)| match pred.kind().skip_binder() {
+                ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(a, b)) => {
                     a.is_param(index).then_some(b)
                 }
                 _ => None,
@@ -2299,7 +2306,7 @@ impl EarlyLintPass for IncompleteFeatures {
     }
 }
 
-const HAS_MIN_FEATURES: &[Symbol] = &[sym::const_generics, sym::specialization];
+const HAS_MIN_FEATURES: &[Symbol] = &[sym::specialization];
 
 declare_lint! {
     /// The `invalid_value` lint detects creating a value that is not valid,
@@ -2595,6 +2602,11 @@ declare_lint! {
 }
 
 pub struct ClashingExternDeclarations {
+    /// Map of function symbol name to the first-seen hir id for that symbol name.. If seen_decls
+    /// contains an entry for key K, it means a symbol with name K has been seen by this lint and
+    /// the symbol should be reported as a clashing declaration.
+    // FIXME: Technically, we could just store a &'tcx str here without issue; however, the
+    // `impl_lint_pass` macro doesn't currently support lints parametric over a lifetime.
     seen_decls: FxHashMap<Symbol, HirId>,
 }
 
@@ -2626,16 +2638,17 @@ impl ClashingExternDeclarations {
     fn insert(&mut self, tcx: TyCtxt<'_>, fi: &hir::ForeignItem<'_>) -> Option<HirId> {
         let hid = fi.hir_id;
 
-        let name =
-            &tcx.codegen_fn_attrs(tcx.hir().local_def_id(hid)).link_name.unwrap_or(fi.ident.name);
-
-        if self.seen_decls.contains_key(name) {
+        let local_did = tcx.hir().local_def_id(fi.hir_id);
+        let did = local_did.to_def_id();
+        let instance = Instance::new(did, ty::List::identity_for_item(tcx, did));
+        let name = Symbol::intern(tcx.symbol_name(instance).name);
+        if let Some(&hir_id) = self.seen_decls.get(&name) {
             // Avoid updating the map with the new entry when we do find a collision. We want to
             // make sure we're always pointing to the first definition as the previous declaration.
             // This lets us avoid emitting "knock-on" diagnostics.
-            Some(*self.seen_decls.get(name).unwrap())
+            Some(hir_id)
         } else {
-            self.seen_decls.insert(*name, hid)
+            self.seen_decls.insert(name, hid)
         }
     }
 

@@ -8,11 +8,12 @@ use rustc_ast::ast::Attribute;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir::intravisit::FnKind;
-use rustc_hir::{BindingAnnotation, Body, FnDecl, GenericArg, HirId, ItemKind, Node, PatKind, QPath, TyKind};
+use rustc_hir::{BindingAnnotation, Body, FnDecl, GenericArg, HirId, Impl, ItemKind, Node, PatKind, QPath, TyKind};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, TypeFoldable};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_span::symbol::kw;
 use rustc_span::{sym, Span};
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
@@ -90,9 +91,10 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
 
         // Exclude non-inherent impls
         if let Some(Node::Item(item)) = cx.tcx.hir().find(cx.tcx.hir().get_parent_node(hir_id)) {
-            if matches!(item.kind, ItemKind::Impl{ of_trait: Some(_), .. } |
-                ItemKind::Trait(..))
-            {
+            if matches!(
+                item.kind,
+                ItemKind::Impl(Impl { of_trait: Some(_), .. }) | ItemKind::Trait(..)
+            ) {
                 return;
             }
         }
@@ -114,13 +116,9 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
             .filter(|p| !p.is_global())
             .filter_map(|obligation| {
                 // Note that we do not want to deal with qualified predicates here.
-                if let ty::PredicateKind::Atom(ty::PredicateAtom::Trait(pred, _)) = obligation.predicate.kind() {
-                    if pred.def_id() == sized_trait {
-                        return None;
-                    }
-                    Some(pred)
-                } else {
-                    None
+                match obligation.predicate.kind().no_bound_vars() {
+                    Some(ty::PredicateKind::Trait(pred, _)) if pred.def_id() != sized_trait => Some(pred),
+                    _ => None,
                 }
             })
             .collect::<Vec<_>>();
@@ -152,7 +150,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
             // Ignore `self`s.
             if idx == 0 {
                 if let PatKind::Binding(.., ident, _) = arg.pat.kind {
-                    if ident.as_str() == "self" {
+                    if ident.name == kw::SelfLower {
                         continue;
                     }
                 }

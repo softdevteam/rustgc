@@ -1,19 +1,23 @@
-use crate::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
+use crate::dep_graph::{DepNode, DepNodeIndex, SerializedDepNodeIndex};
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::{self, interpret};
-use crate::ty::codec::{OpaqueEncoder, RefDecodable, TyDecoder, TyEncoder};
+use crate::ty::codec::{RefDecodable, TyDecoder, TyEncoder};
 use crate::ty::context::TyCtxt;
 use crate::ty::{self, Ty};
 use rustc_data_structures::fingerprint::{Fingerprint, FingerprintDecoder, FingerprintEncoder};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::sync::{HashMapExt, Lock, Lrc, OnceCell};
 use rustc_data_structures::thin_vec::ThinVec;
+use rustc_data_structures::unhash::UnhashMap;
 use rustc_errors::Diagnostic;
 use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LocalDefId, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathHash;
 use rustc_hir::definitions::Definitions;
 use rustc_index::vec::{Idx, IndexVec};
-use rustc_serialize::{opaque, Decodable, Decoder, Encodable, Encoder};
+use rustc_serialize::{
+    opaque::{self, FileEncodeResult, FileEncoder},
+    Decodable, Decoder, Encodable, Encoder,
+};
 use rustc_session::{CrateDisambiguator, Session};
 use rustc_span::hygiene::{
     ExpnDataDecodeMode, ExpnDataEncodeMode, ExpnId, HygieneDecodeContext, HygieneEncodeContext,
@@ -28,8 +32,10 @@ use std::mem;
 
 const TAG_FILE_FOOTER: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_C0FFEE;
 
-const TAG_VALID_SPAN: u8 = 0;
-const TAG_INVALID_SPAN: u8 = 1;
+// A normal span encoded with both location information and a `SyntaxContext`
+const TAG_FULL_SPAN: u8 = 0;
+// A partial span with no location information, encoded only with a `SyntaxContext`
+const TAG_PARTIAL_SPAN: u8 = 1;
 
 const TAG_SYNTAX_CONTEXT: u8 = 0;
 const TAG_EXPN_DATA: u8 = 1;
@@ -87,7 +93,7 @@ pub struct OnDiskCache<'sess> {
     // compilation session. This is used as an initial 'guess' when
     // we try to map a `DefPathHash` to its `DefId` in the current compilation
     // session.
-    foreign_def_path_hashes: FxHashMap<DefPathHash, RawDefId>,
+    foreign_def_path_hashes: UnhashMap<DefPathHash, RawDefId>,
 
     // The *next* compilation sessison's `foreign_def_path_hashes` - at
     // the end of our current compilation session, this will get written
@@ -95,19 +101,19 @@ pub struct OnDiskCache<'sess> {
     // will become `foreign_def_path_hashes` of the next compilation session.
     // This stores any `DefPathHash` that we may need to map to a `DefId`
     // during the next compilation session.
-    latest_foreign_def_path_hashes: Lock<FxHashMap<DefPathHash, RawDefId>>,
+    latest_foreign_def_path_hashes: Lock<UnhashMap<DefPathHash, RawDefId>>,
 
     // Maps `DefPathHashes` to their corresponding `LocalDefId`s for all
     // local items in the current compilation session. This is only populated
     // when we are in incremental mode and have loaded a pre-existing cache
     // from disk, since this map is only used when deserializing a `DefPathHash`
     // from the incremental cache.
-    local_def_path_hash_to_def_id: FxHashMap<DefPathHash, LocalDefId>,
+    local_def_path_hash_to_def_id: UnhashMap<DefPathHash, LocalDefId>,
     // Caches all lookups of `DefPathHashes`, both for local and foreign
     // definitions. A definition from the previous compilation session
     // may no longer exist in the current compilation session, so
     // we use `Option<DefId>` so that we can cache a lookup failure.
-    def_path_hash_to_def_id_cache: Lock<FxHashMap<DefPathHash, Option<DefId>>>,
+    def_path_hash_to_def_id_cache: Lock<UnhashMap<DefPathHash, Option<DefId>>>,
 }
 
 // This type is used only for serialization and deserialization.
@@ -123,7 +129,7 @@ struct Footer {
     syntax_contexts: FxHashMap<u32, AbsoluteBytePos>,
     // See `OnDiskCache.expn_data`
     expn_data: FxHashMap<u32, AbsoluteBytePos>,
-    foreign_def_path_hashes: FxHashMap<DefPathHash, RawDefId>,
+    foreign_def_path_hashes: UnhashMap<DefPathHash, RawDefId>,
 }
 
 type EncodedQueryResultIndex = Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>;
@@ -160,8 +166,8 @@ crate struct RawDefId {
     pub index: u32,
 }
 
-fn make_local_def_path_hash_map(definitions: &Definitions) -> FxHashMap<DefPathHash, LocalDefId> {
-    FxHashMap::from_iter(
+fn make_local_def_path_hash_map(definitions: &Definitions) -> UnhashMap<DefPathHash, LocalDefId> {
+    UnhashMap::from_iter(
         definitions
             .def_path_table()
             .all_def_path_hashes_and_def_ids(LOCAL_CRATE)
@@ -240,10 +246,11 @@ impl<'sess> OnDiskCache<'sess> {
         }
     }
 
-    pub fn serialize<'tcx, E>(&self, tcx: TyCtxt<'tcx>, encoder: &mut E) -> Result<(), E::Error>
-    where
-        E: OpaqueEncoder,
-    {
+    pub fn serialize<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        encoder: &mut FileEncoder,
+    ) -> FileEncodeResult {
         // Serializing the `DepGraph` should not modify it.
         tcx.dep_graph.with_ignore(|| {
             // Allocate `SourceFileIndex`es.
@@ -263,6 +270,13 @@ impl<'sess> OnDiskCache<'sess> {
 
                 (file_to_file_index, file_index_to_stable_id)
             };
+
+            // Register any dep nodes that we reused from the previous session,
+            // but didn't `DepNode::construct` in this session. This ensures
+            // that their `DefPathHash` to `RawDefId` mappings are registered
+            // in 'latest_foreign_def_path_hashes' if necessary, since that
+            // normally happens in `DepNode::construct`.
+            tcx.dep_graph.register_reused_dep_nodes(tcx);
 
             // Load everything into memory so we can write it out to the on-disk
             // cache. The vast majority of cacheable query results should already
@@ -290,14 +304,14 @@ impl<'sess> OnDiskCache<'sess> {
             // Encode query results.
             let mut query_result_index = EncodedQueryResultIndex::new();
 
-            tcx.sess.time("encode_query_results", || {
+            tcx.sess.time("encode_query_results", || -> FileEncodeResult {
                 let enc = &mut encoder;
                 let qri = &mut query_result_index;
 
                 macro_rules! encode_queries {
                     ($($query:ident,)*) => {
                         $(
-                            encode_query_results::<ty::query::queries::$query<'_>, _>(
+                            encode_query_results::<ty::query::queries::$query<'_>>(
                                 tcx,
                                 enc,
                                 qri
@@ -316,15 +330,17 @@ impl<'sess> OnDiskCache<'sess> {
                 .current_diagnostics
                 .borrow()
                 .iter()
-                .map(|(dep_node_index, diagnostics)| {
-                    let pos = AbsoluteBytePos::new(encoder.position());
-                    // Let's make sure we get the expected type here.
-                    let diagnostics: &EncodedDiagnostics = diagnostics;
-                    let dep_node_index = SerializedDepNodeIndex::new(dep_node_index.index());
-                    encoder.encode_tagged(dep_node_index, diagnostics)?;
+                .map(
+                    |(dep_node_index, diagnostics)| -> Result<_, <FileEncoder as Encoder>::Error> {
+                        let pos = AbsoluteBytePos::new(encoder.position());
+                        // Let's make sure we get the expected type here.
+                        let diagnostics: &EncodedDiagnostics = diagnostics;
+                        let dep_node_index = SerializedDepNodeIndex::new(dep_node_index.index());
+                        encoder.encode_tagged(dep_node_index, diagnostics)?;
 
-                    Ok((dep_node_index, pos))
-                })
+                        Ok((dep_node_index, pos))
+                    },
+                )
                 .collect::<Result<_, _>>()?;
 
             let interpret_alloc_index = {
@@ -367,13 +383,13 @@ impl<'sess> OnDiskCache<'sess> {
 
             hygiene_encode_context.encode(
                 &mut encoder,
-                |encoder, index, ctxt_data| {
+                |encoder, index, ctxt_data| -> FileEncodeResult {
                     let pos = AbsoluteBytePos::new(encoder.position());
                     encoder.encode_tagged(TAG_SYNTAX_CONTEXT, ctxt_data)?;
                     syntax_contexts.insert(index, pos);
                     Ok(())
                 },
-                |encoder, index, expn_data| {
+                |encoder, index, expn_data| -> FileEncodeResult {
                     let pos = AbsoluteBytePos::new(encoder.position());
                     encoder.encode_tagged(TAG_EXPN_DATA, expn_data)?;
                     expn_ids.insert(index, pos);
@@ -402,7 +418,7 @@ impl<'sess> OnDiskCache<'sess> {
 
             // Encode the position of the footer as the last 8 bytes of the
             // file so we know where to look for it.
-            IntEncodedWithFixedSize(footer_pos).encode(encoder.encoder.opaque())?;
+            IntEncodedWithFixedSize(footer_pos).encode(encoder.encoder)?;
 
             // DO NOT WRITE ANYTHING TO THE ENCODER AFTER THIS POINT! The address
             // of the footer must be the last thing in the data stream.
@@ -467,8 +483,8 @@ impl<'sess> OnDiskCache<'sess> {
             .insert(hash, RawDefId { krate: def_id.krate.as_u32(), index: def_id.index.as_u32() });
     }
 
-    /// If the given `hash` still exists in the current compilation,
-    /// calls `store_foreign_def_id` with its current `DefId`.
+    /// If the given `dep_node`'s hash still exists in the current compilation,
+    /// and its current `DefId` is foreign, calls `store_foreign_def_id` with it.
     ///
     /// Normally, `store_foreign_def_id_hash` can be called directly by
     /// the dependency graph when we construct a `DepNode`. However,
@@ -476,13 +492,24 @@ impl<'sess> OnDiskCache<'sess> {
     /// session, we only have the `DefPathHash` available. This method is used
     /// to that any `DepNode` that we re-use has a `DefPathHash` -> `RawId` written
     /// out for usage in the next compilation session.
-    pub fn register_reused_dep_path_hash(&self, tcx: TyCtxt<'tcx>, hash: DefPathHash) {
-        // We can't simply copy the `RawDefId` from `foreign_def_path_hashes` to
-        // `latest_foreign_def_path_hashes`, since the `RawDefId` might have
-        // changed in the current compilation session (e.g. we've added/removed crates,
-        // or added/removed definitions before/after the target definition).
-        if let Some(def_id) = self.def_path_hash_to_def_id(tcx, hash) {
-            self.store_foreign_def_id_hash(def_id, hash);
+    pub fn register_reused_dep_node(&self, tcx: TyCtxt<'tcx>, dep_node: &DepNode) {
+        // For reused dep nodes, we only need to store the mapping if the node
+        // is one whose query key we can reconstruct from the hash. We use the
+        // mapping to aid that reconstruction in the next session. While we also
+        // use it to decode `DefId`s we encoded in the cache as `DefPathHashes`,
+        // they're already registered during `DefId` encoding.
+        if dep_node.kind.can_reconstruct_query_key() {
+            let hash = DefPathHash(dep_node.hash.into());
+
+            // We can't simply copy the `RawDefId` from `foreign_def_path_hashes` to
+            // `latest_foreign_def_path_hashes`, since the `RawDefId` might have
+            // changed in the current compilation session (e.g. we've added/removed crates,
+            // or added/removed definitions before/after the target definition).
+            if let Some(def_id) = self.def_path_hash_to_def_id(tcx, hash) {
+                if !def_id.is_local() {
+                    self.store_foreign_def_id_hash(def_id, hash);
+                }
+            }
         }
     }
 
@@ -648,7 +675,7 @@ impl<'sess> OnDiskCache<'sess> {
 
 //- DECODING -------------------------------------------------------------------
 
-/// A decoder that can read from the incr. comp. cache. It is similar to the one
+/// A decoder that can read from the incremental compilation cache. It is similar to the one
 /// we use for crate metadata decoding in that it can rebase spans and eventually
 /// will also handle things that contain `Ty` instances.
 crate struct CacheDecoder<'a, 'tcx> {
@@ -789,6 +816,15 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
 
 crate::implement_ty_decoder!(CacheDecoder<'a, 'tcx>);
 
+// This ensures that the `Decodable<opaque::Decoder>::decode` specialization for `Vec<u8>` is used
+// when a `CacheDecoder` is passed to `Decodable::decode`. Unfortunately, we have to manually opt
+// into specializations this way, given how `CacheDecoder` and the decoding traits currently work.
+impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for Vec<u8> {
+    fn decode(d: &mut CacheDecoder<'a, 'tcx>) -> Result<Self, String> {
+        Decodable::decode(&mut d.opaque)
+    }
+}
+
 impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for SyntaxContext {
     fn decode(decoder: &mut CacheDecoder<'a, 'tcx>) -> Result<Self, String> {
         let syntax_contexts = decoder.syntax_contexts;
@@ -830,10 +866,11 @@ impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for Span {
     fn decode(decoder: &mut CacheDecoder<'a, 'tcx>) -> Result<Self, String> {
         let tag: u8 = Decodable::decode(decoder)?;
 
-        if tag == TAG_INVALID_SPAN {
-            return Ok(DUMMY_SP);
+        if tag == TAG_PARTIAL_SPAN {
+            let ctxt = SyntaxContext::decode(decoder)?;
+            return Ok(DUMMY_SP.with_ctxt(ctxt));
         } else {
-            debug_assert_eq!(tag, TAG_VALID_SPAN);
+            debug_assert_eq!(tag, TAG_FULL_SPAN);
         }
 
         let file_lo_index = SourceFileIndex::decode(decoder)?;
@@ -936,17 +973,28 @@ impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for &'tcx [Span] {
 
 //- ENCODING -------------------------------------------------------------------
 
-/// An encoder that can write the incr. comp. cache.
+trait OpaqueEncoder: Encoder {
+    fn position(&self) -> usize;
+}
+
+impl OpaqueEncoder for FileEncoder {
+    #[inline]
+    fn position(&self) -> usize {
+        FileEncoder::position(self)
+    }
+}
+
+/// An encoder that can write to the incremental compilation cache.
 struct CacheEncoder<'a, 'tcx, E: OpaqueEncoder> {
     tcx: TyCtxt<'tcx>,
     encoder: &'a mut E,
     type_shorthands: FxHashMap<Ty<'tcx>, usize>,
-    predicate_shorthands: FxHashMap<ty::Predicate<'tcx>, usize>,
+    predicate_shorthands: FxHashMap<ty::PredicateKind<'tcx>, usize>,
     interpret_allocs: FxIndexSet<interpret::AllocId>,
     source_map: CachingSourceMapView<'tcx>,
     file_to_file_index: FxHashMap<*const SourceFile, SourceFileIndex>,
     hygiene_context: &'a HygieneEncodeContext,
-    latest_foreign_def_path_hashes: FxHashMap<DefPathHash, RawDefId>,
+    latest_foreign_def_path_hashes: UnhashMap<DefPathHash, RawDefId>,
 }
 
 impl<'a, 'tcx, E> CacheEncoder<'a, 'tcx, E>
@@ -977,9 +1025,9 @@ where
     }
 }
 
-impl<'a, 'tcx> FingerprintEncoder for CacheEncoder<'a, 'tcx, rustc_serialize::opaque::Encoder> {
-    fn encode_fingerprint(&mut self, f: &Fingerprint) -> opaque::EncodeResult {
-        f.encode_opaque(self.encoder)
+impl<'a, 'tcx, E: OpaqueEncoder> FingerprintEncoder for CacheEncoder<'a, 'tcx, E> {
+    fn encode_fingerprint(&mut self, f: &Fingerprint) -> Result<(), E::Error> {
+        self.encoder.encode_fingerprint(f)
     }
 }
 
@@ -1012,24 +1060,29 @@ where
 {
     fn encode(&self, s: &mut CacheEncoder<'a, 'tcx, E>) -> Result<(), E::Error> {
         if *self == DUMMY_SP {
-            return TAG_INVALID_SPAN.encode(s);
+            TAG_PARTIAL_SPAN.encode(s)?;
+            return SyntaxContext::root().encode(s);
         }
 
         let span_data = self.data();
-        let (file_lo, line_lo, col_lo) = match s.source_map.byte_pos_to_line_and_col(span_data.lo) {
-            Some(pos) => pos,
-            None => return TAG_INVALID_SPAN.encode(s),
+        let pos = s.source_map.byte_pos_to_line_and_col(span_data.lo);
+        let partial_span = match &pos {
+            Some((file_lo, _, _)) => !file_lo.contains(span_data.hi),
+            None => true,
         };
 
-        if !file_lo.contains(span_data.hi) {
-            return TAG_INVALID_SPAN.encode(s);
+        if partial_span {
+            TAG_PARTIAL_SPAN.encode(s)?;
+            return span_data.ctxt.encode(s);
         }
+
+        let (file_lo, line_lo, col_lo) = pos.unwrap();
 
         let len = span_data.hi - span_data.lo;
 
         let source_file_index = s.source_file_index(file_lo);
 
-        TAG_VALID_SPAN.encode(s)?;
+        TAG_FULL_SPAN.encode(s)?;
         source_file_index.encode(s)?;
         line_lo.encode(s)?;
         col_lo.encode(s)?;
@@ -1044,16 +1097,13 @@ where
 {
     const CLEAR_CROSS_CRATE: bool = false;
 
-    fn tcx(&self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
     fn position(&self) -> usize {
-        self.encoder.encoder_position()
+        self.encoder.position()
     }
     fn type_shorthands(&mut self) -> &mut FxHashMap<Ty<'tcx>, usize> {
         &mut self.type_shorthands
     }
-    fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::Predicate<'tcx>, usize> {
+    fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::PredicateKind<'tcx>, usize> {
         &mut self.predicate_shorthands
     }
     fn encode_alloc_id(&mut self, alloc_id: &interpret::AllocId) -> Result<(), Self::Error> {
@@ -1134,6 +1184,16 @@ where
     }
 }
 
+// This ensures that the `Encodable<opaque::FileEncoder>::encode` specialization for byte slices
+// is used when a `CacheEncoder` having an `opaque::FileEncoder` is passed to `Encodable::encode`.
+// Unfortunately, we have to manually opt into specializations this way, given how `CacheEncoder`
+// and the encoding traits currently work.
+impl<'a, 'tcx> Encodable<CacheEncoder<'a, 'tcx, FileEncoder>> for [u8] {
+    fn encode(&self, e: &mut CacheEncoder<'a, 'tcx, FileEncoder>) -> FileEncodeResult {
+        self.encode(e.encoder)
+    }
+}
+
 // An integer that will always encode to 8 bytes.
 struct IntEncodedWithFixedSize(u64);
 
@@ -1141,8 +1201,8 @@ impl IntEncodedWithFixedSize {
     pub const ENCODED_SIZE: usize = 8;
 }
 
-impl Encodable<opaque::Encoder> for IntEncodedWithFixedSize {
-    fn encode(&self, e: &mut opaque::Encoder) -> Result<(), !> {
+impl<E: OpaqueEncoder> Encodable<E> for IntEncodedWithFixedSize {
+    fn encode(&self, e: &mut E) -> Result<(), E::Error> {
         let start_pos = e.position();
         for i in 0..IntEncodedWithFixedSize::ENCODED_SIZE {
             ((self.0 >> (i * 8)) as u8).encode(e)?;
@@ -1170,15 +1230,14 @@ impl<'a> Decodable<opaque::Decoder<'a>> for IntEncodedWithFixedSize {
     }
 }
 
-fn encode_query_results<'a, 'tcx, Q, E>(
+fn encode_query_results<'a, 'tcx, Q>(
     tcx: TyCtxt<'tcx>,
-    encoder: &mut CacheEncoder<'a, 'tcx, E>,
+    encoder: &mut CacheEncoder<'a, 'tcx, FileEncoder>,
     query_result_index: &mut EncodedQueryResultIndex,
-) -> Result<(), E::Error>
+) -> FileEncodeResult
 where
     Q: super::QueryDescription<TyCtxt<'tcx>> + super::QueryAccessors<TyCtxt<'tcx>>,
-    Q::Value: Encodable<CacheEncoder<'a, 'tcx, E>>,
-    E: 'a + OpaqueEncoder,
+    Q::Value: Encodable<CacheEncoder<'a, 'tcx, FileEncoder>>,
 {
     let _timer = tcx
         .sess
@@ -1195,7 +1254,7 @@ where
 
                 // Record position of the cache entry.
                 query_result_index
-                    .push((dep_node, AbsoluteBytePos::new(encoder.encoder.opaque().position())));
+                    .push((dep_node, AbsoluteBytePos::new(encoder.encoder.position())));
 
                 // Encode the type check tables with the `SerializedDepNodeIndex`
                 // as tag.

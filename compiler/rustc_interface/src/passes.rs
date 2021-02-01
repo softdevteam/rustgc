@@ -29,10 +29,11 @@ use rustc_passes::{self, hir_stats, layout_test};
 use rustc_plugin_impl as plugin;
 use rustc_resolve::{Resolver, ResolverArenas};
 use rustc_session::config::{CrateType, Input, OutputFilenames, OutputType, PpMode, PpSourceMode};
+use rustc_session::lint;
 use rustc_session::output::{filename_for_input, filename_for_metadata};
 use rustc_session::search_paths::PathKind;
 use rustc_session::Session;
-use rustc_span::symbol::Symbol;
+use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::{FileName, RealFileName};
 use rustc_trait_selection::traits;
 use rustc_typeck as typeck;
@@ -95,7 +96,7 @@ declare_box_region_type!(
 /// harness if one is to be provided, injection of a dependency on the
 /// standard library and prelude, and name resolution.
 ///
-/// Returns `None` if we're aborting after handling -W help.
+/// Returns [`None`] if we're aborting after handling -W help.
 pub fn configure_and_expand(
     sess: Lrc<Session>,
     lint_store: Lrc<LintStore>,
@@ -210,8 +211,13 @@ pub fn register_plugins<'a>(
     Ok((krate, lint_store))
 }
 
-fn pre_expansion_lint(sess: &Session, lint_store: &LintStore, krate: &ast::Crate) {
-    sess.time("pre_AST_expansion_lint_checks", || {
+fn pre_expansion_lint(
+    sess: &Session,
+    lint_store: &LintStore,
+    krate: &ast::Crate,
+    crate_name: &str,
+) {
+    sess.prof.generic_activity_with_arg("pre_AST_expansion_lint_checks", crate_name).run(|| {
         rustc_lint::check_ast_crate(
             sess,
             lint_store,
@@ -232,10 +238,10 @@ fn configure_and_expand_inner<'a>(
     metadata_loader: &'a MetadataLoaderDyn,
 ) -> Result<(ast::Crate, Resolver<'a>)> {
     tracing::trace!("configure_and_expand_inner");
-    pre_expansion_lint(sess, lint_store, &krate);
+    pre_expansion_lint(sess, lint_store, &krate, crate_name);
 
     let mut resolver = Resolver::new(sess, &krate, crate_name, metadata_loader, &resolver_arenas);
-    rustc_builtin_macros::register_builtin_macros(&mut resolver, sess.edition());
+    rustc_builtin_macros::register_builtin_macros(&mut resolver);
 
     krate = sess.time("crate_injection", || {
         let alt_std_name = sess.opts.alt_std_name.as_ref().map(|s| Symbol::intern(s));
@@ -294,7 +300,9 @@ fn configure_and_expand_inner<'a>(
             ..rustc_expand::expand::ExpansionConfig::default(crate_name.to_string())
         };
 
-        let extern_mod_loaded = |k: &ast::Crate| pre_expansion_lint(sess, lint_store, k);
+        let extern_mod_loaded = |k: &ast::Crate, ident: Ident| {
+            pre_expansion_lint(sess, lint_store, k, &*ident.name.as_str())
+        };
         let mut ecx = ExtCtxt::new(&sess, cfg, &mut resolver, Some(&extern_mod_loaded));
 
         // Expand macros now!
@@ -306,11 +314,27 @@ fn configure_and_expand_inner<'a>(
             ecx.check_unused_macros();
         });
 
+        let mut missing_fragment_specifiers: Vec<_> = ecx
+            .sess
+            .parse_sess
+            .missing_fragment_specifiers
+            .borrow()
+            .iter()
+            .map(|(span, node_id)| (*span, *node_id))
+            .collect();
+        missing_fragment_specifiers.sort_unstable_by_key(|(span, _)| *span);
+
+        let recursion_limit_hit = ecx.reduced_recursion_limit.is_some();
+
+        for (span, node_id) in missing_fragment_specifiers {
+            let lint = lint::builtin::MISSING_FRAGMENT_SPECIFIER;
+            let msg = "missing fragment specifier";
+            resolver.lint_buffer().buffer_lint(lint, node_id, span, msg);
+        }
         if cfg!(windows) {
             env::set_var("PATH", &old_path);
         }
 
-        let recursion_limit_hit = ecx.reduced_recursion_limit.is_some();
         if recursion_limit_hit {
             // If we hit a recursion limit, exit early to avoid later passes getting overwhelmed
             // with a large AST
@@ -780,12 +804,6 @@ pub fn create_global_ctxt<'tcx>(
         })
     });
 
-    // Do some initialization of the DepGraph that can only be done with the tcx available.
-    let icx = ty::tls::ImplicitCtxt::new(&gcx);
-    ty::tls::enter_context(&icx, |_| {
-        icx.tcx.sess.time("dep_graph_tcx_init", || rustc_incremental::dep_graph_tcx_init(icx.tcx));
-    });
-
     QueryContext(gcx)
 }
 
@@ -872,7 +890,7 @@ fn analysis(tcx: TyCtxt<'_>, cnum: CrateNum) -> Result<()> {
 
     // Avoid overwhelming user with errors if borrow checking failed.
     // I'm not sure how helpful this is, to be honest, but it avoids a
-    // lot of annoying errors in the compile-fail tests (basically,
+    // lot of annoying errors in the ui tests (basically,
     // lint warnings and so on -- kindck used to do this abort, but
     // kindck is gone now). -nmatsakis
     if sess.has_errors() {
@@ -995,6 +1013,16 @@ pub fn start_codegen<'tcx>(
     let codegen = tcx.sess.time("codegen_crate", move || {
         codegen_backend.codegen_crate(tcx, metadata, need_metadata_module)
     });
+
+    // Don't run these test assertions when not doing codegen. Compiletest tries to build
+    // build-fail tests in check mode first and expects it to not give an error in that case.
+    if tcx.sess.opts.output_types.should_codegen() {
+        rustc_incremental::assert_module_sources::assert_module_sources(tcx);
+        rustc_symbol_mangling::test::report_symbol_names(tcx);
+    }
+
+    tcx.sess.time("assert_dep_graph", || rustc_incremental::assert_dep_graph(tcx));
+    tcx.sess.time("serialize_dep_graph", || rustc_incremental::save_dep_graph(tcx));
 
     info!("Post-codegen\n{:?}", tcx.debug_stats());
 

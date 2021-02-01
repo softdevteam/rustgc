@@ -13,7 +13,6 @@ use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_middle::ty::{self, CrateInherentImpls, TyCtxt};
 
-use rustc_ast as ast;
 use rustc_span::Span;
 
 /// On-demand query: yields a map containing all types mapped to their inherent impls.
@@ -45,7 +44,9 @@ struct InherentCollect<'tcx> {
 impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
     fn visit_item(&mut self, item: &hir::Item<'_>) {
         let (ty, assoc_items) = match item.kind {
-            hir::ItemKind::Impl { of_trait: None, ref self_ty, items, .. } => (self_ty, items),
+            hir::ItemKind::Impl(hir::Impl { of_trait: None, ref self_ty, items, .. }) => {
+                (self_ty, items)
+            }
             _ => return,
         };
 
@@ -176,7 +177,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::I8) => {
+            ty::Int(ty::IntTy::I8) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.i8_impl(),
@@ -187,7 +188,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::I16) => {
+            ty::Int(ty::IntTy::I16) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.i16_impl(),
@@ -198,7 +199,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::I32) => {
+            ty::Int(ty::IntTy::I32) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.i32_impl(),
@@ -209,7 +210,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::I64) => {
+            ty::Int(ty::IntTy::I64) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.i64_impl(),
@@ -220,7 +221,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::I128) => {
+            ty::Int(ty::IntTy::I128) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.i128_impl(),
@@ -231,7 +232,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Int(ast::IntTy::Isize) => {
+            ty::Int(ty::IntTy::Isize) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.isize_impl(),
@@ -242,7 +243,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::U8) => {
+            ty::Uint(ty::UintTy::U8) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.u8_impl(),
@@ -253,7 +254,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::U16) => {
+            ty::Uint(ty::UintTy::U16) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.u16_impl(),
@@ -264,7 +265,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::U32) => {
+            ty::Uint(ty::UintTy::U32) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.u32_impl(),
@@ -275,7 +276,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::U64) => {
+            ty::Uint(ty::UintTy::U64) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.u64_impl(),
@@ -286,7 +287,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::U128) => {
+            ty::Uint(ty::UintTy::U128) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.u128_impl(),
@@ -297,7 +298,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Uint(ast::UintTy::Usize) => {
+            ty::Uint(ty::UintTy::Usize) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.usize_impl(),
@@ -308,7 +309,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Float(ast::FloatTy::F32) => {
+            ty::Float(ty::FloatTy::F32) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.f32_impl(),
@@ -319,7 +320,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
                     assoc_items,
                 );
             }
-            ty::Float(ast::FloatTy::F64) => {
+            ty::Float(ty::FloatTy::F64) => {
                 self.check_primitive_impl(
                     def_id,
                     lang_items.f64_impl(),

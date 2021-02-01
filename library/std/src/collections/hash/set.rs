@@ -37,7 +37,9 @@ use super::map::{map_try_reserve_error, RandomState};
 /// item's hash, as determined by the [`Hash`] trait, or its equality, as
 /// determined by the [`Eq`] trait, changes while it is in the set. This is
 /// normally only possible through [`Cell`], [`RefCell`], global state, I/O, or
-/// unsafe code.
+/// unsafe code. The behavior resulting from such a logic error is not
+/// specified, but will not result in undefined behavior. This could include
+/// panics, incorrect results, aborts, memory leaks, and non-termination.
 ///
 /// # Examples
 ///
@@ -106,7 +108,6 @@ use super::map::{map_try_reserve_error, RandomState};
 /// [`HashMap`]: crate::collections::HashMap
 /// [`RefCell`]: crate::cell::RefCell
 /// [`Cell`]: crate::cell::Cell
-#[derive(Clone)]
 #[cfg_attr(not(test), rustc_diagnostic_item = "hashset_type")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct HashSet<T, S = RandomState> {
@@ -200,6 +201,7 @@ impl<T, S> HashSet<T, S> {
     /// v.insert(1);
     /// assert_eq!(v.len(), 1);
     /// ```
+    #[doc(alias = "length")]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> usize {
@@ -460,9 +462,7 @@ where
     /// down no lower than the supplied limit while maintaining the internal rules
     /// and possibly leaving some space in accordance with the resize policy.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
-    ///
+    /// If the current capacity is less than the lower limit, this is a no-op.
     /// # Examples
     ///
     /// ```
@@ -929,6 +929,23 @@ where
         F: FnMut(&T) -> bool,
     {
         self.base.retain(f)
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T, S> Clone for HashSet<T, S>
+where
+    T: Clone,
+    S: Clone,
+{
+    #[inline]
+    fn clone(&self) -> Self {
+        Self { base: self.base.clone() }
+    }
+
+    #[inline]
+    fn clone_from(&mut self, other: &Self) {
+        self.base.clone_from(&other.base);
     }
 }
 

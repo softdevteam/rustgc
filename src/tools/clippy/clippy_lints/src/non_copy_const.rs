@@ -7,7 +7,7 @@ use std::ptr;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{
-    BodyId, Expr, ExprKind, HirId, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind, UnOp,
+    BodyId, Expr, ExprKind, HirId, Impl, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind, UnOp,
 };
 use rustc_infer::traits::specialization_graph;
 use rustc_lint::{LateContext, LateLintPass, Lint};
@@ -18,7 +18,7 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::{InnerSpan, Span, DUMMY_SP};
 use rustc_typeck::hir_ty_to_ty;
 
-use crate::utils::{in_constant, qpath_res, span_lint_and_then};
+use crate::utils::{in_constant, span_lint_and_then};
 use if_chain::if_chain;
 
 // FIXME: this is a correctness problem but there's no suitable
@@ -275,10 +275,10 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
             let item = cx.tcx.hir().expect_item(item_hir_id);
 
             match &item.kind {
-                ItemKind::Impl {
+                ItemKind::Impl(Impl {
                     of_trait: Some(of_trait_ref),
                     ..
-                } => {
+                }) => {
                     if_chain! {
                         // Lint a trait impl item only when the definition is a generic type,
                         // assuming a assoc const is not meant to be a interior mutable type.
@@ -317,7 +317,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                         }
                     }
                 },
-                ItemKind::Impl { of_trait: None, .. } => {
+                ItemKind::Impl(Impl { of_trait: None, .. }) => {
                     let ty = hir_ty_to_ty(cx.tcx, hir_ty);
                     // Normalize assoc types originated from generic params.
                     let normalized = cx.tcx.normalize_erasing_regions(cx.param_env, ty);
@@ -339,7 +339,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
             }
 
             // Make sure it is a const item.
-            let item_def_id = match qpath_res(cx, qpath, expr.hir_id) {
+            let item_def_id = match cx.qpath_res(qpath, expr.hir_id) {
                 Res::Def(DefKind::Const | DefKind::AssocConst, did) => did,
                 _ => return,
             };

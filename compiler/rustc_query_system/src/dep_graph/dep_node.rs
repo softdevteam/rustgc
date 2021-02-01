@@ -60,9 +60,8 @@ pub struct DepNode<K> {
     // * When a `DepNode::construct` is called, `arg.to_fingerprint()`
     //   is responsible for calling `OnDiskCache::store_foreign_def_id_hash`
     //   if needed
-    // * When a `DepNode` is loaded from the `PreviousDepGraph`,
-    //   then `PreviousDepGraph::index_to_node` is responsible for calling
-    //   `tcx.register_reused_dep_path_hash`
+    // * When we serialize the on-disk cache, `OnDiskCache::serialize` is
+    //   responsible for calling `DepGraph::register_reused_dep_nodes`.
     //
     // FIXME: Enforce this by preventing manual construction of `DefNode`
     // (e.g. add a `_priv: ()` field)
@@ -151,12 +150,6 @@ where
 
     default fn recover(_: Ctxt, _: &DepNode<Ctxt::DepKind>) -> Option<Self> {
         None
-    }
-}
-
-impl<Ctxt: DepContext> DepNodeParams<Ctxt> for () {
-    fn to_fingerprint(&self, _: Ctxt) -> Fingerprint {
-        Fingerprint::ZERO
     }
 }
 

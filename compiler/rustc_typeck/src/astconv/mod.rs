@@ -138,6 +138,12 @@ pub enum ExplicitLateBound {
     No,
 }
 
+#[derive(Copy, Clone, PartialEq)]
+pub enum IsMethodCall {
+    Yes,
+    No,
+}
+
 /// Denotes the "position" of a generic argument, indicating if it is a generic type,
 /// generic function or generic method call.
 #[derive(Copy, Clone, PartialEq)]
@@ -196,11 +202,13 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
 
             Some(rl::Region::LateBound(debruijn, id, _)) => {
                 let name = lifetime_name(id.expect_local());
-                tcx.mk_region(ty::ReLateBound(debruijn, ty::BrNamed(id, name)))
+                let br = ty::BoundRegion { kind: ty::BrNamed(id, name) };
+                tcx.mk_region(ty::ReLateBound(debruijn, br))
             }
 
             Some(rl::Region::LateBoundAnon(debruijn, index)) => {
-                tcx.mk_region(ty::ReLateBound(debruijn, ty::BrAnon(index)))
+                let br = ty::BoundRegion { kind: ty::BrAnon(index) };
+                tcx.mk_region(ty::ReLateBound(debruijn, br))
             }
 
             Some(rl::Region::EarlyBound(index, id, _)) => {
@@ -250,7 +258,8 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             span,
             def_id,
             &[],
-            item_segment.generic_args(),
+            item_segment,
+            item_segment.args(),
             item_segment.infer_args,
             None,
         );
@@ -298,6 +307,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         span: Span,
         def_id: DefId,
         parent_substs: &[subst::GenericArg<'tcx>],
+        seg: &hir::PathSegment<'_>,
         generic_args: &'a hir::GenericArgs<'_>,
         infer_args: bool,
         self_ty: Option<Ty<'tcx>>,
@@ -312,10 +322,10 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         );
 
         let tcx = self.tcx();
-        let generic_params = tcx.generics_of(def_id);
+        let generics = tcx.generics_of(def_id);
 
-        if generic_params.has_self {
-            if generic_params.parent.is_some() {
+        if generics.has_self {
+            if generics.parent.is_some() {
                 // The parent is a trait so it should have at least one subst
                 // for the `Self` type.
                 assert!(!parent_substs.is_empty())
@@ -330,7 +340,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         let arg_count = Self::check_generic_arg_count(
             tcx,
             span,
-            &generic_params,
+            def_id,
+            seg,
+            &generics,
             &generic_args,
             GenericArgPosition::Type,
             self_ty.is_some(),
@@ -341,7 +353,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         // Traits always have `Self` as a generic parameter, which means they will not return early
         // here and so associated type bindings will be handled regardless of whether there are any
         // non-`Self` generic parameters.
-        if generic_params.params.len() == 0 {
+        if generics.params.len() == 0 {
             return (tcx.intern_substs(&[]), vec![], arg_count);
         }
 
@@ -484,7 +496,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     }
                     GenericParamDefKind::Const => {
                         let ty = tcx.at(self.span).type_of(param.def_id);
-                        // FIXME(const_generics:defaults)
+                        // FIXME(const_generics_defaults)
                         if infer_args {
                             // No const parameters were provided, we can infer all.
                             self.astconv.ct_infer(ty, Some(param), self.span).into()
@@ -551,7 +563,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
 
         debug!(
             "create_substs_for_ast_path(generic_params={:?}, self_ty={:?}) -> {:?}",
-            generic_params, self_ty, substs
+            generics, self_ty, substs
         );
 
         (substs, assoc_bindings, arg_count)
@@ -574,7 +586,8 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 span,
                 item_def_id,
                 parent_substs,
-                item_segment.generic_args(),
+                item_segment,
+                item_segment.args(),
                 item_segment.infer_args,
                 None,
             )
@@ -699,8 +712,15 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
     ) {
         let trait_def_id = self.tcx().require_lang_item(lang_item, Some(span));
 
-        let (substs, assoc_bindings, _) =
-            self.create_substs_for_ast_path(span, trait_def_id, &[], args, false, Some(self_ty));
+        let (substs, assoc_bindings, _) = self.create_substs_for_ast_path(
+            span,
+            trait_def_id,
+            &[],
+            &hir::PathSegment::invalid(),
+            args,
+            false,
+            Some(self_ty),
+        );
         let poly_trait_ref = ty::Binder::bind(ty::TraitRef::new(trait_def_id, substs));
         bounds.trait_bounds.push((poly_trait_ref, span, Constness::NotConst));
 
@@ -748,7 +768,8 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             span,
             trait_def_id,
             &[],
-            trait_segment.generic_args(),
+            trait_segment,
+            trait_segment.args(),
             trait_segment.infer_args,
             Some(self_ty),
         )
@@ -768,7 +789,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         // Try to find an unbound in bounds.
         let mut unbound = None;
         for ab in ast_bounds {
-            if let &hir::GenericBound::Trait(ref ptr, hir::TraitBoundModifier::Maybe) = ab {
+            if let hir::GenericBound::Trait(ptr, hir::TraitBoundModifier::Maybe) = ab {
                 if unbound.is_none() {
                     unbound = Some(&ptr.trait_ref);
                 } else {
@@ -837,9 +858,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     .instantiate_lang_item_trait_ref(
                         lang_item, span, hir_id, args, param_ty, bounds,
                     ),
-                hir::GenericBound::Outlives(ref l) => {
-                    bounds.region_bounds.push((self.ast_region_to_region(l, None), l.span))
-                }
+                hir::GenericBound::Outlives(ref l) => bounds
+                    .region_bounds
+                    .push((ty::Binder::bind(self.ast_region_to_region(l, None)), l.span)),
             }
         }
     }
@@ -1074,7 +1095,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 dummy_self,
                 &mut bounds,
             ) {
-                potential_assoc_types.extend(cur_potential_assoc_types.into_iter());
+                potential_assoc_types.extend(cur_potential_assoc_types);
             }
         }
 
@@ -1156,9 +1177,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     obligation.predicate
                 );
 
-                let bound_predicate = obligation.predicate.bound_atom();
+                let bound_predicate = obligation.predicate.kind();
                 match bound_predicate.skip_binder() {
-                    ty::PredicateAtom::Trait(pred, _) => {
+                    ty::PredicateKind::Trait(pred, _) => {
                         let pred = bound_predicate.rebind(pred);
                         associated_types.entry(span).or_default().extend(
                             tcx.associated_items(pred.def_id())
@@ -1167,7 +1188,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                                 .map(|item| item.def_id),
                         );
                     }
-                    ty::PredicateAtom::Projection(pred) => {
+                    ty::PredicateKind::Projection(pred) => {
                         let pred = bound_predicate.rebind(pred);
                         // A `Self` within the original bound will be substituted with a
                         // `trait_object_dummy_self`, so check for that.
@@ -1254,22 +1275,20 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             })
         });
 
-        // Calling `skip_binder` is okay because the predicates are re-bound.
         let regular_trait_predicates = existential_trait_refs
-            .map(|trait_ref| ty::ExistentialPredicate::Trait(trait_ref.skip_binder()));
-        let auto_trait_predicates = auto_traits
-            .into_iter()
-            .map(|trait_ref| ty::ExistentialPredicate::AutoTrait(trait_ref.trait_ref().def_id()));
+            .map(|trait_ref| trait_ref.map_bound(ty::ExistentialPredicate::Trait));
+        let auto_trait_predicates = auto_traits.into_iter().map(|trait_ref| {
+            ty::Binder::dummy(ty::ExistentialPredicate::AutoTrait(trait_ref.trait_ref().def_id()))
+        });
         let mut v = regular_trait_predicates
             .chain(auto_trait_predicates)
             .chain(
-                existential_projections
-                    .map(|x| ty::ExistentialPredicate::Projection(x.skip_binder())),
+                existential_projections.map(|x| x.map_bound(ty::ExistentialPredicate::Projection)),
             )
             .collect::<SmallVec<[_; 8]>>();
-        v.sort_by(|a, b| a.stable_cmp(tcx, b));
+        v.sort_by(|a, b| a.skip_binder().stable_cmp(tcx, &b.skip_binder()));
         v.dedup();
-        let existential_predicates = ty::Binder::bind(tcx.mk_existential_predicates(v.into_iter()));
+        let existential_predicates = tcx.mk_poly_existential_predicates(v.into_iter());
 
         // Use explicitly-specified region bound.
         let region_bound = if !lifetime.is_elided() {
@@ -1751,7 +1770,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         let mut has_err = false;
         for segment in segments {
             let (mut err_for_lt, mut err_for_ty, mut err_for_ct) = (false, false, false);
-            for arg in segment.generic_args().args {
+            for arg in segment.args().args {
                 let (span, kind) = match arg {
                     hir::GenericArg::Lifetime(lt) => {
                         if err_for_lt {
@@ -1793,7 +1812,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             }
 
             // Only emit the first error to avoid overloading the user with error messages.
-            if let [binding, ..] = segment.generic_args().bindings {
+            if let [binding, ..] = segment.args().bindings {
                 has_err = true;
                 Self::prohibit_assoc_ty_binding(self.tcx(), binding.span);
             }
@@ -2011,11 +2030,11 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                         "generic `Self` types are currently not permitted in anonymous constants",
                     );
                     if let Some(hir::Node::Item(&hir::Item {
-                        kind: hir::ItemKind::Impl { self_ty, .. },
+                        kind: hir::ItemKind::Impl(ref impl_),
                         ..
                     })) = tcx.hir().get_if_local(def_id)
                     {
-                        err.span_note(self_ty.span, "not a concrete type");
+                        err.span_note(impl_.self_ty.span, "not a concrete type");
                     }
                     err.emit();
                     tcx.ty_error()
@@ -2040,9 +2059,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 match prim_ty {
                     hir::PrimTy::Bool => tcx.types.bool,
                     hir::PrimTy::Char => tcx.types.char,
-                    hir::PrimTy::Int(it) => tcx.mk_mach_int(it),
-                    hir::PrimTy::Uint(uit) => tcx.mk_mach_uint(uit),
-                    hir::PrimTy::Float(ft) => tcx.mk_mach_float(ft),
+                    hir::PrimTy::Int(it) => tcx.mk_mach_int(ty::int_ty(it)),
+                    hir::PrimTy::Uint(uit) => tcx.mk_mach_uint(ty::uint_ty(uit)),
+                    hir::PrimTy::Float(ft) => tcx.mk_mach_float(ty::float_ty(ft)),
                     hir::PrimTy::Str => tcx.types.str_,
                 }
             }
@@ -2130,6 +2149,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     span,
                     def_id,
                     &[],
+                    &hir::PathSegment::invalid(),
                     &GenericArgs::none(),
                     true,
                     None,
@@ -2295,8 +2315,8 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
 
     fn validate_late_bound_regions(
         &self,
-        constrained_regions: FxHashSet<ty::BoundRegion>,
-        referenced_regions: FxHashSet<ty::BoundRegion>,
+        constrained_regions: FxHashSet<ty::BoundRegionKind>,
+        referenced_regions: FxHashSet<ty::BoundRegionKind>,
         generate_err: impl Fn(&str) -> rustc_errors::DiagnosticBuilder<'tcx>,
     ) {
         for br in referenced_regions.difference(&constrained_regions) {
@@ -2331,7 +2351,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
     fn compute_object_lifetime_bound(
         &self,
         span: Span,
-        existential_predicates: ty::Binder<&'tcx ty::List<ty::ExistentialPredicate<'tcx>>>,
+        existential_predicates: &'tcx ty::List<ty::Binder<ty::ExistentialPredicate<'tcx>>>,
     ) -> Option<ty::Region<'tcx>> // if None, use the default
     {
         let tcx = self.tcx();

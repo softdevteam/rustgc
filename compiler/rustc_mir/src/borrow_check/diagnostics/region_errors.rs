@@ -138,7 +138,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// Returns `true` if a closure is inferred to be an `FnMut` closure.
     fn is_closure_fn_mut(&self, fr: RegionVid) -> bool {
         if let Some(ty::ReFree(free_region)) = self.to_error_region(fr) {
-            if let ty::BoundRegion::BrEnv = free_region.bound_region {
+            if let ty::BoundRegionKind::BrEnv = free_region.bound_region {
                 if let DefiningTy::Closure(_, substs) =
                     self.regioncx.universal_regions().defining_ty
                 {
@@ -590,8 +590,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
                     let mut found = false;
                     for (bound, _) in bounds {
-                        if let ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(_, r)) =
-                            bound.skip_binders()
+                        if let ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(_, r)) =
+                            bound.kind().skip_binder()
                         {
                             let r = r.subst(self.infcx.tcx, substs);
                             if let ty::RegionKind::ReStatic = r {

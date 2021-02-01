@@ -171,7 +171,6 @@ impl Step for Llvm {
             .define("LLVM_TARGETS_TO_BUILD", llvm_targets)
             .define("LLVM_EXPERIMENTAL_TARGETS_TO_BUILD", llvm_exp_targets)
             .define("LLVM_INCLUDE_EXAMPLES", "OFF")
-            .define("LLVM_INCLUDE_TESTS", "OFF")
             .define("LLVM_INCLUDE_DOCS", "OFF")
             .define("LLVM_INCLUDE_BENCHMARKS", "OFF")
             .define("LLVM_ENABLE_TERMINFO", "OFF")
@@ -802,6 +801,7 @@ fn supported_sanitizers(
     };
 
     match &*target.triple {
+        "aarch64-apple-darwin" => darwin_libs("osx", &["asan", "lsan", "tsan"]),
         "aarch64-fuchsia" => common_libs("fuchsia", "aarch64", &["asan"]),
         "aarch64-unknown-linux-gnu" => {
             common_libs("linux", "aarch64", &["asan", "lsan", "msan", "tsan"])

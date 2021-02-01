@@ -537,13 +537,16 @@ fn make_mirror_unadjusted<'a, 'tcx>(
             },
             Err(err) => bug!("invalid loop id for continue: {}", err),
         },
+        hir::ExprKind::If(cond, then, else_opt) => ExprKind::If {
+            cond: cond.to_ref(),
+            then: then.to_ref(),
+            else_opt: else_opt.map(|el| el.to_ref()),
+        },
         hir::ExprKind::Match(ref discr, ref arms, _) => ExprKind::Match {
             scrutinee: discr.to_ref(),
             arms: arms.iter().map(|a| convert_arm(cx, a)).collect(),
         },
-        hir::ExprKind::Loop(ref body, _, _) => {
-            ExprKind::Loop { body: block::to_expr_ref(cx, body) }
-        }
+        hir::ExprKind::Loop(ref body, ..) => ExprKind::Loop { body: block::to_expr_ref(cx, body) },
         hir::ExprKind::Field(ref source, ..) => ExprKind::Field {
             lhs: source.to_ref(),
             name: Field::new(cx.tcx.field_index(expr.hir_id, cx.typeck_results)),
@@ -776,10 +779,10 @@ impl ToBorrowKind for hir::Mutability {
 fn convert_arm<'tcx>(cx: &mut Cx<'_, 'tcx>, arm: &'tcx hir::Arm<'tcx>) -> Arm<'tcx> {
     Arm {
         pattern: cx.pattern_from_hir(&arm.pat),
-        guard: match arm.guard {
-            Some(hir::Guard::If(ref e)) => Some(Guard::If(e.to_ref())),
-            _ => None,
-        },
+        guard: arm.guard.as_ref().map(|g| match g {
+            hir::Guard::If(ref e) => Guard::If(e.to_ref()),
+            hir::Guard::IfLet(ref pat, ref e) => Guard::IfLet(cx.pattern_from_hir(pat), e.to_ref()),
+        }),
         body: arm.body.to_ref(),
         lint_level: LintLevel::Explicit(arm.hir_id),
         scope: region::Scope { id: arm.hir_id.local_id, data: region::ScopeData::Node },
@@ -813,8 +816,7 @@ fn convert_path_expr<'a, 'tcx>(
             let item_id = cx.tcx.hir().get_parent_node(hir_id);
             let item_def_id = cx.tcx.hir().local_def_id(item_id);
             let generics = cx.tcx.generics_of(item_def_id);
-            let local_def_id = cx.tcx.hir().local_def_id(hir_id);
-            let index = generics.param_def_id_to_index[&local_def_id.to_def_id()];
+            let index = generics.param_def_id_to_index[&def_id];
             let name = cx.tcx.hir().name(hir_id);
             let val = ty::ConstKind::Param(ty::ParamConst::new(index, name));
             ExprKind::Literal {

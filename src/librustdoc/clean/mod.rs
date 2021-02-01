@@ -48,8 +48,6 @@ crate use self::types::Type::*;
 crate use self::types::Visibility::{Inherited, Public};
 crate use self::types::*;
 
-const FN_OUTPUT_NAME: &str = "Output";
-
 crate trait Clean<T> {
     fn clean(&self, cx: &DocContext<'_>) -> T;
 }
@@ -169,7 +167,7 @@ impl Clean<ExternalCrate> for CrateNum {
                 for attr in attrs.lists(sym::doc) {
                     if attr.has_name(sym::keyword) {
                         if let Some(v) = attr.value_str() {
-                            keyword = Some(v.to_string());
+                            keyword = Some(v);
                             break;
                         }
                     }
@@ -209,7 +207,7 @@ impl Clean<ExternalCrate> for CrateNum {
         };
 
         ExternalCrate {
-            name: cx.tcx.crate_name(*self).to_string(),
+            name: cx.tcx.crate_name(*self),
             src: krate_src,
             attrs: cx.tcx.get_attrs(root).clean(cx),
             primitives,
@@ -220,13 +218,7 @@ impl Clean<ExternalCrate> for CrateNum {
 
 impl Clean<Item> for doctree::Module<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
-        // maintain a stack of mod ids, for doc comment path resolution
-        // but we also need to resolve the module's own docs based on whether its docs were written
-        // inside or outside the module, so check for that
-        let attrs = self.attrs.clean(cx);
-
         let mut items: Vec<Item> = vec![];
-        items.extend(self.imports.iter().flat_map(|x| x.clean(cx)));
         items.extend(self.foreigns.iter().map(|x| x.clean(cx)));
         items.extend(self.mods.iter().map(|x| x.clean(cx)));
         items.extend(self.items.iter().map(|x| x.clean(cx)).flatten());
@@ -253,12 +245,7 @@ impl Clean<Item> for doctree::Module<'_> {
             ModuleItem(Module { is_crate: self.is_crate, items }),
             cx,
         );
-        Item {
-            name: Some(what_rustc_thinks.name.unwrap_or_default()),
-            attrs,
-            source: span.clean(cx),
-            ..what_rustc_thinks
-        }
+        Item { source: span.clean(cx), ..what_rustc_thinks }
     }
 }
 
@@ -334,10 +321,9 @@ impl Clean<GenericBound> for (ty::PolyTraitRef<'_>, &[TypeBinding]) {
             .collect_referenced_late_bound_regions(&poly_trait_ref)
             .into_iter()
             .filter_map(|br| match br {
-                ty::BrNamed(_, name) => Some(GenericParamDef {
-                    name: name.to_string(),
-                    kind: GenericParamDefKind::Lifetime,
-                }),
+                ty::BrNamed(_, name) => {
+                    Some(GenericParamDef { name, kind: GenericParamDefKind::Lifetime })
+                }
                 _ => None,
             })
             .collect();
@@ -387,7 +373,7 @@ impl Clean<Lifetime> for hir::Lifetime {
             }
             _ => {}
         }
-        Lifetime(self.name.ident().to_string())
+        Lifetime(self.name.ident().name)
     }
 }
 
@@ -405,9 +391,9 @@ impl Clean<Lifetime> for hir::GenericParam<'_> {
                     for bound in bounds {
                         s.push_str(&format!(" + {}", bound.name.ident()));
                     }
-                    Lifetime(s)
+                    Lifetime(Symbol::intern(&s))
                 } else {
-                    Lifetime(self.name.ident().to_string())
+                    Lifetime(self.name.ident().name)
                 }
             }
             _ => panic!(),
@@ -431,16 +417,18 @@ impl Clean<Constant> for hir::ConstArg {
 
 impl Clean<Lifetime> for ty::GenericParamDef {
     fn clean(&self, _cx: &DocContext<'_>) -> Lifetime {
-        Lifetime(self.name.to_string())
+        Lifetime(self.name)
     }
 }
 
 impl Clean<Option<Lifetime>> for ty::RegionKind {
-    fn clean(&self, cx: &DocContext<'_>) -> Option<Lifetime> {
+    fn clean(&self, _cx: &DocContext<'_>) -> Option<Lifetime> {
         match *self {
             ty::ReStatic => Some(Lifetime::statik()),
-            ty::ReLateBound(_, ty::BrNamed(_, name)) => Some(Lifetime(name.to_string())),
-            ty::ReEarlyBound(ref data) => Some(Lifetime(data.name.clean(cx))),
+            ty::ReLateBound(_, ty::BoundRegion { kind: ty::BrNamed(_, name) }) => {
+                Some(Lifetime(name))
+            }
+            ty::ReEarlyBound(ref data) => Some(Lifetime(data.name)),
 
             ty::ReLateBound(..)
             | ty::ReFree(..)
@@ -477,19 +465,20 @@ impl Clean<WherePredicate> for hir::WherePredicate<'_> {
 
 impl<'a> Clean<Option<WherePredicate>> for ty::Predicate<'a> {
     fn clean(&self, cx: &DocContext<'_>) -> Option<WherePredicate> {
-        match self.skip_binders() {
-            ty::PredicateAtom::Trait(pred, _) => Some(ty::Binder::bind(pred).clean(cx)),
-            ty::PredicateAtom::RegionOutlives(pred) => pred.clean(cx),
-            ty::PredicateAtom::TypeOutlives(pred) => pred.clean(cx),
-            ty::PredicateAtom::Projection(pred) => Some(pred.clean(cx)),
+        let bound_predicate = self.kind();
+        match bound_predicate.skip_binder() {
+            ty::PredicateKind::Trait(pred, _) => Some(bound_predicate.rebind(pred).clean(cx)),
+            ty::PredicateKind::RegionOutlives(pred) => pred.clean(cx),
+            ty::PredicateKind::TypeOutlives(pred) => pred.clean(cx),
+            ty::PredicateKind::Projection(pred) => Some(pred.clean(cx)),
 
-            ty::PredicateAtom::Subtype(..)
-            | ty::PredicateAtom::WellFormed(..)
-            | ty::PredicateAtom::ObjectSafe(..)
-            | ty::PredicateAtom::ClosureKind(..)
-            | ty::PredicateAtom::ConstEvaluatable(..)
-            | ty::PredicateAtom::ConstEquate(..)
-            | ty::PredicateAtom::TypeWellFormedFromEnv(..) => panic!("not user writable"),
+            ty::PredicateKind::Subtype(..)
+            | ty::PredicateKind::WellFormed(..)
+            | ty::PredicateKind::ObjectSafe(..)
+            | ty::PredicateKind::ClosureKind(..)
+            | ty::PredicateKind::ConstEvaluatable(..)
+            | ty::PredicateKind::ConstEquate(..)
+            | ty::PredicateKind::TypeWellFormedFromEnv(..) => panic!("not user writable"),
         }
     }
 }
@@ -551,7 +540,7 @@ impl<'tcx> Clean<Type> for ty::ProjectionTy<'tcx> {
             GenericBound::Outlives(_) => panic!("cleaning a trait got a lifetime"),
         };
         Type::QPath {
-            name: cx.tcx.associated_item(self.item_def_id).ident.name.clean(cx),
+            name: cx.tcx.associated_item(self.item_def_id).ident.name,
             self_type: box self.self_ty().clean(cx),
             trait_: box trait_,
         }
@@ -561,14 +550,12 @@ impl<'tcx> Clean<Type> for ty::ProjectionTy<'tcx> {
 impl Clean<GenericParamDef> for ty::GenericParamDef {
     fn clean(&self, cx: &DocContext<'_>) -> GenericParamDef {
         let (name, kind) = match self.kind {
-            ty::GenericParamDefKind::Lifetime => {
-                (self.name.to_string(), GenericParamDefKind::Lifetime)
-            }
+            ty::GenericParamDefKind::Lifetime => (self.name, GenericParamDefKind::Lifetime),
             ty::GenericParamDefKind::Type { has_default, synthetic, .. } => {
                 let default =
                     if has_default { Some(cx.tcx.type_of(self.def_id).clean(cx)) } else { None };
                 (
-                    self.name.clean(cx),
+                    self.name,
                     GenericParamDefKind::Type {
                         did: self.def_id,
                         bounds: vec![], // These are filled in from the where-clauses.
@@ -578,7 +565,7 @@ impl Clean<GenericParamDef> for ty::GenericParamDef {
                 )
             }
             ty::GenericParamDefKind::Const { .. } => (
-                self.name.clean(cx),
+                self.name,
                 GenericParamDefKind::Const {
                     did: self.def_id,
                     ty: cx.tcx.type_of(self.def_id).clean(cx),
@@ -604,14 +591,14 @@ impl Clean<GenericParamDef> for hir::GenericParam<'_> {
                     for bound in bounds {
                         s.push_str(&format!(" + {}", bound.name.ident()));
                     }
-                    s
+                    Symbol::intern(&s)
                 } else {
-                    self.name.ident().to_string()
+                    self.name.ident().name
                 };
                 (name, GenericParamDefKind::Lifetime)
             }
             hir::GenericParamKind::Type { ref default, synthetic } => (
-                self.name.ident().name.clean(cx),
+                self.name.ident().name,
                 GenericParamDefKind::Type {
                     did: cx.tcx.hir().local_def_id(self.hir_id).to_def_id(),
                     bounds: self.bounds.clean(cx),
@@ -619,11 +606,12 @@ impl Clean<GenericParamDef> for hir::GenericParam<'_> {
                     synthetic,
                 },
             ),
-            hir::GenericParamKind::Const { ref ty } => (
-                self.name.ident().name.clean(cx),
+            hir::GenericParamKind::Const { ref ty, default: _ } => (
+                self.name.ident().name,
                 GenericParamDefKind::Const {
                     did: cx.tcx.hir().local_def_id(self.hir_id).to_def_id(),
                     ty: ty.clean(cx),
+                    // FIXME(const_generics_defaults): add `default` field here for docs
                 },
             ),
         };
@@ -645,6 +633,18 @@ impl Clean<Generics> for hir::Generics<'_> {
                 _ => false,
             }
         }
+        /// This can happen for `async fn`, e.g. `async fn f<'_>(&'_ self)`.
+        ///
+        /// See [`lifetime_to_generic_param`] in [`rustc_ast_lowering`] for more information.
+        ///
+        /// [`lifetime_to_generic_param`]: rustc_ast_lowering::LoweringContext::lifetime_to_generic_param
+        fn is_elided_lifetime(param: &hir::GenericParam<'_>) -> bool {
+            matches!(
+                param.kind,
+                hir::GenericParamKind::Lifetime { kind: hir::LifetimeParamKind::Elided }
+            )
+        }
+
         let impl_trait_params = self
             .params
             .iter()
@@ -663,7 +663,7 @@ impl Clean<Generics> for hir::Generics<'_> {
             .collect::<Vec<_>>();
 
         let mut params = Vec::with_capacity(self.params.len());
-        for p in self.params.iter().filter(|p| !is_impl_trait(p)) {
+        for p in self.params.iter().filter(|p| !is_impl_trait(p) && !is_elided_lifetime(p)) {
             let p = p.clean(cx);
             params.push(p);
         }
@@ -735,7 +735,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
             .collect::<Vec<GenericParamDef>>();
 
         // param index -> [(DefId of trait, associated type name, type)]
-        let mut impl_trait_proj = FxHashMap::<u32, Vec<(DefId, String, Ty<'tcx>)>>::default();
+        let mut impl_trait_proj = FxHashMap::<u32, Vec<(DefId, Symbol, Ty<'tcx>)>>::default();
 
         let where_predicates = preds
             .predicates
@@ -743,20 +743,21 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
             .flat_map(|(p, _)| {
                 let mut projection = None;
                 let param_idx = (|| {
-                    match p.skip_binders() {
-                        ty::PredicateAtom::Trait(pred, _constness) => {
+                    let bound_p = p.kind();
+                    match bound_p.skip_binder() {
+                        ty::PredicateKind::Trait(pred, _constness) => {
                             if let ty::Param(param) = pred.self_ty().kind() {
                                 return Some(param.index);
                             }
                         }
-                        ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(ty, _reg)) => {
+                        ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(ty, _reg)) => {
                             if let ty::Param(param) = ty.kind() {
                                 return Some(param.index);
                             }
                         }
-                        ty::PredicateAtom::Projection(p) => {
+                        ty::PredicateKind::Projection(p) => {
                             if let ty::Param(param) = p.projection_ty.self_ty().kind() {
-                                projection = Some(ty::Binder::bind(p));
+                                projection = Some(bound_p.rebind(p));
                                 return Some(param.index);
                             }
                         }
@@ -783,11 +784,10 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
                         if let Some(((_, trait_did, name), rhs)) =
                             proj.as_ref().and_then(|(lhs, rhs)| Some((lhs.projection()?, rhs)))
                         {
-                            impl_trait_proj.entry(param_idx).or_default().push((
-                                trait_did,
-                                name.to_string(),
-                                rhs,
-                            ));
+                            impl_trait_proj
+                                .entry(param_idx)
+                                .or_default()
+                                .push((trait_did, name, rhs));
                         }
 
                         return None;
@@ -800,12 +800,12 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
 
         for (param, mut bounds) in impl_trait {
             // Move trait bounds to the front.
-            bounds.sort_by_key(|b| if let GenericBound::TraitBound(..) = b { false } else { true });
+            bounds.sort_by_key(|b| !matches!(b, GenericBound::TraitBound(..)));
 
             if let crate::core::ImplTraitParam::ParamIndex(idx) = param {
                 if let Some(proj) = impl_trait_proj.remove(&idx) {
                     for (trait_did, name, rhs) in proj {
-                        simplify::merge_bounds(cx, &mut bounds, trait_did, &name, &rhs.clean(cx));
+                        simplify::merge_bounds(cx, &mut bounds, trait_did, name, &rhs.clean(cx));
                     }
                 }
             } else {
@@ -831,7 +831,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
         where_predicates.retain(|pred| match *pred {
             WP::BoundPredicate { ty: Generic(ref g), ref bounds } => {
                 if bounds.iter().any(|b| b.is_sized_bound(cx)) {
-                    sized_params.insert(g.clone());
+                    sized_params.insert(*g);
                     false
                 } else {
                     true
@@ -847,7 +847,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
                 && !sized_params.contains(&tp.name)
             {
                 where_predicates.push(WP::BoundPredicate {
-                    ty: Type::Generic(tp.name.clone()),
+                    ty: Type::Generic(tp.name),
                     bounds: vec![GenericBound::maybe_sized(cx)],
                 })
             }
@@ -908,7 +908,7 @@ fn clean_fn_or_proc_macro(
                     }
                 }
             }
-            ProcMacroItem(ProcMacro { kind, helpers: helpers.clean(cx) })
+            ProcMacroItem(ProcMacro { kind, helpers })
         }
         None => {
             let mut func = (sig, generics, body_id).clean(cx);
@@ -941,9 +941,9 @@ impl<'a> Clean<Arguments> for (&'a [hir::Ty<'a>], &'a [Ident]) {
                 .iter()
                 .enumerate()
                 .map(|(i, ty)| {
-                    let mut name = self.1.get(i).map(|ident| ident.to_string()).unwrap_or_default();
+                    let mut name = self.1.get(i).map_or(kw::Empty, |ident| ident.name);
                     if name.is_empty() {
-                        name = "_".to_string();
+                        name = kw::Underscore;
                     }
                     Argument { name, type_: ty.clean(cx) }
                 })
@@ -962,7 +962,7 @@ impl<'a> Clean<Arguments> for (&'a [hir::Ty<'a>], hir::BodyId) {
                 .iter()
                 .enumerate()
                 .map(|(i, ty)| Argument {
-                    name: name_from_pat(&body.params[i].pat),
+                    name: Symbol::intern(&rustc_hir_pretty::param_to_string(&body.params[i])),
                     type_: ty.clean(cx),
                 })
                 .collect(),
@@ -1000,7 +1000,7 @@ impl<'tcx> Clean<FnDecl> for (DefId, ty::PolyFnSig<'tcx>) {
                     .iter()
                     .map(|t| Argument {
                         type_: t.clean(cx),
-                        name: names.next().map_or_else(|| String::new(), |name| name.to_string()),
+                        name: names.next().map_or(kw::Empty, |i| i.name),
                     })
                     .collect(),
             },
@@ -1096,7 +1096,10 @@ impl Clean<Item> for hir::TraitItem<'_> {
                     AssocTypeItem(bounds.clean(cx), default.clean(cx))
                 }
             };
-            Item::from_def_id_and_parts(local_did, Some(self.ident.name.clean(cx)), inner, cx)
+            let what_rustc_thinks =
+                Item::from_def_id_and_parts(local_did, Some(self.ident.name), inner, cx);
+            // Trait items always inherit the trait's visibility -- we don't want to show `pub`.
+            Item { visibility: Inherited, ..what_rustc_thinks }
         })
     }
 }
@@ -1118,13 +1121,34 @@ impl Clean<Item> for hir::ImplItem<'_> {
                     }
                     MethodItem(m, Some(self.defaultness))
                 }
-                hir::ImplItemKind::TyAlias(ref ty) => {
-                    let type_ = ty.clean(cx);
-                    let item_type = type_.def_id().and_then(|did| inline::build_ty(cx, did));
-                    TypedefItem(Typedef { type_, generics: Generics::default(), item_type }, true)
+                hir::ImplItemKind::TyAlias(ref hir_ty) => {
+                    let type_ = hir_ty.clean(cx);
+                    let item_type = hir_ty_to_ty(cx.tcx, hir_ty).clean(cx);
+                    TypedefItem(
+                        Typedef {
+                            type_,
+                            generics: Generics::default(),
+                            item_type: Some(item_type),
+                        },
+                        true,
+                    )
                 }
             };
-            Item::from_def_id_and_parts(local_did, Some(self.ident.name.clean(cx)), inner, cx)
+
+            let what_rustc_thinks =
+                Item::from_def_id_and_parts(local_did, Some(self.ident.name), inner, cx);
+            let parent_item = cx.tcx.hir().expect_item(cx.tcx.hir().get_parent_item(self.hir_id));
+            if let hir::ItemKind::Impl(impl_) = &parent_item.kind {
+                if impl_.of_trait.is_some() {
+                    // Trait impl items always inherit the impl's visibility --
+                    // we don't want to show `pub`.
+                    Item { visibility: Inherited, ..what_rustc_thinks }
+                } else {
+                    what_rustc_thinks
+                }
+            } else {
+                panic!("found impl item with non-impl parent {:?}", parent_item);
+            }
         })
     }
 }
@@ -1155,12 +1179,12 @@ impl Clean<Item> for ty::AssocItem {
                     };
                     let self_arg_ty = sig.input(0).skip_binder();
                     if self_arg_ty == self_ty {
-                        decl.inputs.values[0].type_ = Generic(String::from("Self"));
+                        decl.inputs.values[0].type_ = Generic(kw::SelfUpper);
                     } else if let ty::Ref(_, ty, _) = *self_arg_ty.kind() {
                         if ty == self_ty {
                             match decl.inputs.values[0].type_ {
                                 BorrowedRef { ref mut type_, .. } => {
-                                    **type_ = Generic(String::from("Self"))
+                                    **type_ = Generic(kw::SelfUpper)
                                 }
                                 _ => unreachable!(),
                             }
@@ -1215,7 +1239,7 @@ impl Clean<Item> for ty::AssocItem {
                 }
             }
             ty::AssocKind::Type => {
-                let my_name = self.ident.name.clean(cx);
+                let my_name = self.ident.name;
 
                 if let ty::TraitContainer(_) = self.container {
                     let bounds = cx.tcx.explicit_item_bounds(self.def_id);
@@ -1240,7 +1264,7 @@ impl Clean<Item> for ty::AssocItem {
                                 _ => return None,
                             }
                             match **self_type {
-                                Generic(ref s) if *s == "Self" => {}
+                                Generic(ref s) if *s == kw::SelfUpper => {}
                                 _ => return None,
                             }
                             Some(bounds)
@@ -1267,13 +1291,13 @@ impl Clean<Item> for ty::AssocItem {
 
                     AssocTypeItem(bounds, ty.clean(cx))
                 } else {
+                    // FIXME: when could this happen? ASsociated items in inherent impls?
                     let type_ = cx.tcx.type_of(self.def_id).clean(cx);
-                    let item_type = type_.def_id().and_then(|did| inline::build_ty(cx, did));
                     TypedefItem(
                         Typedef {
                             type_,
                             generics: Generics { params: Vec::new(), where_predicates: Vec::new() },
-                            item_type,
+                            item_type: None,
                         },
                         true,
                     )
@@ -1281,7 +1305,7 @@ impl Clean<Item> for ty::AssocItem {
             }
         };
 
-        Item::from_def_id_and_parts(self.def_id, Some(self.ident.name.clean(cx)), kind, cx)
+        Item::from_def_id_and_parts(self.def_id, Some(self.ident.name), kind, cx)
     }
 }
 
@@ -1320,7 +1344,7 @@ fn clean_qpath(hir_ty: &hir::Ty<'_>, cx: &DocContext<'_>) -> Type {
                 let mut ty_substs = FxHashMap::default();
                 let mut lt_substs = FxHashMap::default();
                 let mut ct_substs = FxHashMap::default();
-                let generic_args = provided_params.generic_args();
+                let generic_args = provided_params.args();
                 {
                     let mut indices: GenericParamCount = Default::default();
                     for param in generics.params.iter() {
@@ -1385,7 +1409,7 @@ fn clean_qpath(hir_ty: &hir::Ty<'_>, cx: &DocContext<'_>) -> Type {
                                 if let Some(ct) = const_ {
                                     ct_substs.insert(const_param_def_id.to_def_id(), ct.clean(cx));
                                 }
-                                // FIXME(const_generics:defaults)
+                                // FIXME(const_generics_defaults)
                                 indices.consts += 1;
                             }
                         }
@@ -1413,7 +1437,7 @@ fn clean_qpath(hir_ty: &hir::Ty<'_>, cx: &DocContext<'_>) -> Type {
                 segments: trait_segments.clean(cx),
             };
             Type::QPath {
-                name: p.segments.last().expect("segments were empty").ident.name.clean(cx),
+                name: p.segments.last().expect("segments were empty").ident.name,
                 self_type: box qself.clean(cx),
                 trait_: box resolve_type(cx, trait_path, hir_id),
             }
@@ -1427,7 +1451,7 @@ fn clean_qpath(hir_ty: &hir::Ty<'_>, cx: &DocContext<'_>) -> Type {
             };
             let trait_path = hir::Path { span, res, segments: &[] };
             Type::QPath {
-                name: segment.ident.name.clean(cx),
+                name: segment.ident.name,
                 self_type: box qself.clean(cx),
                 trait_: box resolve_type(cx, trait_path.clean(cx), hir_id),
             }
@@ -1444,7 +1468,16 @@ impl Clean<Type> for hir::Ty<'_> {
             TyKind::Never => Never,
             TyKind::Ptr(ref m) => RawPointer(m.mutbl, box m.ty.clean(cx)),
             TyKind::Rptr(ref l, ref m) => {
-                let lifetime = if l.is_elided() { None } else { Some(l.clean(cx)) };
+                // There are two times a `Fresh` lifetime can be created:
+                // 1. For `&'_ x`, written by the user. This corresponds to `lower_lifetime` in `rustc_ast_lowering`.
+                // 2. For `&x` as a parameter to an `async fn`. This corresponds to `elided_ref_lifetime in `rustc_ast_lowering`.
+                //    See #59286 for more information.
+                // Ideally we would only hide the `'_` for case 2., but I don't know a way to distinguish it.
+                // Turning `fn f(&'_ self)` into `fn f(&self)` isn't the worst thing in the world, though;
+                // there's no case where it could cause the function to fail to compile.
+                let elided =
+                    l.is_elided() || matches!(l.name, LifetimeName::Param(ParamName::Fresh(_)));
+                let lifetime = if elided { None } else { Some(l.clean(cx)) };
                 BorrowedRef { lifetime, mutability: m.mutbl, type_: box m.ty.clean(cx) }
             }
             TyKind::Slice(ref ty) => Slice(box ty.clean(cx)),
@@ -1630,7 +1663,7 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                 let mut bindings = vec![];
                 for pb in obj.projection_bounds() {
                     bindings.push(TypeBinding {
-                        name: cx.tcx.associated_item(pb.item_def_id()).ident.name.clean(cx),
+                        name: cx.tcx.associated_item(pb.item_def_id()).ident.name,
                         kind: TypeBindingKind::Equality { ty: pb.skip_binder().ty.clean(cx) },
                     });
                 }
@@ -1649,7 +1682,7 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                 if let Some(bounds) = cx.impl_trait_bounds.borrow_mut().remove(&p.index.into()) {
                     ImplTrait(bounds)
                 } else {
-                    Generic(p.name.to_string())
+                    Generic(p.name)
                 }
             }
 
@@ -1668,16 +1701,12 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                 let mut bounds = bounds
                     .iter()
                     .filter_map(|bound| {
-                        // Note: The substs of opaque types can contain unbound variables,
-                        // meaning that we have to use `ignore_quantifiers_with_unbound_vars` here.
-                        let trait_ref = match bound
-                            .bound_atom_with_opt_escaping(cx.tcx)
-                            .skip_binder()
-                        {
-                            ty::PredicateAtom::Trait(tr, _constness) => {
-                                ty::Binder::bind(tr.trait_ref)
+                        let bound_predicate = bound.kind();
+                        let trait_ref = match bound_predicate.skip_binder() {
+                            ty::PredicateKind::Trait(tr, _constness) => {
+                                bound_predicate.rebind(tr.trait_ref)
                             }
-                            ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(_ty, reg)) => {
+                            ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(_ty, reg)) => {
                                 if let Some(r) = reg.clean(cx) {
                                     regions.push(GenericBound::Outlives(r));
                                 }
@@ -1696,8 +1725,8 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                         let bounds: Vec<_> = bounds
                             .iter()
                             .filter_map(|bound| {
-                                if let ty::PredicateAtom::Projection(proj) =
-                                    bound.bound_atom_with_opt_escaping(cx.tcx).skip_binder()
+                                if let ty::PredicateKind::Projection(proj) =
+                                    bound.kind().skip_binder()
                                 {
                                     if proj.projection_ty.trait_ref(cx.tcx)
                                         == trait_ref.skip_binder()
@@ -1707,8 +1736,7 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                                                 .tcx
                                                 .associated_item(proj.projection_ty.item_def_id)
                                                 .ident
-                                                .name
-                                                .clean(cx),
+                                                .name,
                                             kind: TypeBindingKind::Equality {
                                                 ty: proj.ty.clean(cx),
                                             },
@@ -1771,7 +1799,7 @@ impl Clean<Item> for ty::FieldDef {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
         let what_rustc_thinks = Item::from_def_id_and_parts(
             self.did,
-            Some(self.ident.name.clean(cx)),
+            Some(self.ident.name),
             StructFieldItem(cx.tcx.type_of(self.did).clean(cx)),
             cx,
         );
@@ -1787,25 +1815,28 @@ impl Clean<Visibility> for hir::Visibility<'_> {
             hir::VisibilityKind::Inherited => Visibility::Inherited,
             hir::VisibilityKind::Crate(_) => {
                 let krate = DefId::local(CRATE_DEF_INDEX);
-                Visibility::Restricted(krate, cx.tcx.def_path(krate))
+                Visibility::Restricted(krate)
             }
             hir::VisibilityKind::Restricted { ref path, .. } => {
                 let path = path.clean(cx);
                 let did = register_res(cx, path.res);
-                Visibility::Restricted(did, cx.tcx.def_path(did))
+                Visibility::Restricted(did)
             }
         }
     }
 }
 
 impl Clean<Visibility> for ty::Visibility {
-    fn clean(&self, cx: &DocContext<'_>) -> Visibility {
+    fn clean(&self, _cx: &DocContext<'_>) -> Visibility {
         match *self {
             ty::Visibility::Public => Visibility::Public,
+            // NOTE: this is not quite right: `ty` uses `Invisible` to mean 'private',
+            // while rustdoc really does mean inherited. That means that for enum variants, such as
+            // `pub enum E { V }`, `V` will be marked as `Public` by `ty`, but as `Inherited` by rustdoc.
+            // This is the main reason `impl Clean for hir::Visibility` still exists; various parts of clean
+            // override `tcx.visibility` explicitly to make sure this distinction is captured.
             ty::Visibility::Invisible => Visibility::Inherited,
-            ty::Visibility::Restricted(module) => {
-                Visibility::Restricted(module, cx.tcx.def_path(module))
-            }
+            ty::Visibility::Restricted(module) => Visibility::Restricted(module),
         }
     }
 }
@@ -1813,41 +1844,28 @@ impl Clean<Visibility> for ty::Visibility {
 impl Clean<VariantStruct> for rustc_hir::VariantData<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> VariantStruct {
         VariantStruct {
-            struct_type: doctree::struct_type_from_def(self),
+            struct_type: CtorKind::from_hir(self),
             fields: self.fields().iter().map(|x| x.clean(cx)).collect(),
             fields_stripped: false,
         }
     }
 }
 
-impl Clean<Item> for doctree::Variant<'_> {
-    fn clean(&self, cx: &DocContext<'_>) -> Item {
-        let what_rustc_thinks = Item::from_hir_id_and_parts(
-            self.id,
-            Some(self.name),
-            VariantItem(Variant { kind: self.def.clean(cx) }),
-            cx,
-        );
-        // don't show `pub` for variants, which are always public
-        Item { visibility: Inherited, ..what_rustc_thinks }
-    }
-}
-
 impl Clean<Item> for ty::VariantDef {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
         let kind = match self.ctor_kind {
-            CtorKind::Const => VariantKind::CLike,
-            CtorKind::Fn => VariantKind::Tuple(
+            CtorKind::Const => Variant::CLike,
+            CtorKind::Fn => Variant::Tuple(
                 self.fields.iter().map(|f| cx.tcx.type_of(f.did).clean(cx)).collect(),
             ),
-            CtorKind::Fictive => VariantKind::Struct(VariantStruct {
-                struct_type: doctree::Plain,
+            CtorKind::Fictive => Variant::Struct(VariantStruct {
+                struct_type: CtorKind::Fictive,
                 fields_stripped: false,
                 fields: self
                     .fields
                     .iter()
                     .map(|field| {
-                        let name = Some(field.ident.name.clean(cx));
+                        let name = Some(field.ident.name);
                         let kind = StructFieldItem(cx.tcx.type_of(field.did).clean(cx));
                         let what_rustc_thinks =
                             Item::from_def_id_and_parts(field.did, name, kind, cx);
@@ -1857,25 +1875,21 @@ impl Clean<Item> for ty::VariantDef {
                     .collect(),
             }),
         };
-        let what_rustc_thinks = Item::from_def_id_and_parts(
-            self.def_id,
-            Some(self.ident.name.clean(cx)),
-            VariantItem(Variant { kind }),
-            cx,
-        );
+        let what_rustc_thinks =
+            Item::from_def_id_and_parts(self.def_id, Some(self.ident.name), VariantItem(kind), cx);
         // don't show `pub` for fields, which are always public
         Item { visibility: Inherited, ..what_rustc_thinks }
     }
 }
 
-impl Clean<VariantKind> for hir::VariantData<'_> {
-    fn clean(&self, cx: &DocContext<'_>) -> VariantKind {
+impl Clean<Variant> for hir::VariantData<'_> {
+    fn clean(&self, cx: &DocContext<'_>) -> Variant {
         match self {
-            hir::VariantData::Struct(..) => VariantKind::Struct(self.clean(cx)),
+            hir::VariantData::Struct(..) => Variant::Struct(self.clean(cx)),
             hir::VariantData::Tuple(..) => {
-                VariantKind::Tuple(self.fields().iter().map(|x| x.ty.clean(cx)).collect())
+                Variant::Tuple(self.fields().iter().map(|x| x.ty.clean(cx)).collect())
             }
-            hir::VariantData::Unit(..) => VariantKind::CLike,
+            hir::VariantData::Unit(..) => Variant::CLike,
         }
     }
 }
@@ -1926,7 +1940,7 @@ impl Clean<GenericArgs> for hir::GenericArgs<'_> {
 
 impl Clean<PathSegment> for hir::PathSegment<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> PathSegment {
-        PathSegment { name: self.ident.name.clean(cx), args: self.generic_args().clean(cx) }
+        PathSegment { name: self.ident.name, args: self.args().clean(cx) }
     }
 }
 
@@ -1977,11 +1991,15 @@ impl Clean<Vec<Item>> for (&hir::Item<'_>, Option<Symbol>) {
                     bounds: ty.bounds.clean(cx),
                     generics: ty.generics.clean(cx),
                 }),
-                ItemKind::TyAlias(ty, ref generics) => {
-                    let rustdoc_ty = ty.clean(cx);
-                    let item_type = rustdoc_ty.def_id().and_then(|did| inline::build_ty(cx, did));
+                ItemKind::TyAlias(hir_ty, ref generics) => {
+                    let rustdoc_ty = hir_ty.clean(cx);
+                    let ty = hir_ty_to_ty(cx.tcx, hir_ty).clean(cx);
                     TypedefItem(
-                        Typedef { type_: rustdoc_ty, generics: generics.clean(cx), item_type },
+                        Typedef {
+                            type_: rustdoc_ty,
+                            generics: generics.clean(cx),
+                            item_type: Some(ty),
+                        },
                         false,
                     )
                 }
@@ -1995,23 +2013,22 @@ impl Clean<Vec<Item>> for (&hir::Item<'_>, Option<Symbol>) {
                     bounds: bounds.clean(cx),
                 }),
                 ItemKind::Union(ref variant_data, ref generics) => UnionItem(Union {
-                    struct_type: doctree::struct_type_from_def(&variant_data),
                     generics: generics.clean(cx),
                     fields: variant_data.fields().clean(cx),
                     fields_stripped: false,
                 }),
                 ItemKind::Struct(ref variant_data, ref generics) => StructItem(Struct {
-                    struct_type: doctree::struct_type_from_def(&variant_data),
+                    struct_type: CtorKind::from_hir(variant_data),
                     generics: generics.clean(cx),
                     fields: variant_data.fields().clean(cx),
                     fields_stripped: false,
                 }),
-                ItemKind::Impl { .. } => return clean_impl(item, cx),
+                ItemKind::Impl(ref impl_) => return clean_impl(impl_, item.hir_id, cx),
                 // proc macros can have a name set by attributes
                 ItemKind::Fn(ref sig, ref generics, body_id) => {
                     clean_fn_or_proc_macro(item, sig, generics, body_id, &mut name, cx)
                 }
-                hir::ItemKind::Trait(is_auto, unsafety, ref generics, ref bounds, ref item_ids) => {
+                ItemKind::Trait(is_auto, unsafety, ref generics, ref bounds, ref item_ids) => {
                     let items = item_ids
                         .iter()
                         .map(|ti| cx.tcx.hir().trait_item(ti.id).clean(cx))
@@ -2030,17 +2047,20 @@ impl Clean<Vec<Item>> for (&hir::Item<'_>, Option<Symbol>) {
                 ItemKind::ExternCrate(orig_name) => {
                     return clean_extern_crate(item, name, orig_name, cx);
                 }
+                ItemKind::Use(path, kind) => {
+                    return clean_use_statement(item, name, path, kind, cx);
+                }
                 _ => unreachable!("not yet converted"),
             };
 
-            vec![Item::from_def_id_and_parts(def_id, Some(name.clean(cx)), kind, cx)]
+            vec![Item::from_def_id_and_parts(def_id, Some(name), kind, cx)]
         })
     }
 }
 
 impl Clean<Item> for hir::Variant<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
-        let kind = VariantItem(Variant { kind: self.data.clean(cx) });
+        let kind = VariantItem(self.data.clean(cx));
         let what_rustc_thinks =
             Item::from_hir_id_and_parts(self.id, Some(self.ident.name), kind, cx);
         // don't show `pub` for variants, which are always public
@@ -2048,28 +2068,24 @@ impl Clean<Item> for hir::Variant<'_> {
     }
 }
 
-impl Clean<ImplPolarity> for ty::ImplPolarity {
-    fn clean(&self, _: &DocContext<'_>) -> ImplPolarity {
+impl Clean<bool> for ty::ImplPolarity {
+    /// Returns whether the impl has negative polarity.
+    fn clean(&self, _: &DocContext<'_>) -> bool {
         match self {
             &ty::ImplPolarity::Positive |
             // FIXME: do we want to do something else here?
-            &ty::ImplPolarity::Reservation => ImplPolarity::Positive,
-            &ty::ImplPolarity::Negative => ImplPolarity::Negative,
+            &ty::ImplPolarity::Reservation => false,
+            &ty::ImplPolarity::Negative => true,
         }
     }
 }
 
-fn clean_impl(impl_: &hir::Item<'_>, cx: &DocContext<'_>) -> Vec<Item> {
+fn clean_impl(impl_: &hir::Impl<'_>, hir_id: hir::HirId, cx: &DocContext<'_>) -> Vec<Item> {
     let mut ret = Vec::new();
-    let (trait_, items, for_, unsafety, generics) = match &impl_.kind {
-        hir::ItemKind::Impl { of_trait, items, self_ty, unsafety, generics, .. } => {
-            (of_trait, items, self_ty, *unsafety, generics)
-        }
-        _ => unreachable!(),
-    };
-    let trait_ = trait_.clean(cx);
-    let items = items.iter().map(|ii| cx.tcx.hir().impl_item(ii.id).clean(cx)).collect::<Vec<_>>();
-    let def_id = cx.tcx.hir().local_def_id(impl_.hir_id);
+    let trait_ = impl_.of_trait.clean(cx);
+    let items =
+        impl_.items.iter().map(|ii| cx.tcx.hir().impl_item(ii.id).clean(cx)).collect::<Vec<_>>();
+    let def_id = cx.tcx.hir().local_def_id(hir_id);
 
     // If this impl block is an implementation of the Deref trait, then we
     // need to try inlining the target's inherent impl blocks as well.
@@ -2077,29 +2093,29 @@ fn clean_impl(impl_: &hir::Item<'_>, cx: &DocContext<'_>) -> Vec<Item> {
         build_deref_target_impls(cx, &items, &mut ret);
     }
 
-    let provided: FxHashSet<String> = trait_
+    let provided: FxHashSet<Symbol> = trait_
         .def_id()
-        .map(|did| cx.tcx.provided_trait_methods(did).map(|meth| meth.ident.to_string()).collect())
+        .map(|did| cx.tcx.provided_trait_methods(did).map(|meth| meth.ident.name).collect())
         .unwrap_or_default();
 
-    let for_ = for_.clean(cx);
+    let for_ = impl_.self_ty.clean(cx);
     let type_alias = for_.def_id().and_then(|did| match cx.tcx.def_kind(did) {
         DefKind::TyAlias => Some(cx.tcx.type_of(did).clean(cx)),
         _ => None,
     });
     let make_item = |trait_: Option<Type>, for_: Type, items: Vec<Item>| {
         let kind = ImplItem(Impl {
-            unsafety,
-            generics: generics.clean(cx),
+            unsafety: impl_.unsafety,
+            generics: impl_.generics.clean(cx),
             provided_trait_methods: provided.clone(),
             trait_,
             for_,
             items,
-            polarity: Some(cx.tcx.impl_polarity(def_id).clean(cx)),
+            negative_polarity: cx.tcx.impl_polarity(def_id).clean(cx),
             synthetic: false,
             blanket_impl: None,
         });
-        Item::from_hir_id_and_parts(impl_.hir_id, None, kind, cx)
+        Item::from_hir_id_and_parts(hir_id, None, kind, cx)
     };
     if let Some(type_alias) = type_alias {
         ret.push(make_item(trait_.clone(), type_alias, items.clone()));
@@ -2144,112 +2160,108 @@ fn clean_extern_crate(
             return items;
         }
     }
-    let path = orig_name.map(|x| x.to_string());
     // FIXME: using `from_def_id_and_kind` breaks `rustdoc/masked` for some reason
     vec![Item {
         name: None,
-        attrs: krate.attrs.clean(cx),
+        attrs: box krate.attrs.clean(cx),
         source: krate.span.clean(cx),
         def_id: crate_def_id,
         visibility: krate.vis.clean(cx),
-        stability: None,
-        const_stability: None,
-        deprecation: None,
-        kind: ExternCrateItem(name.clean(cx), path),
+        kind: box ExternCrateItem(name, orig_name),
     }]
 }
 
-impl Clean<Vec<Item>> for doctree::Import<'_> {
-    fn clean(&self, cx: &DocContext<'_>) -> Vec<Item> {
-        // We need this comparison because some imports (for std types for example)
-        // are "inserted" as well but directly by the compiler and they should not be
-        // taken into account.
-        if self.span.ctxt().outer_expn_data().kind == ExpnKind::AstPass(AstPass::StdImports) {
-            return Vec::new();
-        }
-
-        // We consider inlining the documentation of `pub use` statements, but we
-        // forcefully don't inline if this is not public or if the
-        // #[doc(no_inline)] attribute is present.
-        // Don't inline doc(hidden) imports so they can be stripped at a later stage.
-        let mut denied = !self.vis.node.is_pub()
-            || self.attrs.iter().any(|a| {
-                a.has_name(sym::doc)
-                    && match a.meta_item_list() {
-                        Some(l) => {
-                            attr::list_contains_name(&l, sym::no_inline)
-                                || attr::list_contains_name(&l, sym::hidden)
-                        }
-                        None => false,
-                    }
-            });
-        // Also check whether imports were asked to be inlined, in case we're trying to re-export a
-        // crate in Rust 2018+
-        let please_inline = self.attrs.lists(sym::doc).has_word(sym::inline);
-        let path = self.path.clean(cx);
-        let inner = if self.glob {
-            if !denied {
-                let mut visited = FxHashSet::default();
-                if let Some(items) = inline::try_inline_glob(cx, path.res, &mut visited) {
-                    return items;
-                }
-            }
-            Import::new_glob(resolve_use_source(cx, path), true)
-        } else {
-            let name = self.name;
-            if !please_inline {
-                if let Res::Def(DefKind::Mod, did) = path.res {
-                    if !did.is_local() && did.index == CRATE_DEF_INDEX {
-                        // if we're `pub use`ing an extern crate root, don't inline it unless we
-                        // were specifically asked for it
-                        denied = true;
-                    }
-                }
-            }
-            if !denied {
-                let mut visited = FxHashSet::default();
-
-                if let Some(mut items) = inline::try_inline(
-                    cx,
-                    cx.tcx.parent_module(self.id).to_def_id(),
-                    path.res,
-                    name,
-                    Some(self.attrs),
-                    &mut visited,
-                ) {
-                    items.push(Item {
-                        name: None,
-                        attrs: self.attrs.clean(cx),
-                        source: self.span.clean(cx),
-                        def_id: cx.tcx.hir().local_def_id(self.id).to_def_id(),
-                        visibility: self.vis.clean(cx),
-                        stability: None,
-                        const_stability: None,
-                        deprecation: None,
-                        kind: ImportItem(Import::new_simple(
-                            self.name.clean(cx),
-                            resolve_use_source(cx, path),
-                            false,
-                        )),
-                    });
-                    return items;
-                }
-            }
-            Import::new_simple(name.clean(cx), resolve_use_source(cx, path), true)
-        };
-
-        vec![Item {
-            name: None,
-            attrs: self.attrs.clean(cx),
-            source: self.span.clean(cx),
-            def_id: cx.tcx.hir().local_def_id(self.id).to_def_id(),
-            visibility: self.vis.clean(cx),
-            stability: None,
-            const_stability: None,
-            deprecation: None,
-            kind: ImportItem(inner),
-        }]
+fn clean_use_statement(
+    import: &hir::Item<'_>,
+    name: Symbol,
+    path: &hir::Path<'_>,
+    kind: hir::UseKind,
+    cx: &DocContext<'_>,
+) -> Vec<Item> {
+    // We need this comparison because some imports (for std types for example)
+    // are "inserted" as well but directly by the compiler and they should not be
+    // taken into account.
+    if import.span.ctxt().outer_expn_data().kind == ExpnKind::AstPass(AstPass::StdImports) {
+        return Vec::new();
     }
+
+    let (doc_meta_item, please_inline) = import.attrs.lists(sym::doc).get_word_attr(sym::inline);
+    let pub_underscore = import.vis.node.is_pub() && name == kw::Underscore;
+
+    if pub_underscore && please_inline {
+        rustc_errors::struct_span_err!(
+            cx.tcx.sess,
+            doc_meta_item.unwrap().span(),
+            E0780,
+            "anonymous imports cannot be inlined"
+        )
+        .span_label(import.span, "anonymous import")
+        .emit();
+    }
+
+    // We consider inlining the documentation of `pub use` statements, but we
+    // forcefully don't inline if this is not public or if the
+    // #[doc(no_inline)] attribute is present.
+    // Don't inline doc(hidden) imports so they can be stripped at a later stage.
+    let mut denied = !import.vis.node.is_pub()
+        || pub_underscore
+        || import.attrs.iter().any(|a| {
+            a.has_name(sym::doc)
+                && match a.meta_item_list() {
+                    Some(l) => {
+                        attr::list_contains_name(&l, sym::no_inline)
+                            || attr::list_contains_name(&l, sym::hidden)
+                    }
+                    None => false,
+                }
+        });
+
+    // Also check whether imports were asked to be inlined, in case we're trying to re-export a
+    // crate in Rust 2018+
+    let def_id = cx.tcx.hir().local_def_id(import.hir_id).to_def_id();
+    let path = path.clean(cx);
+    let inner = if kind == hir::UseKind::Glob {
+        if !denied {
+            let mut visited = FxHashSet::default();
+            if let Some(items) = inline::try_inline_glob(cx, path.res, &mut visited) {
+                return items;
+            }
+        }
+        Import::new_glob(resolve_use_source(cx, path), true)
+    } else {
+        if !please_inline {
+            if let Res::Def(DefKind::Mod, did) = path.res {
+                if !did.is_local() && did.index == CRATE_DEF_INDEX {
+                    // if we're `pub use`ing an extern crate root, don't inline it unless we
+                    // were specifically asked for it
+                    denied = true;
+                }
+            }
+        }
+        if !denied {
+            let mut visited = FxHashSet::default();
+
+            if let Some(mut items) = inline::try_inline(
+                cx,
+                cx.tcx.parent_module(import.hir_id).to_def_id(),
+                path.res,
+                name,
+                Some(import.attrs),
+                &mut visited,
+            ) {
+                items.push(Item::from_def_id_and_parts(
+                    def_id,
+                    None,
+                    ImportItem(Import::new_simple(name, resolve_use_source(cx, path), false)),
+                    cx,
+                ));
+                return items;
+            }
+        }
+        Import::new_simple(name, resolve_use_source(cx, path), true)
+    };
+
+    vec![Item::from_def_id_and_parts(def_id, None, ImportItem(inner), cx)]
 }
 
 impl Clean<Item> for (&hir::ForeignItem<'_>, Option<Symbol>) {
@@ -2312,18 +2324,19 @@ impl Clean<Item> for (&hir::MacroDef<'_>, Option<Symbol>) {
             )
         } else {
             let vis = item.vis.clean(cx);
+            let def_id = cx.tcx.hir().local_def_id(item.hir_id).to_def_id();
 
             if matchers.len() <= 1 {
                 format!(
                     "{}macro {}{} {{\n    ...\n}}",
-                    vis.print_with_space(),
+                    vis.print_with_space(cx.tcx, def_id, &cx.cache),
                     name,
                     matchers.iter().map(|span| span.to_src(cx)).collect::<String>(),
                 )
             } else {
                 format!(
                     "{}macro {} {{\n{}}}",
-                    vis.print_with_space(),
+                    vis.print_with_space(cx.tcx, def_id, &cx.cache),
                     name,
                     matchers
                         .iter()
@@ -2342,19 +2355,9 @@ impl Clean<Item> for (&hir::MacroDef<'_>, Option<Symbol>) {
     }
 }
 
-impl Clean<Deprecation> for attr::Deprecation {
-    fn clean(&self, _: &DocContext<'_>) -> Deprecation {
-        Deprecation {
-            since: self.since.map(|s| s.to_string()).filter(|s| !s.is_empty()),
-            note: self.note.map(|n| n.to_string()).filter(|n| !n.is_empty()),
-            is_since_rustc_version: self.is_since_rustc_version,
-        }
-    }
-}
-
 impl Clean<TypeBinding> for hir::TypeBinding<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> TypeBinding {
-        TypeBinding { name: self.ident.name.clean(cx), kind: self.kind.clean(cx) }
+        TypeBinding { name: self.ident.name, kind: self.kind.clean(cx) }
     }
 }
 

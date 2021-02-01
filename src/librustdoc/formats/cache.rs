@@ -1,13 +1,12 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::{CrateNum, DefId, CRATE_DEF_INDEX};
 use rustc_middle::middle::privacy::AccessLevels;
 use rustc_span::source_map::FileName;
+use rustc_span::Symbol;
 
 use crate::clean::{self, GetDefId};
 use crate::config::RenderInfo;
@@ -17,8 +16,6 @@ use crate::formats::Impl;
 use crate::html::markdown::short_markdown_summary;
 use crate::html::render::cache::{extern_location, get_index_search_type, ExternalLocation};
 use crate::html::render::IndexItem;
-
-thread_local!(crate static CACHE_KEY: RefCell<Arc<Cache>> = Default::default());
 
 /// This cache is used to store information about the [`clean::Crate`] being
 /// rendered in order to provide more useful documentation. This contains
@@ -74,7 +71,7 @@ crate struct Cache {
     crate implementors: FxHashMap<DefId, Vec<Impl>>,
 
     /// Cache of where external crate documentation can be found.
-    crate extern_locations: FxHashMap<CrateNum, (String, PathBuf, ExternalLocation)>,
+    crate extern_locations: FxHashMap<CrateNum, (Symbol, PathBuf, ExternalLocation)>,
 
     /// Cache of where documentation for primitives can be found.
     crate primitive_locations: FxHashMap<clean::PrimitiveType, DefId>,
@@ -173,10 +170,10 @@ impl Cache {
                 },
                 _ => PathBuf::new(),
             };
-            let extern_url = extern_html_root_urls.get(&e.name).map(|u| &**u);
+            let extern_url = extern_html_root_urls.get(&*e.name.as_str()).map(|u| &**u);
             cache
                 .extern_locations
-                .insert(n, (e.name.clone(), src_root, extern_location(e, extern_url, &dst)));
+                .insert(n, (e.name, src_root, extern_location(e, extern_url, &dst)));
 
             let did = DefId { krate: n, index: CRATE_DEF_INDEX };
             cache.external_paths.insert(did, (vec![e.name.to_string()], ItemType::Module));
@@ -195,7 +192,8 @@ impl Cache {
             cache.primitive_locations.insert(prim, def_id);
         }
 
-        cache.stack.push(krate.name.clone());
+        cache.stack.push(krate.name.to_string());
+
         krate = cache.fold_crate(krate);
 
         for (trait_did, dids, impl_) in cache.orphan_trait_impls.drain(..) {
@@ -218,7 +216,7 @@ impl DocFolder for Cache {
 
         // If this is a stripped module,
         // we don't want it or its children in the search index.
-        let orig_stripped_mod = match item.kind {
+        let orig_stripped_mod = match *item.kind {
             clean::StrippedItem(box clean::ModuleItem(..)) => {
                 mem::replace(&mut self.stripped_mod, true)
             }
@@ -227,7 +225,7 @@ impl DocFolder for Cache {
 
         // If the impl is from a masked crate or references something from a
         // masked crate then remove it completely.
-        if let clean::ImplItem(ref i) = item.kind {
+        if let clean::ImplItem(ref i) = *item.kind {
             if self.masked_crates.contains(&item.def_id.krate)
                 || i.trait_.def_id().map_or(false, |d| self.masked_crates.contains(&d.krate))
                 || i.for_.def_id().map_or(false, |d| self.masked_crates.contains(&d.krate))
@@ -238,12 +236,12 @@ impl DocFolder for Cache {
 
         // Propagate a trait method's documentation to all implementors of the
         // trait.
-        if let clean::TraitItem(ref t) = item.kind {
+        if let clean::TraitItem(ref t) = *item.kind {
             self.traits.entry(item.def_id).or_insert_with(|| t.clone());
         }
 
         // Collect all the implementors of traits.
-        if let clean::ImplItem(ref i) = item.kind {
+        if let clean::ImplItem(ref i) = *item.kind {
             if let Some(did) = i.trait_.def_id() {
                 if i.blanket_impl.is_none() {
                     self.implementors
@@ -256,7 +254,7 @@ impl DocFolder for Cache {
 
         // Index this method for searching later on.
         if let Some(ref s) = item.name {
-            let (parent, is_inherent_impl_item) = match item.kind {
+            let (parent, is_inherent_impl_item) = match *item.kind {
                 clean::StrippedItem(..) => ((None, None), false),
                 clean::AssocConstItem(..) | clean::TypedefItem(_, true)
                     if self.parent_is_trait_impl =>
@@ -315,10 +313,10 @@ impl DocFolder for Cache {
                             path: path.join("::"),
                             desc: item
                                 .doc_value()
-                                .map_or_else(|| String::new(), short_markdown_summary),
+                                .map_or_else(String::new, |x| short_markdown_summary(&x.as_str())),
                             parent,
                             parent_idx: None,
-                            search_type: get_index_search_type(&item),
+                            search_type: get_index_search_type(&item, None),
                         });
 
                         for alias in item.attrs.get_doc_aliases() {
@@ -340,14 +338,14 @@ impl DocFolder for Cache {
 
         // Keep track of the fully qualified path for this item.
         let pushed = match item.name {
-            Some(ref n) if !n.is_empty() => {
+            Some(n) if !n.is_empty() => {
                 self.stack.push(n.to_string());
                 true
             }
             _ => false,
         };
 
-        match item.kind {
+        match *item.kind {
             clean::StructItem(..)
             | clean::EnumItem(..)
             | clean::TypedefItem(..)
@@ -386,7 +384,7 @@ impl DocFolder for Cache {
 
         // Maintain the parent stack
         let orig_parent_is_trait_impl = self.parent_is_trait_impl;
-        let parent_pushed = match item.kind {
+        let parent_pushed = match *item.kind {
             clean::TraitItem(..)
             | clean::EnumItem(..)
             | clean::ForeignTypeItem
@@ -424,38 +422,33 @@ impl DocFolder for Cache {
         // Once we've recursively found all the generics, hoard off all the
         // implementations elsewhere.
         let item = self.fold_item_recur(item);
-        let ret = if let clean::Item { kind: clean::ImplItem(_), .. } = item {
+        let ret = if let clean::Item { kind: box clean::ImplItem(ref i), .. } = item {
             // Figure out the id of this impl. This may map to a
             // primitive rather than always to a struct/enum.
             // Note: matching twice to restrict the lifetime of the `i` borrow.
             let mut dids = FxHashSet::default();
-            if let clean::Item { kind: clean::ImplItem(ref i), .. } = item {
-                match i.for_ {
-                    clean::ResolvedPath { did, .. }
-                    | clean::BorrowedRef { type_: box clean::ResolvedPath { did, .. }, .. } => {
+            match i.for_ {
+                clean::ResolvedPath { did, .. }
+                | clean::BorrowedRef { type_: box clean::ResolvedPath { did, .. }, .. } => {
+                    dids.insert(did);
+                }
+                ref t => {
+                    let did =
+                        t.primitive_type().and_then(|t| self.primitive_locations.get(&t).cloned());
+
+                    if let Some(did) = did {
                         dids.insert(did);
                     }
-                    ref t => {
-                        let did = t
-                            .primitive_type()
-                            .and_then(|t| self.primitive_locations.get(&t).cloned());
+                }
+            }
 
-                        if let Some(did) = did {
-                            dids.insert(did);
-                        }
+            if let Some(generics) = i.trait_.as_ref().and_then(|t| t.generics()) {
+                for bound in generics {
+                    if let Some(did) = bound.def_id() {
+                        dids.insert(did);
                     }
                 }
-
-                if let Some(generics) = i.trait_.as_ref().and_then(|t| t.generics()) {
-                    for bound in generics {
-                        if let Some(did) = bound.def_id() {
-                            dids.insert(did);
-                        }
-                    }
-                }
-            } else {
-                unreachable!()
-            };
+            }
             let impl_item = Impl { impl_item: item };
             if impl_item.trait_did().map_or(true, |d| self.traits.contains_key(&d)) {
                 for did in dids {
@@ -480,8 +473,4 @@ impl DocFolder for Cache {
         self.parent_is_trait_impl = orig_parent_is_trait_impl;
         ret
     }
-}
-
-crate fn cache() -> Arc<Cache> {
-    CACHE_KEY.with(|c| c.borrow().clone())
 }

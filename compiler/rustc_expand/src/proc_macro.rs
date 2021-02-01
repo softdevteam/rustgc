@@ -3,12 +3,13 @@ use crate::proc_macro_server;
 
 use rustc_ast::ptr::P;
 use rustc_ast::token;
-use rustc_ast::tokenstream::{TokenStream, TokenTree};
+use rustc_ast::tokenstream::{CanSynthesizeMissingTokens, TokenStream, TokenTree};
 use rustc_ast::{self as ast, *};
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{struct_span_err, Applicability, ErrorReported};
 use rustc_lexer::is_ident;
 use rustc_parse::nt_to_tokenstream;
+use rustc_parse::parser::ForceCollect;
 use rustc_span::symbol::sym;
 use rustc_span::{Span, DUMMY_SP};
 
@@ -94,7 +95,7 @@ impl MultiItemModifier for ProcMacroDerive {
         let input = if item.pretty_printing_compatibility_hack() {
             TokenTree::token(token::Interpolated(Lrc::new(item)), DUMMY_SP).into()
         } else {
-            nt_to_tokenstream(&item, &ecx.sess.parse_sess, DUMMY_SP)
+            nt_to_tokenstream(&item, &ecx.sess.parse_sess, CanSynthesizeMissingTokens::Yes)
         };
 
         let server = proc_macro_server::Rustc::new(ecx);
@@ -117,7 +118,7 @@ impl MultiItemModifier for ProcMacroDerive {
         let mut items = vec![];
 
         loop {
-            match parser.parse_item() {
+            match parser.parse_item(ForceCollect::No) {
                 Ok(None) => break,
                 Ok(Some(item)) => {
                     if is_stmt {

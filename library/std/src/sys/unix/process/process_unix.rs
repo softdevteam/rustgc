@@ -183,20 +183,26 @@ impl Command {
 
         #[cfg(not(target_os = "l4re"))]
         {
+            if let Some(_g) = self.get_groups() {
+                //FIXME: Redox kernel does not support setgroups yet
+                #[cfg(not(target_os = "redox"))]
+                cvt(libc::setgroups(_g.len().try_into().unwrap(), _g.as_ptr()))?;
+            }
             if let Some(u) = self.get_gid() {
                 cvt(libc::setgid(u as gid_t))?;
             }
             if let Some(u) = self.get_uid() {
                 // When dropping privileges from root, the `setgroups` call
-                // will remove any extraneous groups. If we don't call this,
-                // then even though our uid has dropped, we may still have
-                // groups that enable us to do super-user things. This will
-                // fail if we aren't root, so don't bother checking the
-                // return value, this is just done as an optimistic
-                // privilege dropping function.
+                // will remove any extraneous groups. We only drop groups
+                // if the current uid is 0 and we weren't given an explicit
+                // set of groups. If we don't call this, then even though our
+                // uid has dropped, we may still have groups that enable us to
+                // do super-user things.
                 //FIXME: Redox kernel does not support setgroups yet
                 #[cfg(not(target_os = "redox"))]
-                let _ = libc::setgroups(0, ptr::null());
+                if libc::getuid() == 0 && self.get_groups().is_none() {
+                    cvt(libc::setgroups(0, ptr::null()))?;
+                }
                 cvt(libc::setuid(u as uid_t))?;
             }
         }
@@ -287,6 +293,7 @@ impl Command {
             || self.get_uid().is_some()
             || (self.env_saw_path() && !self.program_is_path())
             || !self.get_closures().is_empty()
+            || self.get_groups().is_some()
         {
             return Ok(None);
         }
@@ -314,10 +321,20 @@ impl Command {
             ) -> libc::c_int
         }
         let addchdir = match self.get_cwd() {
-            Some(cwd) => match posix_spawn_file_actions_addchdir_np.get() {
-                Some(f) => Some((f, cwd)),
-                None => return Ok(None),
-            },
+            Some(cwd) => {
+                if cfg!(target_os = "macos") {
+                    // There is a bug in macOS where a relative executable
+                    // path like "../myprogram" will cause `posix_spawn` to
+                    // successfully launch the program, but erroneously return
+                    // ENOENT when used with posix_spawn_file_actions_addchdir_np
+                    // which was introduced in macOS 10.15.
+                    return Ok(None);
+                }
+                match posix_spawn_file_actions_addchdir_np.get() {
+                    Some(f) => Some((f, cwd)),
+                    None => return Ok(None),
+                }
+            }
             None => None,
         };
 
@@ -479,7 +496,23 @@ impl ExitStatus {
     }
 
     pub fn signal(&self) -> Option<i32> {
-        if !self.exited() { Some(libc::WTERMSIG(self.0)) } else { None }
+        if libc::WIFSIGNALED(self.0) { Some(libc::WTERMSIG(self.0)) } else { None }
+    }
+
+    pub fn core_dumped(&self) -> bool {
+        libc::WIFSIGNALED(self.0) && libc::WCOREDUMP(self.0)
+    }
+
+    pub fn stopped_signal(&self) -> Option<i32> {
+        if libc::WIFSTOPPED(self.0) { Some(libc::WSTOPSIG(self.0)) } else { None }
+    }
+
+    pub fn continued(&self) -> bool {
+        libc::WIFCONTINUED(self.0)
+    }
+
+    pub fn into_raw(&self) -> c_int {
+        self.0
     }
 }
 

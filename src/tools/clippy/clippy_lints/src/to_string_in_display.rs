@@ -1,7 +1,7 @@
-use crate::utils::{match_def_path, match_trait_method, paths, qpath_res, span_lint};
+use crate::utils::{match_def_path, match_trait_method, paths, span_lint};
 use if_chain::if_chain;
 use rustc_hir::def::Res;
-use rustc_hir::{Expr, ExprKind, HirId, ImplItem, ImplItemKind, Item, ItemKind};
+use rustc_hir::{Expr, ExprKind, HirId, Impl, ImplItem, ImplItemKind, Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 
@@ -94,7 +94,7 @@ impl LateLintPass<'_> for ToStringInDisplay {
             if match_trait_method(cx, expr, &paths::TO_STRING);
             if self.in_display_impl;
             if let ExprKind::Path(ref qpath) = args[0].kind;
-            if let Res::Local(hir_id) = qpath_res(cx, qpath, args[0].hir_id);
+            if let Res::Local(hir_id) = cx.qpath_res(qpath, args[0].hir_id);
             if let Some(self_hir_id) = self.self_hir_id;
             if hir_id == self_hir_id;
             then {
@@ -111,7 +111,7 @@ impl LateLintPass<'_> for ToStringInDisplay {
 
 fn is_display_impl(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
     if_chain! {
-        if let ItemKind::Impl { of_trait: Some(trait_ref), .. } = &item.kind;
+        if let ItemKind::Impl(Impl { of_trait: Some(trait_ref), .. }) = &item.kind;
         if let Some(did) = trait_ref.trait_def_id();
         then {
             match_def_path(cx, did, &paths::DISPLAY_TRAIT)

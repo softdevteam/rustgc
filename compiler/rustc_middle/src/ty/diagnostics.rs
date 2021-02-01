@@ -1,8 +1,7 @@
 //! Diagnostics related methods for `TyS`.
 
-use crate::ty::sty::InferTy;
 use crate::ty::TyKind::*;
-use crate::ty::{TyCtxt, TyS};
+use crate::ty::{InferTy, TyCtxt, TyS};
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -245,8 +244,8 @@ pub fn suggest_constraining_type_param(
                 }
             }
 
-            match &param_spans[..] {
-                &[&param_span] => suggest_restrict(param_span.shrink_to_hi()),
+            match param_spans[..] {
+                [&param_span] => suggest_restrict(param_span.shrink_to_hi()),
                 _ => {
                     err.span_suggestion_verbose(
                         generics.where_clause.tail_span_for_suggestion(),

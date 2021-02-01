@@ -10,6 +10,7 @@ use rustc_middle::mir;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::def_id::DefId;
 use rustc_target::abi::Size;
+use rustc_target::spec::abi::Abi;
 
 use super::{
     AllocId, Allocation, AllocationExtra, CheckInAllocMsg, Frame, ImmTy, InterpCx, InterpResult,
@@ -131,6 +132,16 @@ pub trait Machine<'mir, 'tcx>: Sized {
     /// Whether to enforce the validity invariant
     fn enforce_validity(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
 
+    /// Entry point for obtaining the MIR of anything that should get evaluated.
+    /// So not just functions and shims, but also const/static initializers, anonymous
+    /// constants, ...
+    fn load_mir(
+        ecx: &InterpCx<'mir, 'tcx, Self>,
+        instance: ty::InstanceDef<'tcx>,
+    ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
+        Ok(ecx.tcx.instance_mir(instance))
+    }
+
     /// Entry point to all function calls.
     ///
     /// Returns either the mir to use for the call, or `None` if execution should
@@ -144,6 +155,7 @@ pub trait Machine<'mir, 'tcx>: Sized {
     fn find_mir_or_eval_fn(
         ecx: &mut InterpCx<'mir, 'tcx, Self>,
         instance: ty::Instance<'tcx>,
+        abi: Abi,
         args: &[OpTy<'tcx, Self::PointerTag>],
         ret: Option<(PlaceTy<'tcx, Self::PointerTag>, mir::BasicBlock)>,
         unwind: Option<mir::BasicBlock>,
@@ -154,6 +166,7 @@ pub trait Machine<'mir, 'tcx>: Sized {
     fn call_extra_fn(
         ecx: &mut InterpCx<'mir, 'tcx, Self>,
         fn_val: Self::ExtraFnVal,
+        abi: Abi,
         args: &[OpTy<'tcx, Self::PointerTag>],
         ret: Option<(PlaceTy<'tcx, Self::PointerTag>, mir::BasicBlock)>,
         unwind: Option<mir::BasicBlock>,
@@ -405,6 +418,7 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
     fn call_extra_fn(
         _ecx: &mut InterpCx<$mir, $tcx, Self>,
         fn_val: !,
+        _abi: Abi,
         _args: &[OpTy<$tcx>],
         _ret: Option<(PlaceTy<$tcx>, mir::BasicBlock)>,
         _unwind: Option<mir::BasicBlock>,

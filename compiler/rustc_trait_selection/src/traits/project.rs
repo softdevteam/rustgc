@@ -496,12 +496,6 @@ fn opt_normalize_projection_type<'a, 'b, 'tcx>(
             return Ok(None);
         }
         Err(ProjectionCacheEntry::InProgress) => {
-            // If while normalized A::B, we are asked to normalize
-            // A::B, just return A::B itself. This is a conservative
-            // answer, in the sense that A::B *is* clearly equivalent
-            // to A::B, though there may be a better value we can
-            // find.
-
             // Under lazy normalization, this can arise when
             // bootstrapping.  That is, imagine an environment with a
             // where-clause like `A::B == u32`. Now, if we are asked
@@ -512,6 +506,14 @@ fn opt_normalize_projection_type<'a, 'b, 'tcx>(
 
             debug!("found cache entry: in-progress");
 
+            // Cache that normalizing this projection resulted in a cycle. This
+            // should ensure that, unless this happens within a snapshot that's
+            // rolled back, fulfillment or evaluation will notice the cycle.
+
+            infcx.inner.borrow_mut().projection_cache().recur(cache_key);
+            return Err(InProgress);
+        }
+        Err(ProjectionCacheEntry::Recur) => {
             return Err(InProgress);
         }
         Err(ProjectionCacheEntry::NormalizedTy(ty)) => {
@@ -623,7 +625,7 @@ fn prune_cache_value_obligations<'a, 'tcx>(
         .obligations
         .iter()
         .filter(|obligation| {
-            let bound_predicate = obligation.predicate.bound_atom();
+            let bound_predicate = obligation.predicate.kind();
             match bound_predicate.skip_binder() {
                 // We found a `T: Foo<X = U>` predicate, let's check
                 // if `U` references any unresolved type
@@ -634,7 +636,7 @@ fn prune_cache_value_obligations<'a, 'tcx>(
                 // indirect obligations (e.g., we project to `?0`,
                 // but we have `T: Foo<X = ?1>` and `?1: Bar<X =
                 // ?0>`).
-                ty::PredicateAtom::Projection(data) => {
+                ty::PredicateKind::Projection(data) => {
                     infcx.unresolved_type_vars(&bound_predicate.rebind(data.ty)).is_some()
                 }
 
@@ -734,6 +736,8 @@ fn project_type<'cx, 'tcx>(
 
     if !selcx.tcx().sess.recursion_limit().value_within_limit(obligation.recursion_depth) {
         debug!("project: overflow!");
+        // This should really be an immediate error, but some existing code
+        // relies on being able to recover from this.
         return Err(ProjectionTyError::TraitSelectionError(SelectionError::Overflow));
     }
 
@@ -908,8 +912,8 @@ fn assemble_candidates_from_predicates<'cx, 'tcx>(
     let infcx = selcx.infcx();
     for predicate in env_predicates {
         debug!(?predicate);
-        let bound_predicate = predicate.bound_atom();
-        if let ty::PredicateAtom::Projection(data) = predicate.skip_binders() {
+        let bound_predicate = predicate.kind();
+        if let ty::PredicateKind::Projection(data) = predicate.kind().skip_binder() {
             let data = bound_predicate.rebind(data);
             let same_def_id = data.projection_def_id() == obligation.predicate.item_def_id;
 
@@ -951,7 +955,7 @@ fn assemble_candidates_from_impls<'cx, 'tcx>(
 
     // If we are resolving `<T as TraitRef<...>>::Item == Type`,
     // start out by selecting the predicate `T as TraitRef<...>`:
-    let poly_trait_ref = obligation_trait_ref.to_poly_trait_ref();
+    let poly_trait_ref = ty::Binder::dummy(*obligation_trait_ref);
     let trait_obligation = obligation.with(poly_trait_ref.to_poly_trait_predicate());
     let _ = selcx.infcx().commit_if_ok(|_| {
         let impl_source = match selcx.select(&trait_obligation) {
@@ -1247,7 +1251,9 @@ fn confirm_discriminant_kind_candidate<'cx, 'tcx>(
         ty: self_ty.discriminant_ty(tcx),
     };
 
-    confirm_param_env_candidate(selcx, obligation, ty::Binder::bind(predicate), false)
+    // We get here from `poly_project_and_unify_type` which replaces bound vars
+    // with placeholders, so dummy is okay here.
+    confirm_param_env_candidate(selcx, obligation, ty::Binder::dummy(predicate), false)
 }
 
 fn confirm_fn_pointer_candidate<'cx, 'tcx>(

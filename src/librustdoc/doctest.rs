@@ -1,4 +1,5 @@
 use rustc_ast as ast;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{ColorConfig, ErrorReported};
 use rustc_hir as hir;
@@ -16,7 +17,6 @@ use rustc_span::{BytePos, FileName, Pos, Span, DUMMY_SP};
 use rustc_target::spec::TargetTriple;
 use tempfile::Builder as TempFileBuilder;
 
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 use std::panic;
@@ -247,9 +247,10 @@ fn run_test(
     edition: Edition,
     outdir: DirState,
     path: PathBuf,
+    test_id: &str,
 ) -> Result<(), TestFailure> {
     let (test, line_offset, supports_color) =
-        make_test(test, Some(cratename), as_test_harness, opts, edition);
+        make_test(test, Some(cratename), as_test_harness, opts, edition, Some(test_id));
 
     let output_file = outdir.path().join("rust_out");
 
@@ -364,6 +365,9 @@ fn run_test(
     } else {
         cmd = Command::new(output_file);
     }
+    if let Some(run_directory) = options.test_run_directory {
+        cmd.current_dir(run_directory);
+    }
 
     match cmd.output() {
         Err(e) => return Err(TestFailure::ExecutionError(e)),
@@ -387,6 +391,7 @@ crate fn make_test(
     dont_insert_main: bool,
     opts: &TestOptions,
     edition: Edition,
+    test_id: Option<&str>,
 ) -> (String, usize, bool) {
     let (crate_attrs, everything_else, crates) = partition_source(s);
     let everything_else = everything_else.trim();
@@ -421,6 +426,7 @@ crate fn make_test(
             use rustc_errors::emitter::{Emitter, EmitterWriter};
             use rustc_errors::Handler;
             use rustc_parse::maybe_new_parser_from_source_str;
+            use rustc_parse::parser::ForceCollect;
             use rustc_session::parse::ParseSess;
             use rustc_span::source_map::FilePathMapping;
 
@@ -457,7 +463,7 @@ crate fn make_test(
             };
 
             loop {
-                match parser.parse_item() {
+                match parser.parse_item(ForceCollect::No) {
                     Ok(Some(item)) => {
                         if !found_main {
                             if let ast::ItemKind::Fn(..) = item.kind {
@@ -497,6 +503,12 @@ crate fn make_test(
                     }
                 }
             }
+
+            // Reset errors so that they won't be reported as compiler bugs when dropping the
+            // handler. Any errors in the tests will be reported when the test file is compiled,
+            // Note that we still need to cancel the errors above otherwise `DiagnosticBuilder`
+            // will panic on drop.
+            sess.span_diagnostic.reset_err_count();
 
             (found_main, found_extern_crate, found_macro)
         })
@@ -542,16 +554,41 @@ crate fn make_test(
         prog.push_str(everything_else);
     } else {
         let returns_result = everything_else.trim_end().ends_with("(())");
+        // Give each doctest main function a unique name.
+        // This is for example needed for the tooling around `-Z instrument-coverage`.
+        let inner_fn_name = if let Some(test_id) = test_id {
+            format!("_doctest_main_{}", test_id)
+        } else {
+            "_inner".into()
+        };
+        let inner_attr = if test_id.is_some() { "#[allow(non_snake_case)] " } else { "" };
         let (main_pre, main_post) = if returns_result {
             (
-                "fn main() { fn _inner() -> Result<(), impl core::fmt::Debug> {",
-                "}\n_inner().unwrap() }",
+                format!(
+                    "fn main() {{ {}fn {}() -> Result<(), impl core::fmt::Debug> {{\n",
+                    inner_attr, inner_fn_name
+                ),
+                format!("\n}} {}().unwrap() }}", inner_fn_name),
+            )
+        } else if test_id.is_some() {
+            (
+                format!("fn main() {{ {}fn {}() {{\n", inner_attr, inner_fn_name),
+                format!("\n}} {}() }}", inner_fn_name),
             )
         } else {
-            ("fn main() {\n", "\n}")
+            ("fn main() {\n".into(), "\n}".into())
         };
-        prog.extend([main_pre, everything_else, main_post].iter().cloned());
+        // Note on newlines: We insert a line/newline *before*, and *after*
+        // the doctest and adjust the `line_offset` accordingly.
+        // In the case of `-Z instrument-coverage`, this means that the generated
+        // inner `main` function spans from the doctest opening codeblock to the
+        // closing one. For example
+        // /// ``` <- start of the inner main
+        // /// <- code under doctest
+        // /// ``` <- end of the inner main
         line_offset += 1;
+
+        prog.extend([&main_pre, everything_else, &main_post].iter().cloned());
     }
 
     debug!("final doctest:\n{}", prog);
@@ -609,15 +646,15 @@ fn partition_source(s: &str) -> (String, String, String) {
         match state {
             PartitionState::Attrs => {
                 before.push_str(line);
-                before.push_str("\n");
+                before.push('\n');
             }
             PartitionState::Crates => {
                 crates.push_str(line);
-                crates.push_str("\n");
+                crates.push('\n');
             }
             PartitionState::Other => {
                 after.push_str(line);
-                after.push_str("\n");
+                after.push('\n');
             }
         }
     }
@@ -670,7 +707,7 @@ crate struct Collector {
     position: Span,
     source_map: Option<Lrc<SourceMap>>,
     filename: Option<PathBuf>,
-    visited_tests: HashMap<(String, usize), usize>,
+    visited_tests: FxHashMap<(String, usize), usize>,
 }
 
 impl Collector {
@@ -694,7 +731,7 @@ impl Collector {
             position: DUMMY_SP,
             source_map,
             filename,
-            visited_tests: HashMap::new(),
+            visited_tests: FxHashMap::default(),
         }
     }
 
@@ -749,28 +786,24 @@ impl Tester for Collector {
             _ => PathBuf::from(r"doctest.rs"),
         };
 
+        // For example `module/file.rs` would become `module_file_rs`
+        let file = filename
+            .to_string()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>();
+        let test_id = format!(
+            "{file}_{line}_{number}",
+            file = file,
+            line = line,
+            number = {
+                // Increases the current test number, if this file already
+                // exists or it creates a new entry with a test number of 0.
+                self.visited_tests.entry((file.clone(), line)).and_modify(|v| *v += 1).or_insert(0)
+            },
+        );
         let outdir = if let Some(mut path) = options.persist_doctests.clone() {
-            // For example `module/file.rs` would become `module_file_rs`
-            let folder_name = filename
-                .to_string()
-                .chars()
-                .map(|c| if c == '\\' || c == '/' || c == '.' { '_' } else { c })
-                .collect::<String>();
-
-            path.push(format!(
-                "{krate}_{file}_{line}_{number}",
-                krate = cratename,
-                file = folder_name,
-                line = line,
-                number = {
-                    // Increases the current test number, if this file already
-                    // exists or it creates a new entry with a test number of 0.
-                    self.visited_tests
-                        .entry((folder_name.clone(), line))
-                        .and_modify(|v| *v += 1)
-                        .or_insert(0)
-                },
-            ));
+            path.push(&test_id);
 
             std::fs::create_dir_all(&path)
                 .expect("Couldn't create directory for doctest executables");
@@ -817,6 +850,7 @@ impl Tester for Collector {
                     edition,
                     outdir,
                     path,
+                    &test_id,
                 );
 
                 if let Err(err) = res {
@@ -963,7 +997,6 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
             self.collector.names.push(name);
         }
 
-        attrs.collapse_doc_comments();
         attrs.unindent_doc_comments();
         // The collapse-docs pass won't combine sugared/raw doc attributes, or included files with
         // anything else, this will combine them for us.
@@ -980,7 +1013,7 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
                 self.codes,
                 self.collector.enable_per_target_ignores,
                 Some(&crate::html::markdown::ExtraInfo::new(
-                    &self.tcx,
+                    self.tcx,
                     hir_id,
                     span_of_attrs(&attrs).unwrap_or(sp),
                 )),
@@ -1003,8 +1036,8 @@ impl<'a, 'hir, 'tcx> intravisit::Visitor<'hir> for HirCollector<'a, 'hir, 'tcx> 
     }
 
     fn visit_item(&mut self, item: &'hir hir::Item<'_>) {
-        let name = if let hir::ItemKind::Impl { ref self_ty, .. } = item.kind {
-            rustc_hir_pretty::id_to_string(&self.map, self_ty.hir_id)
+        let name = if let hir::ItemKind::Impl(impl_) = &item.kind {
+            rustc_hir_pretty::id_to_string(&self.map, impl_.self_ty.hir_id)
         } else {
             item.ident.to_string()
         };

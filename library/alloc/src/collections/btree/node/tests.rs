@@ -29,13 +29,7 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> 
             navigate::Position::Leaf(leaf) => {
                 let depth = self.height();
                 let indent = "  ".repeat(depth);
-                result += &format!("\n{}", indent);
-                for idx in 0..leaf.len() {
-                    if idx > 0 {
-                        result += ", ";
-                    }
-                    result += &format!("{:?}", unsafe { leaf.key_at(idx) });
-                }
+                result += &format!("\n{}{:?}", indent, leaf.keys());
             }
             navigate::Position::Internal(_) => {}
             navigate::Position::InternalKV(kv) => {
@@ -75,10 +69,8 @@ fn test_splitpoint() {
 #[test]
 fn test_partial_cmp_eq() {
     let mut root1 = NodeRef::new_leaf();
-    let mut leaf1 = root1.borrow_mut();
-    leaf1.push(1, ());
-    let mut root1 = root1.forget_type();
-    root1.push_internal_level();
+    root1.borrow_mut().push(1, ());
+    let mut root1 = NodeRef::new_internal(root1.forget_type()).forget_type();
     let root2 = Root::new();
     root1.reborrow().assert_back_pointers();
     root2.reborrow().assert_back_pointers();
@@ -103,8 +95,8 @@ fn test_partial_cmp_eq() {
     assert_eq!(top_edge_1.partial_cmp(&top_edge_2), None);
 
     root1.pop_internal_level();
-    unsafe { root1.deallocate_and_ascend() };
-    unsafe { root2.deallocate_and_ascend() };
+    unsafe { root1.into_dying().deallocate_and_ascend() };
+    unsafe { root2.into_dying().deallocate_and_ascend() };
 }
 
 #[test]

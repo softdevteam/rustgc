@@ -161,7 +161,10 @@ use super::SpecExtend;
 /// It is a logic error for an item to be modified in such a way that the
 /// item's ordering relative to any other item, as determined by the `Ord`
 /// trait, changes while it is in the heap. This is normally only possible
-/// through `Cell`, `RefCell`, global state, I/O, or unsafe code.
+/// through `Cell`, `RefCell`, global state, I/O, or unsafe code. The
+/// behavior resulting from such a logic error is not specified, but will
+/// not result in undefined behavior. This could include panics, incorrect
+/// results, aborts, memory leaks, and non-termination.
 ///
 /// # Examples
 ///
@@ -630,10 +633,16 @@ impl<T: Ord> BinaryHeap<T> {
         // and about 2 * (len1 + len2) comparisons in the worst case
         // while `extend` takes O(len2 * log(len1)) operations
         // and about 1 * len2 * log_2(len1) comparisons in the worst case,
-        // assuming len1 >= len2.
+        // assuming len1 >= len2. For larger heaps, the crossover point
+        // no longer follows this reasoning and was determined empirically.
         #[inline]
         fn better_to_rebuild(len1: usize, len2: usize) -> bool {
-            2 * (len1 + len2) < len2 * log2_fast(len1)
+            let tot_len = len1 + len2;
+            if tot_len <= 2048 {
+                2 * tot_len < len2 * log2_fast(len1)
+            } else {
+                2 * tot_len < len2 * 11
+            }
         }
 
         if better_to_rebuild(self.len(), other.len()) {
@@ -861,8 +870,7 @@ impl<T> BinaryHeap<T> {
     /// The capacity will remain at least as large as both the length
     /// and the supplied value.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
+    /// If the current capacity is less than the lower limit, this is a no-op.
     ///
     /// # Examples
     ///
@@ -915,6 +923,7 @@ impl<T> BinaryHeap<T> {
     ///
     /// assert_eq!(heap.len(), 2);
     /// ```
+    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> usize {
         self.data.len()

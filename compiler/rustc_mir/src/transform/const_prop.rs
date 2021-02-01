@@ -25,6 +25,7 @@ use rustc_middle::ty::{
 use rustc_session::lint;
 use rustc_span::{def_id::DefId, Span};
 use rustc_target::abi::{HasDataLayout, LayoutOf, Size, TargetDataLayout};
+use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
 
 use crate::const_eval::ConstEvalErr;
@@ -138,7 +139,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
             Default::default(),
             body.arg_count,
             Default::default(),
-            tcx.def_span(def_id),
+            body.span,
             body.generator_kind,
         );
 
@@ -184,9 +185,17 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for ConstPropMachine<'mir, 'tcx>
 
     type MemoryExtra = ();
 
+    fn load_mir(
+        _ecx: &InterpCx<'mir, 'tcx, Self>,
+        _instance: ty::InstanceDef<'tcx>,
+    ) -> InterpResult<'tcx, &'tcx Body<'tcx>> {
+        throw_machine_stop_str!("calling functions isn't supported in ConstProp")
+    }
+
     fn find_mir_or_eval_fn(
         _ecx: &mut InterpCx<'mir, 'tcx, Self>,
         _instance: ty::Instance<'tcx>,
+        _abi: Abi,
         _args: &[OpTy<'tcx>],
         _ret: Option<(PlaceTy<'tcx>, BasicBlock)>,
         _unwind: Option<BasicBlock>,
@@ -431,7 +440,15 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     }
 
     fn lint_root(&self, source_info: SourceInfo) -> Option<HirId> {
-        match &self.source_scopes[source_info.scope].local_data {
+        let mut data = &self.source_scopes[source_info.scope];
+        // FIXME(oli-obk): we should be able to just walk the `inlined_parent_scope`, but it
+        // does not work as I thought it would. Needs more investigation and documentation.
+        while data.inlined.is_some() {
+            trace!(?data);
+            data = &self.source_scopes[data.parent_scope.unwrap()];
+        }
+        trace!(?data);
+        match &data.local_data {
             ClearCrossCrate::Set(data) => Some(data.lint_root),
             ClearCrossCrate::Clear => None,
         }

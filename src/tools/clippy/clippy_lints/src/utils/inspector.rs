@@ -213,6 +213,15 @@ fn print_expr(cx: &LateContext<'_>, expr: &hir::Expr<'_>, indent: usize) {
         hir::ExprKind::Loop(..) => {
             println!("{}Loop", ind);
         },
+        hir::ExprKind::If(ref cond, _, ref else_opt) => {
+            println!("{}If", ind);
+            println!("{}condition:", ind);
+            print_expr(cx, cond, indent + 1);
+            if let Some(ref els) = *else_opt {
+                println!("{}else:", ind);
+                print_expr(cx, els, indent + 1);
+            }
+        },
         hir::ExprKind::Match(ref cond, _, ref source) => {
             println!("{}Match", ind);
             println!("{}condition:", ind);
@@ -423,13 +432,13 @@ fn print_item(cx: &LateContext<'_>, item: &hir::Item<'_>) {
         hir::ItemKind::TraitAlias(..) => {
             println!("trait alias");
         },
-        hir::ItemKind::Impl {
+        hir::ItemKind::Impl(hir::Impl {
             of_trait: Some(ref _trait_ref),
             ..
-        } => {
+        }) => {
             println!("trait impl");
         },
-        hir::ItemKind::Impl { of_trait: None, .. } => {
+        hir::ItemKind::Impl(hir::Impl { of_trait: None, .. }) => {
             println!("impl");
         },
     }
@@ -558,6 +567,11 @@ fn print_guard(cx: &LateContext<'_>, guard: &hir::Guard<'_>, indent: usize) {
     match guard {
         hir::Guard::If(expr) => {
             println!("{}If", ind);
+            print_expr(cx, expr, indent + 1);
+        },
+        hir::Guard::IfLet(pat, expr) => {
+            println!("{}IfLet", ind);
+            print_pat(cx, pat, indent + 1);
             print_expr(cx, expr, indent + 1);
         },
     }

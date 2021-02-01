@@ -346,26 +346,26 @@ impl<'tcx> chalk_solve::RustIrDatabase<RustInterner<'tcx>> for RustIrDatabase<'t
                 (ty::Char, Scalar(Char)) => true,
                 (ty::Int(ty1), Scalar(Int(ty2))) => matches!(
                     (ty1, ty2),
-                    (ast::IntTy::Isize, chalk_ir::IntTy::Isize)
-                        | (ast::IntTy::I8, chalk_ir::IntTy::I8)
-                        | (ast::IntTy::I16, chalk_ir::IntTy::I16)
-                        | (ast::IntTy::I32, chalk_ir::IntTy::I32)
-                        | (ast::IntTy::I64, chalk_ir::IntTy::I64)
-                        | (ast::IntTy::I128, chalk_ir::IntTy::I128)
+                    (ty::IntTy::Isize, chalk_ir::IntTy::Isize)
+                        | (ty::IntTy::I8, chalk_ir::IntTy::I8)
+                        | (ty::IntTy::I16, chalk_ir::IntTy::I16)
+                        | (ty::IntTy::I32, chalk_ir::IntTy::I32)
+                        | (ty::IntTy::I64, chalk_ir::IntTy::I64)
+                        | (ty::IntTy::I128, chalk_ir::IntTy::I128)
                 ),
                 (ty::Uint(ty1), Scalar(Uint(ty2))) => matches!(
                     (ty1, ty2),
-                    (ast::UintTy::Usize, chalk_ir::UintTy::Usize)
-                        | (ast::UintTy::U8, chalk_ir::UintTy::U8)
-                        | (ast::UintTy::U16, chalk_ir::UintTy::U16)
-                        | (ast::UintTy::U32, chalk_ir::UintTy::U32)
-                        | (ast::UintTy::U64, chalk_ir::UintTy::U64)
-                        | (ast::UintTy::U128, chalk_ir::UintTy::U128)
+                    (ty::UintTy::Usize, chalk_ir::UintTy::Usize)
+                        | (ty::UintTy::U8, chalk_ir::UintTy::U8)
+                        | (ty::UintTy::U16, chalk_ir::UintTy::U16)
+                        | (ty::UintTy::U32, chalk_ir::UintTy::U32)
+                        | (ty::UintTy::U64, chalk_ir::UintTy::U64)
+                        | (ty::UintTy::U128, chalk_ir::UintTy::U128)
                 ),
                 (ty::Float(ty1), Scalar(Float(ty2))) => matches!(
                     (ty1, ty2),
-                    (ast::FloatTy::F32, chalk_ir::FloatTy::F32)
-                        | (ast::FloatTy::F64, chalk_ir::FloatTy::F64)
+                    (ty::FloatTy::F32, chalk_ir::FloatTy::F32)
+                        | (ty::FloatTy::F64, chalk_ir::FloatTy::F64)
                 ),
                 (&ty::Tuple(substs), Tuple(len, _)) => substs.len() == *len,
                 (&ty::Array(..), Array(..)) => true,
@@ -648,7 +648,7 @@ impl<'tcx> chalk_solve::RustIrDatabase<RustInterner<'tcx>> for RustIrDatabase<'t
 
 /// Creates a `InternalSubsts` that maps each generic parameter to a higher-ranked
 /// var bound at index `0`. For types, we use a `BoundVar` index equal to
-/// the type parameter index. For regions, we use the `BoundRegion::BrNamed`
+/// the type parameter index. For regions, we use the `BoundRegionKind::BrNamed`
 /// variant (which has a `DefId`).
 fn bound_vars_for_item(tcx: TyCtxt<'tcx>, def_id: DefId) -> SubstsRef<'tcx> {
     InternalSubsts::for_item(tcx, def_id, |param, substs| match param.kind {
@@ -662,12 +662,10 @@ fn bound_vars_for_item(tcx: TyCtxt<'tcx>, def_id: DefId) -> SubstsRef<'tcx> {
             ))
             .into(),
 
-        ty::GenericParamDefKind::Lifetime => tcx
-            .mk_region(ty::RegionKind::ReLateBound(
-                ty::INNERMOST,
-                ty::BoundRegion::BrAnon(substs.len() as u32),
-            ))
-            .into(),
+        ty::GenericParamDefKind::Lifetime => {
+            let br = ty::BoundRegion { kind: ty::BrAnon(substs.len() as u32) };
+            tcx.mk_region(ty::RegionKind::ReLateBound(ty::INNERMOST, br)).into()
+        }
 
         ty::GenericParamDefKind::Const => tcx
             .mk_const(ty::Const {

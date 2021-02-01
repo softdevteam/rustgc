@@ -18,7 +18,6 @@ use crate::llvm::debuginfo::{
 };
 use crate::value::Value;
 
-use rustc_ast as ast;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::const_cstr;
 use rustc_data_structures::fingerprint::Fingerprint;
@@ -830,37 +829,37 @@ trait MsvcBasicName {
     fn msvc_basic_name(self) -> &'static str;
 }
 
-impl MsvcBasicName for ast::IntTy {
+impl MsvcBasicName for ty::IntTy {
     fn msvc_basic_name(self) -> &'static str {
         match self {
-            ast::IntTy::Isize => "ptrdiff_t",
-            ast::IntTy::I8 => "__int8",
-            ast::IntTy::I16 => "__int16",
-            ast::IntTy::I32 => "__int32",
-            ast::IntTy::I64 => "__int64",
-            ast::IntTy::I128 => "__int128",
+            ty::IntTy::Isize => "ptrdiff_t",
+            ty::IntTy::I8 => "__int8",
+            ty::IntTy::I16 => "__int16",
+            ty::IntTy::I32 => "__int32",
+            ty::IntTy::I64 => "__int64",
+            ty::IntTy::I128 => "__int128",
         }
     }
 }
 
-impl MsvcBasicName for ast::UintTy {
+impl MsvcBasicName for ty::UintTy {
     fn msvc_basic_name(self) -> &'static str {
         match self {
-            ast::UintTy::Usize => "size_t",
-            ast::UintTy::U8 => "unsigned __int8",
-            ast::UintTy::U16 => "unsigned __int16",
-            ast::UintTy::U32 => "unsigned __int32",
-            ast::UintTy::U64 => "unsigned __int64",
-            ast::UintTy::U128 => "unsigned __int128",
+            ty::UintTy::Usize => "size_t",
+            ty::UintTy::U8 => "unsigned __int8",
+            ty::UintTy::U16 => "unsigned __int16",
+            ty::UintTy::U32 => "unsigned __int32",
+            ty::UintTy::U64 => "unsigned __int64",
+            ty::UintTy::U128 => "unsigned __int128",
         }
     }
 }
 
-impl MsvcBasicName for ast::FloatTy {
+impl MsvcBasicName for ty::FloatTy {
     fn msvc_basic_name(self) -> &'static str {
         match self {
-            ast::FloatTy::F32 => "float",
-            ast::FloatTy::F64 => "double",
+            ty::FloatTy::F32 => "float",
+            ty::FloatTy::F64 => "double",
         }
     }
 }
@@ -993,9 +992,18 @@ pub fn compile_unit_metadata(
     let producer = format!("clang LLVM ({})", rustc_producer);
 
     let name_in_debuginfo = name_in_debuginfo.to_string_lossy();
-    let work_dir = tcx.sess.working_dir.0.to_string_lossy();
     let flags = "\0";
-    let split_name = "";
+
+    let out_dir = &tcx.output_filenames(LOCAL_CRATE).out_directory;
+    let split_name = if tcx.sess.target_can_use_split_dwarf() {
+        tcx.output_filenames(LOCAL_CRATE)
+            .split_dwarf_filename(tcx.sess.split_debuginfo(), Some(codegen_unit_name))
+    } else {
+        None
+    }
+    .unwrap_or_default();
+    let out_dir = out_dir.to_str().unwrap();
+    let split_name = split_name.to_str().unwrap();
 
     // FIXME(#60020):
     //
@@ -1020,8 +1028,8 @@ pub fn compile_unit_metadata(
             debug_context.builder,
             name_in_debuginfo.as_ptr().cast(),
             name_in_debuginfo.len(),
-            work_dir.as_ptr().cast(),
-            work_dir.len(),
+            out_dir.as_ptr().cast(),
+            out_dir.len(),
             llvm::ChecksumKind::None,
             ptr::null(),
             0,
@@ -1039,6 +1047,8 @@ pub fn compile_unit_metadata(
             split_name.as_ptr().cast(),
             split_name.len(),
             kind,
+            0,
+            tcx.sess.opts.debugging_opts.split_dwarf_inlining,
         );
 
         if tcx.sess.opts.debugging_opts.profile {
@@ -1409,10 +1419,11 @@ fn generator_layout_and_saved_local_names(
 
     let state_arg = mir::Local::new(1);
     for var in &body.var_debug_info {
-        if var.place.local != state_arg {
+        let place = if let mir::VarDebugInfoContents::Place(p) = var.value { p } else { continue };
+        if place.local != state_arg {
             continue;
         }
-        match var.place.projection[..] {
+        match place.projection[..] {
             [
                 // Deref of the `Pin<&mut Self>` state argument.
                 mir::ProjectionElem::Field(..),
@@ -1823,8 +1834,9 @@ impl<'tcx> VariantInfo<'_, 'tcx> {
     fn source_info(&self, cx: &CodegenCx<'ll, 'tcx>) -> Option<SourceInfo<'ll>> {
         match self {
             VariantInfo::Generator { def_id, variant_index, .. } => {
-                let span =
-                    cx.tcx.generator_layout(*def_id).variant_source_info[*variant_index].span;
+                let span = cx.tcx.generator_layout(*def_id).unwrap().variant_source_info
+                    [*variant_index]
+                    .span;
                 if !span.is_dummy() {
                     let loc = cx.lookup_debug_loc(span.lo());
                     return Some(SourceInfo {
@@ -2313,13 +2325,13 @@ fn set_members_of_composite_type(
             DIB(cx),
             composite_type_metadata,
             Some(type_array),
-            type_params,
+            Some(type_params),
         );
     }
 }
 
 /// Computes the type parameters for a type, if any, for the given metadata.
-fn compute_type_parameters(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -> Option<&'ll DIArray> {
+fn compute_type_parameters(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -> &'ll DIArray {
     if let ty::Adt(def, substs) = *ty.kind() {
         if substs.types().next().is_some() {
             let generics = cx.tcx.generics_of(def.did);
@@ -2349,10 +2361,10 @@ fn compute_type_parameters(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -> Option<&'
                 })
                 .collect();
 
-            return Some(create_DIArray(DIB(cx), &template_params[..]));
+            return create_DIArray(DIB(cx), &template_params[..]);
         }
     }
-    return Some(create_DIArray(DIB(cx), &[]));
+    return create_DIArray(DIB(cx), &[]);
 
     fn get_parameter_names(cx: &CodegenCx<'_, '_>, generics: &ty::Generics) -> Vec<Symbol> {
         let mut names = generics

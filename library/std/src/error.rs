@@ -42,8 +42,6 @@ use crate::string;
 /// via [`Error::source()`]. This makes it possible for the high-level
 /// module to provide its own errors while also revealing some of the
 /// implementation for debugging via `source` chains.
-///
-/// [`Result<T, E>`]: Result
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Error: Debug + Display {
     /// The lower-level source of this error, if any.
@@ -485,6 +483,27 @@ impl<T: Error> Error for Box<T> {
 
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Error::source(&**self)
+    }
+}
+
+#[stable(feature = "error_by_ref", since = "1.51.0")]
+impl<'a, T: Error + ?Sized> Error for &'a T {
+    #[allow(deprecated, deprecated_in_future)]
+    fn description(&self) -> &str {
+        Error::description(&**self)
+    }
+
+    #[allow(deprecated)]
+    fn cause(&self) -> Option<&dyn Error> {
+        Error::cause(&**self)
+    }
+
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Error::source(&**self)
+    }
+
+    fn backtrace(&self) -> Option<&Backtrace> {
+        Error::backtrace(&**self)
     }
 }
 

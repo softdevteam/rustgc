@@ -404,6 +404,8 @@ impl String {
     /// s.push('a');
     /// ```
     #[inline]
+    #[doc(alias = "alloc")]
+    #[doc(alias = "malloc")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn with_capacity(capacity: usize) -> String {
         String { vec: Vec::with_capacity(capacity) }
@@ -971,7 +973,7 @@ impl String {
         self.vec.try_reserve(additional)
     }
 
-    /// Tries to reserves the minimum capacity for exactly `additional` more elements to
+    /// Tries to reserve the minimum capacity for exactly `additional` more elements to
     /// be inserted in the given `String`. After calling `reserve_exact`,
     /// capacity will be greater than or equal to `self.len() + additional`.
     /// Does nothing if the capacity is already sufficient.
@@ -1035,8 +1037,7 @@ impl String {
     /// The capacity will remain at least as large as both the length
     /// and the supplied value.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
+    /// If the current capacity is less than the lower limit, this is a no-op.
     ///
     /// # Examples
     ///
@@ -1389,6 +1390,7 @@ impl String {
     /// assert_eq!(fancy_f.len(), 4);
     /// assert_eq!(fancy_f.chars().count(), 3);
     /// ```
+    #[doc(alias = "length")]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> usize {
@@ -1553,18 +1555,25 @@ impl String {
         // Replace_range does not have the memory safety issues of a vector Splice.
         // of the vector version. The data is just plain bytes.
 
-        match range.start_bound() {
+        // WARNING: Inlining this variable would be unsound (#81138)
+        let start = range.start_bound();
+        match start {
             Included(&n) => assert!(self.is_char_boundary(n)),
             Excluded(&n) => assert!(self.is_char_boundary(n + 1)),
             Unbounded => {}
         };
-        match range.end_bound() {
+        // WARNING: Inlining this variable would be unsound (#81138)
+        let end = range.end_bound();
+        match end {
             Included(&n) => assert!(self.is_char_boundary(n + 1)),
             Excluded(&n) => assert!(self.is_char_boundary(n)),
             Unbounded => {}
         };
 
-        unsafe { self.as_mut_vec() }.splice(range, replace_with.bytes());
+        // Using `range` again would be unsound (#81138)
+        // We assume the bounds reported by `range` remain the same, but
+        // an adversarial implementation could change between calls
+        unsafe { self.as_mut_vec() }.splice((start, end), replace_with.bytes());
     }
 
     /// Converts this `String` into a [`Box`]`<`[`str`]`>`.

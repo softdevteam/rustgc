@@ -15,7 +15,6 @@
 use crate::build::matches::{Ascription, Binding, Candidate, MatchPair};
 use crate::build::Builder;
 use crate::thir::{self, *};
-use rustc_attr::{SignedInt, UnsignedInt};
 use rustc_hir::RangeEnd;
 use rustc_middle::mir::Place;
 use rustc_middle::ty;
@@ -55,7 +54,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // * the bindings from the previous iteration of the loop is prepended to the bindings from
         // the current iteration (in the implementation this is done by mem::swap and extend)
         // * after all iterations, these new bindings are then appended to the bindings that were
-        // prexisting (i.e. `candidate.binding` when the function was called).
+        // preexisting (i.e. `candidate.binding` when the function was called).
         //
         // example:
         // candidate.bindings = [1, 2, 3]
@@ -203,13 +202,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         (Some(('\u{0000}' as u128, '\u{10FFFF}' as u128, Size::from_bits(32))), 0)
                     }
                     ty::Int(ity) => {
-                        let size = Integer::from_attr(&tcx, SignedInt(ity)).size();
+                        let size = Integer::from_int_ty(&tcx, ity).size();
                         let max = size.truncate(u128::MAX);
                         let bias = 1u128 << (size.bits() - 1);
                         (Some((0, max, size)), bias)
                     }
                     ty::Uint(uty) => {
-                        let size = Integer::from_attr(&tcx, UnsignedInt(uty)).size();
+                        let size = Integer::from_uint_ty(&tcx, uty).size();
                         let max = size.truncate(u128::MAX);
                         (Some((0, max, size)), 0)
                     }
