@@ -739,6 +739,22 @@ impl<'tcx> ty::TyS<'tcx> {
         tcx_at.is_conservative_raw(param_env.and(self))
     }
 
+    pub fn needs_tracing(
+        &'tcx self,
+        tcx_at: TyCtxtAt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+    ) -> bool {
+        self.is_conservative(tcx_at, param_env) || !self.is_no_trace(tcx_at, param_env)
+    }
+
+    pub fn can_trace_precisely(
+        &'tcx self,
+        tcx_at: TyCtxtAt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+    ) -> bool {
+        !self.is_conservative(tcx_at, param_env)
+    }
+
     /// Fast path helper for testing if a type is `Freeze`.
     ///
     /// Returning true means the type is known to be `Freeze`. Returning

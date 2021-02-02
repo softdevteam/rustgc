@@ -61,6 +61,12 @@ crate fn eval_nullary_intrinsic<'tcx>(
             let alloc = type_name::alloc_type_name(tcx, tp_ty);
             ConstValue::Slice { data: alloc, start: 0, end: alloc.len() }
         }
+        sym::needs_tracing => {
+            ConstValue::from_bool(tp_ty.needs_tracing(tcx.at(rustc_span::DUMMY_SP), param_env))
+        }
+        sym::can_trace_precisely => ConstValue::from_bool(
+            tp_ty.can_trace_precisely(tcx.at(rustc_span::DUMMY_SP), param_env),
+        ),
         sym::needs_drop => ConstValue::from_bool(tp_ty.needs_drop(tcx, param_env)),
         sym::needs_finalizer => ConstValue::from_bool(tp_ty.needs_finalizer(tcx, param_env)),
         sym::gc_layout => {
@@ -164,6 +170,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             }
 
             sym::min_align_of
+            | sym::needs_tracing
+            | sym::can_trace_precisely
             | sym::pref_align_of
             | sym::needs_drop
             | sym::needs_finalizer
@@ -176,8 +184,10 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     sym::min_align_of | sym::pref_align_of | sym::variant_count => {
                         self.tcx.types.usize
                     }
-                    sym::needs_drop => self.tcx.types.bool,
-                    sym::needs_finalizer => self.tcx.types.bool,
+                    sym::needs_tracing
+                    | sym::can_trace_precisely
+                    | sym::needs_drop
+                    | sym::needs_finalizer => self.tcx.types.bool,
                     sym::gc_layout => self.tcx.mk_imm_ref(
                         self.tcx.lifetimes.re_static,
                         self.tcx.mk_slice(self.tcx.types.u64),

@@ -59,10 +59,12 @@ fn equate_intrinsic_type<'tcx>(
 pub fn intrinsic_operation_unsafety(intrinsic: Symbol) -> hir::Unsafety {
     match intrinsic {
         sym::abort
+        | sym::can_trace_precisely
         | sym::size_of
         | sym::min_align_of
         | sym::needs_drop
         | sym::needs_finalizer
+        | sym::needs_tracing
         | sym::gc_layout
         | sym::caller_location
         | sym::add_with_overflow
@@ -171,6 +173,8 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>) {
                 tcx.mk_unit(),
             ),
             sym::drop_in_place => (1, vec![tcx.mk_mut_ptr(param(0))], tcx.mk_unit()),
+            sym::needs_tracing => (1, Vec::new(), tcx.types.bool),
+            sym::can_trace_precisely => (1, Vec::new(), tcx.types.bool),
             sym::needs_drop => (1, Vec::new(), tcx.types.bool),
             sym::needs_finalizer => (1, Vec::new(), tcx.types.bool),
             sym::gc_layout => (

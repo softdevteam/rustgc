@@ -1091,6 +1091,14 @@ extern "rust-intrinsic" {
     #[cfg(not(bootstrap))]
     pub fn gc_layout<T>() -> &'static [u64];
 
+    #[rustc_const_unstable(feature = "gc", issue = "none")]
+    #[cfg(not(bootstrap))]
+    pub fn needs_tracing<T>() -> bool;
+
+    #[rustc_const_unstable(feature = "gc", issue = "none")]
+    #[cfg(not(bootstrap))]
+    pub fn can_trace_precisely<T>() -> bool;
+
     /// Calculates the offset from a pointer.
     ///
     /// This is implemented as an intrinsic to avoid converting to and from an
