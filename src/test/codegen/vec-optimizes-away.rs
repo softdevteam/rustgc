@@ -1,4 +1,3 @@
-// ignore-test
 // ignore-debug: the debug assertions get in the way
 // no-system-llvm
 // compile-flags: -O
