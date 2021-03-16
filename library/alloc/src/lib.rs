@@ -148,6 +148,11 @@ extern crate std;
 #[cfg(test)]
 extern crate test;
 
+extern crate allocator as gc_alloc;
+
+#[unstable(feature = "gc", issue = "none")]
+pub use gc_alloc::GcAllocator;
+
 // Module with internal macros used by other modules (needs to be included before other modules).
 #[macro_use]
 mod macros;
